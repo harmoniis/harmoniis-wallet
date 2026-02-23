@@ -1,0 +1,78 @@
+[package]
+name        = "harmoniis-wallet"
+version     = "0.1.0"
+edition     = "2021"
+rust-version = "1.70"
+description = "RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace (Witness-backed bearer state + Webcash fees)"
+license     = "MIT"
+homepage    = "https://harmoniis.com"
+repository  = "https://github.com/harmoniis/harmoniis-wallet"
+documentation = "https://docs.rs/harmoniis-wallet"
+readme      = "README.md"
+keywords    = ["harmoniis", "rgb", "webcash", "smart-contracts", "wallet"]
+categories  = ["cryptography", "cryptography::cryptocurrencies", "command-line-utilities"]
+include     = [
+    "src/**/*",
+    "tests/**/*",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+]
+
+[lib]
+name = "harmoniis_wallet"
+
+[[bin]]
+name = "hrmw"
+path = "src/bin/hrmw.rs"
+
+# ── Feature flags ──────────────────────────────────────────────────────────────
+[features]
+# Bundle SQLite from source — enables `cargo install` without system libsqlite3.
+# Disable with `default-features = false` to link against the system library instead.
+default = ["bundled-sqlite"]
+bundled-sqlite = ["rusqlite/bundled"]
+
+# DORMANT — Phase 3 security tokens (ContractBasket, Bond, RevenueShare).
+# Do NOT enable in production. Dependency order:
+#   Phase 1 (live)    — RGB21 Contract + Certificate
+#   Phase 2 (sandbox) — RGB20 Stablecash / USDH
+#   Phase 3 (dormant) — securities (this feature)
+securities = []
+
+# ── Dependencies ───────────────────────────────────────────────────────────────
+[dependencies]
+# Core
+anyhow      = "1.0"
+thiserror   = "2"
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+
+# Cryptography
+sha2        = "0.10"
+hex         = "0.4"
+rand        = "0.8"
+rand_core   = "0.6"
+zeroize     = { version = "1.8", features = ["derive"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+curve25519-dalek = "4"
+x25519-dalek = "2"
+chacha20poly1305 = "0.10"
+
+# Storage
+rusqlite    = { version = "0.37" }   # bundled-sqlite feature adds rusqlite/bundled
+
+# Networking (rustls: no OpenSSL dependency — cross-platform)
+reqwest     = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+tokio       = { version = "1", features = ["full"] }
+
+# CLI
+clap        = { version = "4", features = ["derive"] }
+dirs-next   = "2"
+
+# Time
+chrono      = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio    = { version = "1", features = ["full"] }
