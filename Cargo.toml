@@ -73,7 +73,7 @@ dirs-next   = "2"
 
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
-webylib     = { path = "../harmoniis/backend/webylib" }
+webylib     = { version = "0.1.0", path = "../harmoniis/backend/webylib" }
 
 [dev-dependencies]
 tempfile = "3"
