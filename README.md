@@ -19,23 +19,28 @@ hrmw setup
 hrmw info
 
 # Register on the network
-hrmw identity register --nick alice --webcash "e1.0:secret:..."
+hrmw identity register --nick alice
 
 # Claim a donation for this wallet keypair
+# (automatically inserted into local webcash wallet)
 hrmw donation claim
 
+# Inspect and fund Webcash wallet
+hrmw webcash info
+hrmw webcash insert "e1.0:secret:..."
+hrmw webcash check
+
 # Publish a post/comment and rate
-hrmw timeline post --content "Service offer" --post-type service_offer --webcash "e1.0:secret:..."
-hrmw timeline comment --post POST_xyz --content "Interested" --webcash "e1.0:secret:..."
-hrmw timeline rate --post POST_xyz --vote up --webcash "e1.0:secret:..."
+hrmw timeline post --content "Service offer" --post-type service_offer
+hrmw timeline comment --post POST_xyz --content "Interested"
+hrmw timeline rate --post POST_xyz --vote up
 
 # Buy a contract (buyer)
 hrmw contract buy --post POST_xyz \
-  --amount 1.0 --type service \
-  --webcash "e1.0:secret:..."
+  --amount 1.0 --type service
 
 # Post a bid (buyer)
-hrmw contract bid --post POST_xyz --contract CTR_abc --webcash "e0.1:secret:..."
+hrmw contract bid --post POST_xyz --contract CTR_abc
 
 # Accept bid (seller)
 hrmw contract accept --id CTR_abc
@@ -47,7 +52,7 @@ hrmw contract replace --id CTR_abc
 hrmw contract deliver --id CTR_abc --text "Here is your haiku..."
 
 # Pick up work (buyer, pays 3% fee)
-hrmw contract pickup --id CTR_abc --webcash "e0.03:secret:..."
+hrmw contract pickup --id CTR_abc
 
 # Check witness proof status
 hrmw contract check --id CTR_abc
@@ -57,6 +62,7 @@ hrmw --api http://localhost:9001 --direct info
 ```
 
 Default wallet: `~/.harmoniis/wallet.db`
+Webcash wallet: `~/.harmoniis/webcash.db`
 Default API: `https://harmoniis.com/api`
 
 ## Building
@@ -74,9 +80,8 @@ cargo test --test unit_tests  # run unit tests (24 tests)
 
 ```bash
 HARMONIIS_API_URL=http://localhost:9001 \
-  TEST_WEBCASH_BUYER="e1.0:secret:..." \
-  TEST_WEBCASH_SELLER="e1.0:secret:..." \
-  TEST_WEBCASH_FEE="e0.1:secret:..." \
+  TEST_WEBCASH_BUYER_SEED="e1.0:secret:..." \
+  TEST_WEBCASH_SELLER_SEED="e1.0:secret:..." \
   cargo test --test integration_flow -- --nocapture --include-ignored
 ```
 

@@ -68,6 +68,7 @@ impl HarmoniisClient {
     fn with_base(api_base: String) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .no_proxy()
             .build()
             .expect("failed to build HTTP client");
         Self { api_base, http }

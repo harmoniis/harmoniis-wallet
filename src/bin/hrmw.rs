@@ -9,6 +9,7 @@
 //!   check   → verify a contract is still live with the Witness
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -25,7 +26,10 @@ use harmoniis_wallet::{
     wallet::RgbWallet,
     Identity,
 };
+use hkdf::Hkdf;
 use rand::Rng;
+use sha2::Sha256;
+use webylib::{Amount as WebcashAmount, SecretWebcash, Wallet as WebcashWallet};
 
 const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
@@ -42,6 +46,91 @@ fn open_or_create_wallet(path: &std::path::Path) -> anyhow::Result<RgbWallet> {
     } else {
         RgbWallet::create(path).context("failed to create wallet")
     }
+}
+
+fn default_webcash_wallet_path(rgb_wallet_path: &std::path::Path) -> PathBuf {
+    let base_dir = rgb_wallet_path
+        .parent()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base_dir.join("webcash.db")
+}
+
+fn derive_webcash_master_secret_hex(identity: &Identity) -> anyhow::Result<String> {
+    let root_key =
+        hex::decode(identity.private_key_hex()).context("invalid root private key hex")?;
+    let hk = Hkdf::<Sha256>::new(None, &root_key);
+    let mut output = [0u8; 32];
+    hk.expand(b"harmoniis/hrmw/webcash/master/v1|chain:3", &mut output)
+        .map_err(|_| anyhow::anyhow!("failed to derive webcash master secret"))?;
+    Ok(hex::encode(output))
+}
+
+async fn open_webcash_wallet(
+    rgb_wallet_path: &std::path::Path,
+    identity: &Identity,
+) -> anyhow::Result<WebcashWallet> {
+    let webcash_path = default_webcash_wallet_path(rgb_wallet_path);
+    let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
+        format!(
+            "failed to open webcash wallet at {}",
+            webcash_path.display()
+        )
+    })?;
+    let master_secret = derive_webcash_master_secret_hex(identity)?;
+    webcash_wallet
+        .store_master_secret(&master_secret)
+        .await
+        .context("failed to store deterministic webcash master secret")?;
+    Ok(webcash_wallet)
+}
+
+fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {
+    let trimmed = payment_output.trim();
+    if trimmed.starts_with('e') && trimmed.contains(":secret:") {
+        return Ok(trimmed.to_string());
+    }
+    if let Some((_, right)) = trimmed.rsplit_once("recipient:") {
+        let token = right.trim();
+        if token.starts_with('e') && token.contains(":secret:") {
+            return Ok(token.to_string());
+        }
+    }
+    anyhow::bail!("failed to extract webcash secret from payment output: {trimmed}");
+}
+
+fn required_amount_from_api_error(err: &anyhow::Error) -> Option<String> {
+    if let Some(herr) = err.downcast_ref::<harmoniis_wallet::error::Error>() {
+        if let harmoniis_wallet::error::Error::Api { status, body } = herr {
+            if *status == 402 {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                    if let Some(req) = v.get("required_amount").and_then(|x| x.as_str()) {
+                        return Some(req.to_string());
+                    }
+                    if let Some(req) = v.get("amount").and_then(|x| x.as_str()) {
+                        return Some(req.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn pay_from_wallet(
+    rgb_wallet_path: &std::path::Path,
+    identity: &Identity,
+    amount: &str,
+    memo: &str,
+) -> anyhow::Result<String> {
+    let webcash_wallet = open_webcash_wallet(rgb_wallet_path, identity).await?;
+    let parsed_amount = WebcashAmount::from_str(amount)
+        .with_context(|| format!("invalid webcash amount '{amount}'"))?;
+    let payment_output = webcash_wallet
+        .pay(parsed_amount, memo)
+        .await
+        .with_context(|| format!("failed to create wallet payment for {memo}"))?;
+    extract_webcash_secret(&payment_output)
 }
 
 fn make_client(api: &str, direct: bool) -> HarmoniisClient {
@@ -133,9 +222,10 @@ Wallet database: ~/.harmoniis/wallet.db (override with --wallet)\n\
 \n\
 Examples:\n\
   hrmw setup\n\
-  hrmw identity register --nick alice --webcash 'e0.6:secret:...'\n\
-  hrmw contract buy --post POST_xyz --amount 1.0 --type service \\\n\
-      --webcash 'e0.3:secret:...'\n\
+  hrmw webcash info\n\
+  hrmw webcash insert 'e1.0:secret:<hex>'\n\
+  hrmw identity register --nick alice\n\
+  hrmw contract buy --post POST_xyz --amount 1.0 --type service\n\
   hrmw contract insert 'n:CTR_2026_001:secret:<hex>'\n\
   hrmw contract replace --id CTR_2026_001\n\
   hrmw contract list\n\
@@ -172,6 +262,10 @@ enum Cmd {
     #[command(subcommand)]
     Donation(DonationCmd),
 
+    /// Webcash wallet operations
+    #[command(subcommand)]
+    Webcash(WebcashCmd),
+
     /// Identity operations
     #[command(subcommand)]
     Identity(IdentityCmd),
@@ -198,13 +292,43 @@ enum DonationCmd {
 }
 
 #[derive(Subcommand)]
+enum WebcashCmd {
+    /// Show Webcash balance and output counts
+    Info,
+    /// Insert a secret webcash token into the local wallet
+    Insert {
+        /// Webcash secret token: e<amount>:secret:<hex>
+        secret: String,
+    },
+    /// Create a spend token from the local wallet
+    Pay {
+        /// Amount in webcash decimal (e.g. 0.3)
+        #[arg(long)]
+        amount: String,
+        /// Optional memo
+        #[arg(long, default_value = "hrmw payment")]
+        memo: String,
+    },
+    /// Verify unspent outputs against the Webcash server
+    Check,
+    /// Recover wallet outputs from deterministic master secret
+    Recover {
+        #[arg(long, default_value_t = 20)]
+        gap_limit: usize,
+    },
+    /// Consolidate many outputs into fewer outputs
+    Merge {
+        #[arg(long, default_value_t = 20)]
+        group: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum IdentityCmd {
     /// Register this wallet's identity on the Harmoniis network
     Register {
         #[arg(long)]
         nick: String,
-        #[arg(long)]
-        webcash: String,
         #[arg(long)]
         about: Option<String>,
     },
@@ -220,9 +344,6 @@ enum TimelineCmd {
         /// Post type (e.g. general, service_offer)
         #[arg(long, default_value = "general")]
         post_type: String,
-        /// Webcash to pay post fee
-        #[arg(long)]
-        webcash: String,
         /// Optional comma-separated keywords
         #[arg(long)]
         keywords: Option<String>,
@@ -236,9 +357,6 @@ enum TimelineCmd {
         /// Comment content
         #[arg(long)]
         content: String,
-        /// Webcash to pay comment fee
-        #[arg(long)]
-        webcash: String,
     },
 
     /// Rate a post/comment (up/down)
@@ -249,9 +367,6 @@ enum TimelineCmd {
         /// Vote: up|down
         #[arg(long, default_value = "up")]
         vote: String,
-        /// Webcash to pay rating fee
-        #[arg(long)]
-        webcash: String,
     },
 }
 
@@ -297,9 +412,6 @@ enum ContractCmd {
         /// Contract value in decimal webcash units (e.g. "1.5")
         #[arg(long)]
         amount: String,
-        /// Webcash secret to pay the contract fee
-        #[arg(long)]
-        webcash: String,
         /// Contract type: service | product_digital | product_physical
         #[arg(long, default_value = "service")]
         r#type: String,
@@ -318,9 +430,6 @@ enum ContractCmd {
         /// Contract ID (must be in wallet)
         #[arg(long)]
         contract: String,
-        /// Webcash to pay the reply fee
-        #[arg(long)]
-        webcash: String,
         /// Bid message (default: "Bid on contract {id}")
         #[arg(long, default_value = "")]
         content: String,
@@ -362,9 +471,6 @@ enum ContractCmd {
     Pickup {
         #[arg(long)]
         id: String,
-        /// Webcash to pay the 3% pickup fee
-        #[arg(long)]
-        webcash: String,
     },
 
     /// Request a refund (buyer, before acceptance or after expiry).
@@ -433,6 +539,13 @@ async fn main() -> anyhow::Result<()> {
         // ── info ──────────────────────────────────────────────────────────────
         Cmd::Info => {
             let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_balance = webcash_wallet
+                .balance()
+                .await
+                .unwrap_or_else(|_| "0".to_string());
+            let webcash_stats = webcash_wallet.stats().await.ok();
             println!("Fingerprint:   {}", wallet.fingerprint()?);
             match wallet.nickname()? {
                 Some(nick) => println!("Nickname:      {nick}"),
@@ -445,6 +558,14 @@ async fn main() -> anyhow::Result<()> {
                 .count();
             println!("Contracts:     {} ({} held)", contracts.len(), held);
             println!("Certificates:  {}", wallet.list_certificates()?.len());
+            if let Some(stats) = webcash_stats {
+                println!(
+                    "Webcash:       {} ({} outputs)",
+                    webcash_balance, stats.unspent_webcash
+                );
+            } else {
+                println!("Webcash:       {webcash_balance}");
+            }
             println!(
                 "API:           {} ({})",
                 api,
@@ -465,8 +586,18 @@ async fn main() -> anyhow::Result<()> {
             match resp.status.as_str() {
                 "donated" => {
                     if let Some(secret) = resp.webcash_secret {
+                        let webcash_wallet = open_webcash_wallet(&wallet_path, &id).await?;
+                        let parsed = SecretWebcash::parse(&secret)
+                            .map_err(|e| anyhow::anyhow!("invalid donated webcash format: {e}"))?;
+                        webcash_wallet
+                            .insert(parsed)
+                            .await
+                            .context("failed to insert donated webcash into wallet")?;
                         println!("Donation claimed.");
-                        println!("Webcash: {secret}");
+                        println!(
+                            "Inserted into wallet: {}",
+                            default_webcash_wallet_path(&wallet_path).display()
+                        );
                     } else {
                         anyhow::bail!("donation response missing webcash_secret");
                     }
@@ -487,26 +618,115 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // ── webcash ───────────────────────────────────────────────────────────
+        Cmd::Webcash(WebcashCmd::Info) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let balance = webcash_wallet.balance().await?;
+            let stats = webcash_wallet.stats().await?;
+            println!(
+                "Webcash wallet: {}",
+                default_webcash_wallet_path(&wallet_path).display()
+            );
+            println!("Balance:        {}", balance);
+            println!("Unspent:        {}", stats.unspent_webcash);
+            println!("Total outputs:  {}", stats.total_webcash);
+            println!("Spent outputs:  {}", stats.spent_webcash);
+        }
+
+        Cmd::Webcash(WebcashCmd::Insert { secret }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let parsed = SecretWebcash::parse(&secret)
+                .map_err(|e| anyhow::anyhow!("invalid webcash secret format: {e}"))?;
+            webcash_wallet
+                .insert(parsed)
+                .await
+                .context("failed to insert webcash")?;
+            let balance = webcash_wallet.balance().await?;
+            println!(
+                "Inserted webcash into {}",
+                default_webcash_wallet_path(&wallet_path).display()
+            );
+            println!("Balance: {balance}");
+        }
+
+        Cmd::Webcash(WebcashCmd::Pay { amount, memo }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let parsed_amount = WebcashAmount::from_str(&amount)
+                .with_context(|| format!("invalid webcash amount '{amount}'"))?;
+            let output = webcash_wallet
+                .pay(parsed_amount, &memo)
+                .await
+                .context("failed to create payment")?;
+            let token = extract_webcash_secret(&output)?;
+            println!("Payment token:");
+            println!("{token}");
+        }
+
+        Cmd::Webcash(WebcashCmd::Check) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            webcash_wallet
+                .check()
+                .await
+                .context("webcash check failed")?;
+            println!("Webcash check passed.");
+        }
+
+        Cmd::Webcash(WebcashCmd::Recover { gap_limit }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let summary = webcash_wallet
+                .recover_from_wallet(gap_limit)
+                .await
+                .context("webcash recovery failed")?;
+            println!("{summary}");
+        }
+
+        Cmd::Webcash(WebcashCmd::Merge { group }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let summary = webcash_wallet
+                .merge(group)
+                .await
+                .context("webcash merge failed")?;
+            println!("{summary}");
+        }
+
         // ── identity register ─────────────────────────────────────────────────
-        Cmd::Identity(IdentityCmd::Register {
-            nick,
-            webcash,
-            about,
-        }) => {
+        Cmd::Identity(IdentityCmd::Register { nick, about }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
-            let sig = id.sign(&format!("register:{nick}"));
-            let fp = make_client(api, direct)
-                .register_identity(
-                    &RegisterRequest {
-                        nickname: nick.clone(),
-                        pgp_public_key: id.public_key_hex(),
-                        signature: sig,
-                        about,
-                    },
-                    &webcash,
-                )
-                .await?;
+            let client = make_client(api, direct);
+            let req = RegisterRequest {
+                nickname: nick.clone(),
+                pgp_public_key: id.public_key_hex(),
+                signature: id.sign(&format!("register:{nick}")),
+                about,
+            };
+            let preflight = client.register_identity(&req, "").await;
+            let fp = match preflight {
+                Ok(fp) => fp,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.6".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &id, &required, "identity register").await?;
+                    client
+                        .register_identity(&req, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
             wallet.set_nickname(&nick)?;
             println!("Registered as '{nick}'. Fingerprint: {fp}");
         }
@@ -515,7 +735,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Timeline(TimelineCmd::Post {
             content,
             post_type,
-            webcash,
             keywords,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
@@ -550,85 +769,104 @@ async fn main() -> anyhow::Result<()> {
                     attachment_type: "text/markdown".to_string(),
                 }]
             };
-            let post_id = make_client(api, direct)
-                .publish_post(
-                    &PublishPostRequest {
-                        author_fingerprint: fp,
-                        author_nick: nick,
-                        content: content.clone(),
-                        post_type: normalized_post_type,
-                        witness_proof: None,
-                        contract_id: None,
-                        parent_id: None,
-                        keywords: parse_keywords_csv(keywords.as_deref()),
-                        attachments,
-                        signature: id.sign(&format!("post:{content}")),
-                    },
-                    &webcash,
-                )
-                .await?;
+            let client = make_client(api, direct);
+            let req = PublishPostRequest {
+                author_fingerprint: fp,
+                author_nick: nick,
+                content: content.clone(),
+                post_type: normalized_post_type,
+                witness_proof: None,
+                contract_id: None,
+                parent_id: None,
+                keywords: parse_keywords_csv(keywords.as_deref()),
+                attachments,
+                signature: id.sign(&format!("post:{content}")),
+            };
+            let post_id = match client.publish_post(&req, "").await {
+                Ok(post_id) => post_id,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.3".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &id, &required, "timeline post").await?;
+                    client
+                        .publish_post(&req, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
             println!("Post published: {post_id}");
         }
 
         // ── timeline comment ──────────────────────────────────────────────────
-        Cmd::Timeline(TimelineCmd::Comment {
-            post,
-            content,
-            webcash,
-        }) => {
+        Cmd::Timeline(TimelineCmd::Comment { post, content }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
             let nick = wallet.nickname()?.ok_or_else(|| {
                 anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
             })?;
-            let comment_id = make_client(api, direct)
-                .publish_post(
-                    &PublishPostRequest {
-                        author_fingerprint: fp,
-                        author_nick: nick,
-                        content: content.clone(),
-                        post_type: "comment".to_string(),
-                        witness_proof: None,
-                        contract_id: None,
-                        parent_id: Some(post),
-                        keywords: vec!["comment".to_string()],
-                        attachments: vec![PostAttachment {
-                            filename: "comment.md".to_string(),
-                            content: format!("# Comment\n\n{}", content),
-                            attachment_type: "text/markdown".to_string(),
-                        }],
-                        signature: id.sign(&format!("post:{content}")),
-                    },
-                    &webcash,
-                )
-                .await?;
+            let client = make_client(api, direct);
+            let req = PublishPostRequest {
+                author_fingerprint: fp,
+                author_nick: nick,
+                content: content.clone(),
+                post_type: "comment".to_string(),
+                witness_proof: None,
+                contract_id: None,
+                parent_id: Some(post),
+                keywords: vec!["comment".to_string()],
+                attachments: vec![PostAttachment {
+                    filename: "comment.md".to_string(),
+                    content: format!("# Comment\n\n{}", content),
+                    attachment_type: "text/markdown".to_string(),
+                }],
+                signature: id.sign(&format!("post:{content}")),
+            };
+            let comment_id = match client.publish_post(&req, "").await {
+                Ok(comment_id) => comment_id,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.01".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &id, &required, "timeline comment").await?;
+                    client
+                        .publish_post(&req, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
             println!("Comment published: {comment_id}");
         }
 
         // ── timeline rate ─────────────────────────────────────────────────────
-        Cmd::Timeline(TimelineCmd::Rate {
-            post,
-            vote,
-            webcash,
-        }) => {
+        Cmd::Timeline(TimelineCmd::Rate { post, vote }) => {
             let vote = vote.to_lowercase();
             if vote != "up" && vote != "down" {
                 anyhow::bail!("vote must be 'up' or 'down'");
             }
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
-            make_client(api, direct)
-                .rate_post(
-                    &RatePostRequest {
-                        post_id: post.clone(),
-                        actor_fingerprint: id.fingerprint(),
-                        vote: vote.clone(),
-                        signature: id.sign(&format!("vote:{post}:{vote}")),
-                    },
-                    &webcash,
-                )
-                .await?;
+            let client = make_client(api, direct);
+            let req = RatePostRequest {
+                post_id: post.clone(),
+                actor_fingerprint: id.fingerprint(),
+                vote: vote.clone(),
+                signature: id.sign(&format!("vote:{post}:{vote}")),
+            };
+            if let Err(err) = client.rate_post(&req, "").await {
+                let err = anyhow::Error::from(err);
+                let required =
+                    required_amount_from_api_error(&err).unwrap_or_else(|| "0.001".to_string());
+                let payment =
+                    pay_from_wallet(&wallet_path, &id, &required, "timeline rate").await?;
+                client
+                    .rate_post(&req, &payment)
+                    .await
+                    .map_err(anyhow::Error::from)?;
+            }
             println!("Rated post {post}: {vote}");
         }
 
@@ -737,7 +975,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Contract(ContractCmd::Buy {
             post,
             amount,
-            webcash,
             r#type,
             contract_id,
         }) => {
@@ -783,23 +1020,32 @@ async fn main() -> anyhow::Result<()> {
                 witness_proof.display()
             ));
 
-            let buy_response = client
-                .buy_contract(
-                    &BuyRequest {
-                        buyer_fingerprint: fp.clone(),
-                        buyer_public_key: id.public_key_hex(),
-                        contract_type: r#type.clone(),
-                        amount: amount.clone(),
-                        contract_id: local_contract_id.clone(),
-                        witness_proof: witness_proof.display(),
-                        encrypted_witness_secret,
-                        witness_zkp,
-                        reference_post: post.clone(),
-                        signature: sig,
-                    },
-                    &webcash,
-                )
-                .await?;
+            let req = BuyRequest {
+                buyer_fingerprint: fp.clone(),
+                buyer_public_key: id.public_key_hex(),
+                contract_type: r#type.clone(),
+                amount: amount.clone(),
+                contract_id: local_contract_id.clone(),
+                witness_proof: witness_proof.display(),
+                encrypted_witness_secret,
+                witness_zkp,
+                reference_post: post.clone(),
+                signature: sig,
+            };
+            let buy_response = match client.buy_contract(&req, "").await {
+                Ok(v) => v,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.5".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &id, &required, "contract buy").await?;
+                    client
+                        .buy_contract(&req, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
 
             let contract_id = buy_response
                 .get("contract_id")
@@ -892,7 +1138,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Contract(ContractCmd::Bid {
             post,
             contract,
-            webcash,
             content,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
@@ -914,27 +1159,37 @@ async fn main() -> anyhow::Result<()> {
             let nick = wallet.nickname()?.unwrap_or_default();
 
             // Only the PUBLIC PROOF is published — the secret remains in wallet
-            let post_id = make_client(api, direct)
-                .publish_post(
-                    &PublishPostRequest {
-                        author_fingerprint: fp,
-                        author_nick: nick,
-                        content: bid_content,
-                        post_type: "bid".to_string(),
-                        witness_proof: Some(proof_str),
-                        contract_id: Some(contract),
-                        parent_id: Some(post),
-                        keywords: vec!["bid".to_string()],
-                        attachments: vec![PostAttachment {
-                            filename: "bid.md".to_string(),
-                            content: "Bid commitment details".to_string(),
-                            attachment_type: "text/markdown".to_string(),
-                        }],
-                        signature: sig,
-                    },
-                    &webcash,
-                )
-                .await?;
+            let req = PublishPostRequest {
+                author_fingerprint: fp,
+                author_nick: nick,
+                content: bid_content,
+                post_type: "bid".to_string(),
+                witness_proof: Some(proof_str),
+                contract_id: Some(contract),
+                parent_id: Some(post),
+                keywords: vec!["bid".to_string()],
+                attachments: vec![PostAttachment {
+                    filename: "bid.md".to_string(),
+                    content: "Bid commitment details".to_string(),
+                    attachment_type: "text/markdown".to_string(),
+                }],
+                signature: sig,
+            };
+            let client = make_client(api, direct);
+            let post_id = match client.publish_post(&req, "").await {
+                Ok(post_id) => post_id,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.01".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &id, &required, "contract bid").await?;
+                    client
+                        .publish_post(&req, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
             println!("Bid posted: {post_id}");
         }
 
@@ -1033,14 +1288,27 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── contract pickup ───────────────────────────────────────────────────
-        Cmd::Contract(ContractCmd::Pickup { id, webcash }) => {
+        Cmd::Contract(ContractCmd::Pickup { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let identity = wallet.identity()?;
             let fp = identity.fingerprint();
             let sig = identity.sign(&id);
-            let resp = make_client(api, direct)
-                .pickup(&id, &fp, &sig, &webcash)
-                .await?;
+            let client = make_client(api, direct);
+            let resp = match client.pickup(&id, &fp, &sig, "").await {
+                Ok(v) => v,
+                Err(err) => {
+                    let err = anyhow::Error::from(err);
+                    let required =
+                        required_amount_from_api_error(&err).unwrap_or_else(|| "0.015".to_string());
+                    let payment =
+                        pay_from_wallet(&wallet_path, &identity, &required, "contract pickup")
+                            .await?;
+                    client
+                        .pickup(&id, &fp, &sig, &payment)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                }
+            };
 
             if let Some(mut c) = wallet.get_contract(&id)? {
                 c.status = ContractStatus::Burned;
