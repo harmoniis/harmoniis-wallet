@@ -13,6 +13,23 @@ _Nothing yet._
 
 ---
 
+## [0.1.2] — 2026-02-24
+
+### Added
+
+- Timeline payload attachments in `PublishPostRequest`.
+- CLI auto-adds markdown attachments for:
+  - `hrmw timeline post` (`description.md`)
+  - `hrmw timeline comment` (`comment.md`)
+  - `hrmw contract bid` (`bid.md`)
+
+### Fixed
+
+- `hrmw timeline post` now satisfies backend marketplace policy requiring descriptive `.md/.txt`
+  attachment for commercial listings.
+
+---
+
 ## [0.1.1] — 2026-02-24
 
 ### Added
@@ -82,6 +99,7 @@ _Nothing yet._
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.2
 [0.1.1]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.0

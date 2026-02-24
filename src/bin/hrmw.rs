@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use harmoniis_wallet::{
     client::{
         arbitration::{build_witness_commitment, BuyRequest},
-        timeline::{DonationClaimRequest, PublishPostRequest, RatePostRequest, RegisterRequest},
+        timeline::{DonationClaimRequest, PostAttachment, PublishPostRequest, RatePostRequest, RegisterRequest},
         HarmoniisClient,
     },
     types::{Certificate, Contract, ContractStatus, ContractType, WitnessSecret, Role},
@@ -489,6 +489,11 @@ async fn main() -> anyhow::Result<()> {
                         contract_id: None,
                         parent_id: None,
                         keywords: parse_keywords_csv(keywords.as_deref()),
+                        attachments: vec![PostAttachment {
+                            filename: "description.md".to_string(),
+                            content: format!("# Listing\n\n{}", content),
+                            attachment_type: "text/markdown".to_string(),
+                        }],
                         signature: id.sign(&format!("post:{content}")),
                     },
                     &webcash,
@@ -516,6 +521,11 @@ async fn main() -> anyhow::Result<()> {
                         contract_id: None,
                         parent_id: Some(post),
                         keywords: vec!["comment".to_string()],
+                        attachments: vec![PostAttachment {
+                            filename: "comment.md".to_string(),
+                            content: format!("# Comment\n\n{}", content),
+                            attachment_type: "text/markdown".to_string(),
+                        }],
                         signature: id.sign(&format!("post:{content}")),
                     },
                     &webcash,
@@ -819,6 +829,11 @@ async fn main() -> anyhow::Result<()> {
                         contract_id: Some(contract),
                         parent_id: Some(post),
                         keywords: vec!["bid".to_string()],
+                        attachments: vec![PostAttachment {
+                            filename: "bid.md".to_string(),
+                            content: "Bid commitment details".to_string(),
+                            attachment_type: "text/markdown".to_string(),
+                        }],
                         signature: sig,
                     },
                     &webcash,

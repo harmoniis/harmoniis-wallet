@@ -27,6 +27,13 @@ pub struct DonationClaimResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostAttachment {
+    pub filename: String,
+    pub content: String,
+    pub attachment_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishPostRequest {
     pub author_fingerprint: String,
     pub author_nick: String,
@@ -37,6 +44,8 @@ pub struct PublishPostRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<PostAttachment>,
     pub signature: String, // sign("post:{content}")
 }
 
