@@ -19,7 +19,7 @@ use harmoniis_wallet::{
         timeline::{PublishPostRequest, RegisterRequest},
         HarmoniisClient,
     },
-    types::{ContractStatus, ContractType, WitnessSecret, Role},
+    types::{ContractStatus, ContractType, Role, WitnessSecret},
     wallet::RgbWallet,
     Contract,
 };
@@ -93,7 +93,9 @@ async fn test_full_6_phase_contract_flow() {
         post_type: "service_offer".to_string(),
         witness_proof: None,
         contract_id: None,
+        parent_id: None,
         keywords: vec!["haiku".to_string(), "writing".to_string()],
+        attachments: vec![],
         signature: offer_sig,
     };
     let offer_post_id = client
@@ -107,15 +109,14 @@ async fn test_full_6_phase_contract_flow() {
     let contract_id = format!("CTR_{}_999901", chrono::Utc::now().format("%Y"));
     let witness_secret = WitnessSecret::generate(&contract_id);
     let proof = witness_secret.public_proof();
-    let (encrypted_witness_secret, witness_zkp) =
-        build_witness_commitment(
-            &witness_secret,
-            &proof,
-            &buyer_fp,
-            Some(&seller_fp),
-            Some(&seller_id.public_key_hex()),
-            |msg| buyer_id.sign(msg),
-        );
+    let (encrypted_witness_secret, witness_zkp) = build_witness_commitment(
+        &witness_secret,
+        &proof,
+        &buyer_fp,
+        Some(&seller_fp),
+        Some(&seller_id.public_key_hex()),
+        |msg| buyer_id.sign(msg),
+    );
     let sig = buyer_id.sign(&format!(
         "buy_contract:{}:{}:{}:{}",
         buyer_fp,
@@ -174,7 +175,9 @@ async fn test_full_6_phase_contract_flow() {
         post_type: "bid".to_string(),
         witness_proof: Some(proof.display()),
         contract_id: Some(contract_id.clone()),
+        parent_id: None,
         keywords: vec!["bid".to_string()],
+        attachments: vec![],
         signature: bid_sig,
     };
     let bid_post_id = client

@@ -4,7 +4,11 @@
 //! (the one you're actually talking to), then verifies locally. This mirrors
 //! how a browser checks TLS: trust the CA you know, not a cert someone hands you.
 
-use crate::{arbiter, client::HarmoniisClient, error::{Error, Result}};
+use crate::{
+    arbiter,
+    client::HarmoniisClient,
+    error::{Error, Result},
+};
 
 impl HarmoniisClient {
     /// Fetch the Arbiter Service Ed25519 public key (64-char hex) from this server.
@@ -64,8 +68,14 @@ impl HarmoniisClient {
         let pubkey = self.fetch_arbiter_pubkey().await?;
         arbiter::verify_with_pubkey(
             &pubkey,
-            contract_id, buyer_fp, amount_units, deadline,
-            contract_type, work_spec, reference_post, buyer_pk,
+            contract_id,
+            buyer_fp,
+            amount_units,
+            deadline,
+            contract_type,
+            work_spec,
+            reference_post,
+            buyer_pk,
             arbiter_signature,
         )
     }

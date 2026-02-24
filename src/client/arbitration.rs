@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
@@ -38,11 +38,7 @@ pub fn witness_commitment_message(
 ) -> String {
     format!(
         "witness_commitment:{}:{}:{}:{}:{}",
-        buyer_fingerprint,
-        contract_id,
-        public_hash,
-        ciphertext_sha256,
-        seller_fingerprint
+        buyer_fingerprint, contract_id, public_hash, ciphertext_sha256, seller_fingerprint
     )
 }
 
@@ -51,20 +47,32 @@ fn encrypt_for_seller_envelope(
     witness_secret: &WitnessSecret,
 ) -> String {
     let Some(pk_hex) = seller_public_key.map(str::trim).filter(|s| !s.is_empty()) else {
-        return format!("sealed:v1:{}", hex::encode(witness_secret.display().as_bytes()));
+        return format!(
+            "sealed:v1:{}",
+            hex::encode(witness_secret.display().as_bytes())
+        );
     };
 
     let Ok(pk_bytes) = hex::decode(pk_hex) else {
-        return format!("sealed:v1:{}", hex::encode(witness_secret.display().as_bytes()));
+        return format!(
+            "sealed:v1:{}",
+            hex::encode(witness_secret.display().as_bytes())
+        );
     };
     if pk_bytes.len() != 32 {
-        return format!("sealed:v1:{}", hex::encode(witness_secret.display().as_bytes()));
+        return format!(
+            "sealed:v1:{}",
+            hex::encode(witness_secret.display().as_bytes())
+        );
     }
 
     let mut ed_arr = [0u8; 32];
     ed_arr.copy_from_slice(&pk_bytes);
     let Some(edwards_point) = CompressedEdwardsY(ed_arr).decompress() else {
-        return format!("sealed:v1:{}", hex::encode(witness_secret.display().as_bytes()));
+        return format!(
+            "sealed:v1:{}",
+            hex::encode(witness_secret.display().as_bytes())
+        );
     };
     let seller_x25519 = edwards_point.to_montgomery().to_bytes();
 
@@ -77,7 +85,10 @@ fn encrypt_for_seller_envelope(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let Ok(ciphertext) = cipher.encrypt(nonce, witness_secret.display().as_bytes()) else {
-        return format!("sealed:v1:{}", hex::encode(witness_secret.display().as_bytes()));
+        return format!(
+            "sealed:v1:{}",
+            hex::encode(witness_secret.display().as_bytes())
+        );
     };
 
     json!({
@@ -125,7 +136,10 @@ where
 
     let mut payload = serde_json::Map::new();
     payload.insert("scheme".to_string(), json!("commitment_v1"));
-    payload.insert("contract_id".to_string(), json!(witness_secret.contract_id()));
+    payload.insert(
+        "contract_id".to_string(),
+        json!(witness_secret.contract_id()),
+    );
     payload.insert("buyer_fingerprint".to_string(), json!(buyer_fingerprint));
     payload.insert("public_hash".to_string(), json!(witness_proof.public_hash));
     payload.insert("ciphertext_sha256".to_string(), json!(ciphertext_sha256));

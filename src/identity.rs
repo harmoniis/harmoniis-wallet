@@ -20,9 +20,8 @@ impl Identity {
 
     /// Restore from 32-byte private key hex (64 chars).
     pub fn from_hex(private_key_hex: &str) -> Result<Self> {
-        let bytes = hex::decode(private_key_hex).map_err(|e| {
-            Error::InvalidFormat(format!("invalid private key hex: {e}"))
-        })?;
+        let bytes = hex::decode(private_key_hex)
+            .map_err(|e| Error::InvalidFormat(format!("invalid private key hex: {e}")))?;
         if bytes.len() != 32 {
             return Err(Error::InvalidFormat(format!(
                 "private key must be 32 bytes, got {}",

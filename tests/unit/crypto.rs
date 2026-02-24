@@ -5,7 +5,8 @@ fn secret_hex_is_64_chars_lowercase_hex() {
     let hex = generate_secret_hex();
     assert_eq!(hex.len(), 64, "secret hex must be 64 chars");
     assert!(
-        hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        hex.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
         "secret hex must be lowercase hex"
     );
 }

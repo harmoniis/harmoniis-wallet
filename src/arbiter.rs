@@ -84,8 +84,14 @@ pub fn canonical_message(
 ) -> String {
     let amount_str = amount_units.to_string();
     let fields: &[&str] = &[
-        contract_id, buyer_fp, &amount_str, deadline,
-        contract_type, work_spec, reference_post, buyer_pk,
+        contract_id,
+        buyer_fp,
+        &amount_str,
+        deadline,
+        contract_type,
+        work_spec,
+        reference_post,
+        buyer_pk,
     ];
     let mut hasher = Sha256::new();
     for field in fields {
@@ -115,8 +121,14 @@ pub fn verify_with_pubkey(
     sig_hex: &str,
 ) -> Result<bool> {
     let msg = canonical_message(
-        contract_id, buyer_fp, amount_units, deadline,
-        contract_type, work_spec, reference_post, buyer_pk,
+        contract_id,
+        buyer_fp,
+        amount_units,
+        deadline,
+        contract_type,
+        work_spec,
+        reference_post,
+        buyer_pk,
     );
     Identity::verify(arbiter_pubkey_hex, &msg, sig_hex)
 }

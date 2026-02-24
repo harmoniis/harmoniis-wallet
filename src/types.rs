@@ -346,7 +346,10 @@ impl StablecashSecret {
 
     /// Serialize to wire format: `u{amount}:{contract_id}:secret:{hex64}`
     pub fn display(&self) -> String {
-        format!("u{}:{}:secret:{}", self.amount_units, self.contract_id, self.hex_value)
+        format!(
+            "u{}:{}:secret:{}",
+            self.amount_units, self.contract_id, self.hex_value
+        )
     }
 
     /// Compute the public proof.
@@ -418,7 +421,10 @@ impl StablecashProof {
     }
 
     pub fn display(&self) -> String {
-        format!("u{}:{}:public:{}", self.amount_units, self.contract_id, self.public_hash)
+        format!(
+            "u{}:{}:public:{}",
+            self.amount_units, self.contract_id, self.public_hash
+        )
     }
 }
 

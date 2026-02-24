@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::{
     client::HarmoniisClient,
     error::Result,
-    types::{WitnessProof, WitnessSecret, StablecashSecret},
+    types::{StablecashSecret, WitnessProof, WitnessSecret},
 };
 
 impl HarmoniisClient {
@@ -33,9 +33,7 @@ impl HarmoniisClient {
         let proof_str = proof.display();
         let result = self.witness_check(&[proof_str.clone()]).await?;
         // { "results": { "<proof>": { "spent": false, ... } } }
-        let entry = result
-            .get("results")
-            .and_then(|r| r.get(&proof_str));
+        let entry = result.get("results").and_then(|r| r.get(&proof_str));
         match entry {
             Some(e) => {
                 // "spent": false means the record is live

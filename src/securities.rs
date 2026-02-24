@@ -96,7 +96,10 @@ pub enum SecurityUnderlying {
 
     /// A quantity of Stablecash backing (USDH, in atomic units; minimum unit is 0.00000001).
     /// Only valid once Stablecash is out of sandbox.
-    Stablecash { amount_units: u64, contract_id: String },
+    Stablecash {
+        amount_units: u64,
+        contract_id: String,
+    },
 }
 
 // ── SecurityDeed ──────────────────────────────────────────────────────────────

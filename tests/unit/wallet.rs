@@ -120,7 +120,10 @@ fn snapshot_export_and_import() {
     let wallet2 = RgbWallet::open_memory().unwrap();
     wallet2.import_snapshot(&snap).unwrap();
     assert_eq!(wallet2.nickname().unwrap().as_deref(), Some("snaptest"));
-    assert_eq!(wallet2.fingerprint().unwrap(), wallet.fingerprint().unwrap());
+    assert_eq!(
+        wallet2.fingerprint().unwrap(),
+        wallet.fingerprint().unwrap()
+    );
     assert!(wallet2.get_contract("CTR_snap1").unwrap().is_some());
 }
 

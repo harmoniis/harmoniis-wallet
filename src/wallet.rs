@@ -69,9 +69,8 @@ impl RgbWallet {
     /// Create a new wallet at the given path, generating a fresh identity.
     pub fn create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}")))?;
         }
         let conn = Connection::open(path)?;
         let w = Self::init(conn)?;
@@ -118,9 +117,9 @@ impl RgbWallet {
     }
 
     pub fn nickname(&self) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT value FROM wallet_metadata WHERE key = 'nickname'",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM wallet_metadata WHERE key = 'nickname'")?;
         let mut rows = stmt.query([])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
     }
@@ -287,4 +286,3 @@ fn row_to_contract(row: &rusqlite::Row<'_>) -> Result<Contract> {
         updated_at: row.get(15)?,
     })
 }
-

@@ -15,10 +15,13 @@ use clap::{Parser, Subcommand};
 use harmoniis_wallet::{
     client::{
         arbitration::{build_witness_commitment, BuyRequest},
-        timeline::{DonationClaimRequest, PostAttachment, PublishPostRequest, RatePostRequest, RegisterRequest},
+        timeline::{
+            DonationClaimRequest, PostAttachment, PublishPostRequest, RatePostRequest,
+            RegisterRequest,
+        },
         HarmoniisClient,
     },
-    types::{Certificate, Contract, ContractStatus, ContractType, WitnessSecret, Role},
+    types::{Certificate, Contract, ContractStatus, ContractType, Role, WitnessSecret},
     wallet::RgbWallet,
     Identity,
 };
@@ -109,10 +112,10 @@ fn next_contract_id() -> String {
 
 #[derive(Parser)]
 #[command(
-    name    = "hrmw",
+    name = "hrmw",
     version,
-    author  = "Harmoniis Contributors",
-    about   = "Harmoniis bearer wallet — RGB21 contracts and certificates via Witness",
+    author = "Harmoniis Contributors",
+    about = "Harmoniis bearer wallet — RGB21 contracts and certificates via Witness",
     long_about = "\
 hrmw is the reference CLI wallet for the Harmoniis decentralised marketplace.\n\
 It manages Ed25519 identities and RGB21 bearer contracts (Witness secrets).\n\
@@ -436,10 +439,17 @@ async fn main() -> anyhow::Result<()> {
                 None => println!("Nickname:      (not registered)"),
             }
             let contracts = wallet.list_contracts()?;
-            let held = contracts.iter().filter(|c| c.witness_secret.is_some()).count();
+            let held = contracts
+                .iter()
+                .filter(|c| c.witness_secret.is_some())
+                .count();
             println!("Contracts:     {} ({} held)", contracts.len(), held);
             println!("Certificates:  {}", wallet.list_certificates()?.len());
-            println!("API:           {} ({})", api, if direct { "direct" } else { "proxy" });
+            println!(
+                "API:           {} ({})",
+                api,
+                if direct { "direct" } else { "proxy" }
+            );
         }
 
         // ── donation claim ────────────────────────────────────────────────────
@@ -464,7 +474,8 @@ async fn main() -> anyhow::Result<()> {
                 "no_donation" => {
                     println!(
                         "{}",
-                        resp.message.unwrap_or_else(|| "No donation available yet.".to_string())
+                        resp.message
+                            .unwrap_or_else(|| "No donation available yet.".to_string())
                     );
                 }
                 other => {
@@ -477,7 +488,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── identity register ─────────────────────────────────────────────────
-        Cmd::Identity(IdentityCmd::Register { nick, webcash, about }) => {
+        Cmd::Identity(IdentityCmd::Register {
+            nick,
+            webcash,
+            about,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let sig = id.sign(&format!("register:{nick}"));
@@ -506,9 +521,9 @@ async fn main() -> anyhow::Result<()> {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
-            let nick = wallet
-                .nickname()?
-                .ok_or_else(|| anyhow::anyhow!("nickname not set; run 'hrmw identity register' first"))?;
+            let nick = wallet.nickname()?.ok_or_else(|| {
+                anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
+            })?;
             let normalized_post_type = post_type.to_lowercase();
             let attachments = if is_commercial_listing_post_type(&normalized_post_type) {
                 let descriptor_name = listing_descriptor_filename(&normalized_post_type);
@@ -524,11 +539,7 @@ async fn main() -> anyhow::Result<()> {
                     },
                     PostAttachment {
                         filename: descriptor_name.to_string(),
-                        content: format!(
-                            "# {}\n\n{}",
-                            descriptor_title,
-                            content
-                        ),
+                        content: format!("# {}\n\n{}", descriptor_title, content),
                         attachment_type: "text/markdown".to_string(),
                     },
                 ]
@@ -560,13 +571,17 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── timeline comment ──────────────────────────────────────────────────
-        Cmd::Timeline(TimelineCmd::Comment { post, content, webcash }) => {
+        Cmd::Timeline(TimelineCmd::Comment {
+            post,
+            content,
+            webcash,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
-            let nick = wallet
-                .nickname()?
-                .ok_or_else(|| anyhow::anyhow!("nickname not set; run 'hrmw identity register' first"))?;
+            let nick = wallet.nickname()?.ok_or_else(|| {
+                anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
+            })?;
             let comment_id = make_client(api, direct)
                 .publish_post(
                     &PublishPostRequest {
@@ -592,7 +607,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── timeline rate ─────────────────────────────────────────────────────
-        Cmd::Timeline(TimelineCmd::Rate { post, vote, webcash }) => {
+        Cmd::Timeline(TimelineCmd::Rate {
+            post,
+            vote,
+            webcash,
+        }) => {
             let vote = vote.to_lowercase();
             if vote != "up" && vote != "down" {
                 anyhow::bail!("vote must be 'up' or 'down'");
@@ -620,10 +639,17 @@ async fn main() -> anyhow::Result<()> {
             if contracts.is_empty() {
                 println!("No contracts.");
             } else {
-                println!("{:<26} {:>9} {:>6} {:>4}  {}", "id", "status", "role", "held", "description");
+                println!(
+                    "{:<26} {:>9} {:>6} {:>4}  {}",
+                    "id", "status", "role", "held", "description"
+                );
                 println!("{}", "─".repeat(80));
                 for c in &contracts {
-                    let held = if c.witness_secret.is_some() { "✓" } else { "·" };
+                    let held = if c.witness_secret.is_some() {
+                        "✓"
+                    } else {
+                        "·"
+                    };
                     println!(
                         "{:<26} {:>9} {:>6} {:>4}  {}",
                         c.contract_id,
@@ -649,14 +675,17 @@ async fn main() -> anyhow::Result<()> {
         // The core "receive" command — seller (or buyer receiving a refunded contract)
         // uses this to take custody of a witness secret they received out-of-band.
         Cmd::Contract(ContractCmd::Insert { secret, desc, role }) => {
-            let witness_secret = WitnessSecret::parse(&secret)
-                .context("invalid witness secret format — expected n:{contract_id}:secret:{hex64}")?;
+            let witness_secret = WitnessSecret::parse(&secret).context(
+                "invalid witness secret format — expected n:{contract_id}:secret:{hex64}",
+            )?;
             let contract_id = witness_secret.contract_id().to_string();
             let proof = witness_secret.public_proof();
 
             // Verify it's live with the Witness before storing
             let client = make_client(api, direct);
-            let is_live = client.witness_is_live(&proof).await
+            let is_live = client
+                .witness_is_live(&proof)
+                .await
                 .context("witness health check failed")?;
             if !is_live {
                 anyhow::bail!(
@@ -668,8 +697,7 @@ async fn main() -> anyhow::Result<()> {
 
             let wallet = open_or_create_wallet(&wallet_path)?;
             let fp = wallet.fingerprint()?;
-            let parsed_role = Role::parse(&role)
-                .unwrap_or(Role::Seller);
+            let parsed_role = Role::parse(&role).unwrap_or(Role::Seller);
 
             // If the contract already exists in the wallet, update it
             if let Some(mut existing) = wallet.get_contract(&contract_id)? {
@@ -686,7 +714,11 @@ async fn main() -> anyhow::Result<()> {
                     contract_id.clone(),
                     ContractType::Service,
                     0,
-                    if desc.is_empty() { contract_id.clone() } else { desc },
+                    if desc.is_empty() {
+                        contract_id.clone()
+                    } else {
+                        desc
+                    },
                     fp.clone(),
                     parsed_role,
                 );
@@ -702,7 +734,13 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── contract buy ──────────────────────────────────────────────────────
-        Cmd::Contract(ContractCmd::Buy { post, amount, webcash, r#type, contract_id }) => {
+        Cmd::Contract(ContractCmd::Buy {
+            post,
+            amount,
+            webcash,
+            r#type,
+            contract_id,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
@@ -712,27 +750,19 @@ async fn main() -> anyhow::Result<()> {
             let witness_secret = WitnessSecret::generate(&local_contract_id);
             let witness_proof = witness_secret.public_proof();
 
-            let seller_fingerprint = client
-                .get_post(&post)
-                .await
-                .ok()
-                .and_then(|v| {
-                    v.get("post")
-                        .and_then(|p| p.get("author_fingerprint"))
+            let seller_fingerprint = client.get_post(&post).await.ok().and_then(|v| {
+                v.get("post")
+                    .and_then(|p| p.get("author_fingerprint"))
+                    .and_then(|s| s.as_str())
+                    .map(ToString::to_string)
+            });
+            let seller_public_key = match seller_fingerprint.as_deref() {
+                Some(seller_fp) => client.get_profile(seller_fp).await.ok().and_then(|v| {
+                    v.get("profile")
+                        .and_then(|p| p.get("pub_key"))
                         .and_then(|s| s.as_str())
                         .map(ToString::to_string)
-                });
-            let seller_public_key = match seller_fingerprint.as_deref() {
-                Some(seller_fp) => client
-                    .get_profile(seller_fp)
-                    .await
-                    .ok()
-                    .and_then(|v| {
-                        v.get("profile")
-                            .and_then(|p| p.get("pub_key"))
-                            .and_then(|s| s.as_str())
-                            .map(ToString::to_string)
-                    }),
+                }),
                 None => None,
             };
 
@@ -780,7 +810,10 @@ async fn main() -> anyhow::Result<()> {
             let contract_view = client.get_contract(&contract_id).await.unwrap_or_default();
             let amount_units = contract_view
                 .get("amount")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
                 .unwrap_or_else(|| parse_amount_to_units(&amount));
             let work_spec = contract_view
                 .get("work_spec")
@@ -807,12 +840,10 @@ async fn main() -> anyhow::Result<()> {
                         .map(ToString::to_string)
                 });
 
-            if let (
-                Some(arbiter_sig),
-                Some(deadline),
-                Some(reference_post),
-            ) = (
-                buy_response.get("arbiter_signature").and_then(|v| v.as_str()),
+            if let (Some(arbiter_sig), Some(deadline), Some(reference_post)) = (
+                buy_response
+                    .get("arbiter_signature")
+                    .and_then(|v| v.as_str()),
                 final_deadline.as_deref(),
                 contract_view.get("reference_post").and_then(|v| v.as_str()),
             ) {
@@ -831,7 +862,9 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .unwrap_or(false);
                 if !ok {
-                    anyhow::bail!("arbiter signature verification failed for bought contract {contract_id}");
+                    anyhow::bail!(
+                        "arbiter signature verification failed for bought contract {contract_id}"
+                    );
                 }
             }
 
@@ -856,14 +889,20 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── contract bid ──────────────────────────────────────────────────────
-        Cmd::Contract(ContractCmd::Bid { post, contract, webcash, content }) => {
+        Cmd::Contract(ContractCmd::Bid {
+            post,
+            contract,
+            webcash,
+            content,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
             let c = wallet
                 .get_contract(&contract)?
                 .ok_or_else(|| anyhow::anyhow!("contract {contract} not in wallet"))?;
-            let proof_str = c.witness_proof
+            let proof_str = c
+                .witness_proof
                 .ok_or_else(|| anyhow::anyhow!("contract has no witness proof"))?;
 
             let bid_content = if content.is_empty() {
@@ -906,7 +945,9 @@ async fn main() -> anyhow::Result<()> {
             let fp = identity.fingerprint();
             let sig = identity.sign(&format!("accept:{id}:{fp}"));
 
-            make_client(api, direct).accept_contract(&id, &fp, &sig).await?;
+            make_client(api, direct)
+                .accept_contract(&id, &fp, &sig)
+                .await?;
 
             if let Some(mut c) = wallet.get_contract(&id)? {
                 c.status = ContractStatus::Active;
@@ -927,17 +968,20 @@ async fn main() -> anyhow::Result<()> {
                 .get_contract(&id)?
                 .ok_or_else(|| anyhow::anyhow!("contract {id} not in wallet"))?;
 
-            let old_secret_str = contract.witness_secret.as_deref()
-                .ok_or_else(|| anyhow::anyhow!(
+            let old_secret_str = contract.witness_secret.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
                     "no witness secret in wallet for {id} — only the current holder can replace"
-                ))?;
+                )
+            })?;
             let old_secret = WitnessSecret::parse(old_secret_str)?;
 
             // Generate a fresh secret the receiver will hold
             let new_secret = WitnessSecret::generate(&id);
             let new_proof = new_secret.public_proof();
 
-            make_client(api, direct).witness_replace(&old_secret, &new_secret).await?;
+            make_client(api, direct)
+                .witness_replace(&old_secret, &new_secret)
+                .await?;
 
             // Clear secret from wallet — we no longer hold it
             contract.witness_secret = None;
@@ -950,7 +994,10 @@ async fn main() -> anyhow::Result<()> {
             println!();
             println!("  {}", new_secret.display());
             println!();
-            println!("Receiver runs:  hrmw contract insert '{}'", new_secret.display());
+            println!(
+                "Receiver runs:  hrmw contract insert '{}'",
+                new_secret.display()
+            );
             println!();
             println!("⚠ Never post this secret on the timeline or any public channel.");
             println!("  Your wallet no longer holds the secret — proof updated.");
@@ -964,10 +1011,11 @@ async fn main() -> anyhow::Result<()> {
             let contract = wallet
                 .get_contract(&id)?
                 .ok_or_else(|| anyhow::anyhow!("contract {id} not in wallet"))?;
-            let secret_str = contract.witness_secret
-                .ok_or_else(|| anyhow::anyhow!(
+            let secret_str = contract.witness_secret.ok_or_else(|| {
+                anyhow::anyhow!(
                     "no witness secret in wallet for {id} — receive it with 'contract insert' first"
-                ))?;
+                )
+            })?;
 
             let sig = identity.sign(&format!("deliver:{id}:{text}"));
             let resp = make_client(api, direct)
@@ -1028,10 +1076,11 @@ async fn main() -> anyhow::Result<()> {
             let contract = wallet
                 .get_contract(&id)?
                 .ok_or_else(|| anyhow::anyhow!("contract {id} not in wallet"))?;
-            let secret_str = contract.witness_secret
-                .ok_or_else(|| anyhow::anyhow!(
+            let secret_str = contract.witness_secret.ok_or_else(|| {
+                anyhow::anyhow!(
                     "no witness secret in wallet for {id} — must hold current secret to refund"
-                ))?;
+                )
+            })?;
 
             let sig = identity.sign(&format!("REFUND:{id}"));
             make_client(api, direct)
@@ -1053,7 +1102,8 @@ async fn main() -> anyhow::Result<()> {
             let contract = wallet
                 .get_contract(&id)?
                 .ok_or_else(|| anyhow::anyhow!("contract {id} not in wallet"))?;
-            let proof_str = contract.witness_proof
+            let proof_str = contract
+                .witness_proof
                 .ok_or_else(|| anyhow::anyhow!("no witness proof in wallet for {id}"))?;
             let result = make_client(api, direct).witness_check(&[proof_str]).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -1069,7 +1119,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:<26} {:>4}  {}", "certificate_id", "held", "contract_id");
                 println!("{}", "─".repeat(70));
                 for cert in &certs {
-                    let held = if cert.witness_secret.is_some() { "✓" } else { "·" };
+                    let held = if cert.witness_secret.is_some() {
+                        "✓"
+                    } else {
+                        "·"
+                    };
                     println!(
                         "{:<26} {:>4}  {}",
                         cert.certificate_id,
@@ -1098,7 +1152,9 @@ async fn main() -> anyhow::Result<()> {
             let proof = witness_secret.public_proof();
 
             let client = make_client(api, direct);
-            let is_live = client.witness_is_live(&proof).await
+            let is_live = client
+                .witness_is_live(&proof)
+                .await
                 .context("witness health check failed")?;
             if !is_live {
                 anyhow::bail!("certificate secret is not live — already spent or burned");
@@ -1120,9 +1176,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Certificate(CertCmd::Check { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let certs = wallet.list_certificates()?;
-            let cert = certs.iter().find(|c| c.certificate_id == id)
+            let cert = certs
+                .iter()
+                .find(|c| c.certificate_id == id)
                 .ok_or_else(|| anyhow::anyhow!("certificate {id} not in wallet"))?;
-            let proof_str = cert.witness_proof.clone()
+            let proof_str = cert
+                .witness_proof
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("no proof for certificate {id}"))?;
             let result = make_client(api, direct).witness_check(&[proof_str]).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

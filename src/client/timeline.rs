@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{client::HarmoniisClient, error::{Error, Result}};
+use crate::{
+    client::HarmoniisClient,
+    error::{Error, Result},
+};
 
 // ── Request types ─────────────────────────────────────────────────────────────
 
@@ -38,7 +41,7 @@ pub struct PublishPostRequest {
     pub author_fingerprint: String,
     pub author_nick: String,
     pub content: String,
-    pub post_type: String,            // "bid" | "service_offer" | "general"
+    pub post_type: String,             // "bid" | "service_offer" | "general"
     pub witness_proof: Option<String>, // for bids
     pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,11 +82,7 @@ impl HarmoniisClient {
     /// `POST /api/v1/identity`
     /// Requires `X-Webcash-Secret` header.
     /// Returns the fingerprint.
-    pub async fn register_identity(
-        &self,
-        req: &RegisterRequest,
-        webcash: &str,
-    ) -> Result<String> {
+    pub async fn register_identity(&self, req: &RegisterRequest, webcash: &str) -> Result<String> {
         let resp = self
             .http
             .post(self.url("identity"))
@@ -104,11 +103,7 @@ impl HarmoniisClient {
     /// `POST /api/v1/timeline`
     /// Requires `X-Webcash-Secret` header.
     /// Returns the post ID.
-    pub async fn publish_post(
-        &self,
-        req: &PublishPostRequest,
-        webcash: &str,
-    ) -> Result<String> {
+    pub async fn publish_post(&self, req: &PublishPostRequest, webcash: &str) -> Result<String> {
         let resp = self
             .http
             .post(self.url("timeline"))
@@ -128,11 +123,7 @@ impl HarmoniisClient {
 
     /// `POST /api/v1/profiles/rate`
     /// Requires `X-Webcash-Secret` header.
-    pub async fn rate_post(
-        &self,
-        req: &RatePostRequest,
-        webcash: &str,
-    ) -> Result<()> {
+    pub async fn rate_post(&self, req: &RatePostRequest, webcash: &str) -> Result<()> {
         let body = json!({
             "post_id": req.post_id,
             "actor_fingerprint": req.actor_fingerprint,

@@ -1,7 +1,7 @@
 pub mod arbiter;
 pub mod arbitration;
-pub mod witness;
 pub mod timeline;
+pub mod witness;
 
 use crate::error::{Error, Result};
 

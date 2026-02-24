@@ -15,8 +15,8 @@ pub mod securities;
 pub use error::{Error, Result};
 pub use identity::Identity;
 pub use types::{
-    Certificate, Contract, ContractStatus, ContractType, WitnessProof, WitnessSecret, Role,
-    StablecashProof, StablecashSecret,
+    Certificate, Contract, ContractStatus, ContractType, Role, StablecashProof, StablecashSecret,
+    WitnessProof, WitnessSecret,
 };
 pub use wallet::{RgbWallet, WalletSnapshot};
 

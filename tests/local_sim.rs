@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use harmoniis_wallet::{
     crypto::sha256_bytes,
     types::{
-        ContractStatus, ContractType, WitnessProof, WitnessSecret, Role,
-        StablecashProof, StablecashSecret,
+        ContractStatus, ContractType, Role, StablecashProof, StablecashSecret, WitnessProof,
+        WitnessSecret,
     },
     wallet::RgbWallet,
     Contract, Identity,
@@ -62,7 +62,11 @@ impl Mockwitness {
                 amount_units: None,
             },
         );
-        println!("[witness] Minted RGB21 {} → {}", secret.contract_id(), proof.public_hash);
+        println!(
+            "[witness] Minted RGB21 {} → {}",
+            secret.contract_id(),
+            proof.public_hash
+        );
         Ok(())
     }
 
@@ -201,9 +205,7 @@ impl Mockwitness {
     fn burn_rgb21(&self, secret: &WitnessSecret) -> Result<(), String> {
         let proof = secret.public_proof();
         let mut map = self.inner.lock().unwrap();
-        let rec = map
-            .get_mut(&proof.public_hash)
-            .ok_or("secret not found")?;
+        let rec = map.get_mut(&proof.public_hash).ok_or("secret not found")?;
         if rec.status != "live" {
             return Err(format!("already {}", rec.status));
         }
@@ -303,23 +305,39 @@ fn test_6_phase_rgb21_contract_flow() {
                 initial_proof.display()
             ),
             &issue_sig
-        ).unwrap(),
+        )
+        .unwrap(),
         "issue signature must verify"
     );
 
     // Verify: proof format matches backend exactly
     let proof_display = initial_proof.display();
-    assert!(proof_display.starts_with("n:"), "proof must start with 'n:'");
-    assert!(proof_display.contains(":public:"), "proof must contain ':public:'");
-    assert_eq!(initial_proof.public_hash.len(), 64, "proof hash must be 64 chars");
+    assert!(
+        proof_display.starts_with("n:"),
+        "proof must start with 'n:'"
+    );
+    assert!(
+        proof_display.contains(":public:"),
+        "proof must contain ':public:'"
+    );
+    assert_eq!(
+        initial_proof.public_hash.len(),
+        64,
+        "proof hash must be 64 chars"
+    );
 
     // Verify: SHA256 computation matches backend's `secret_hash()` in witness.rs
     let raw = hex::decode(initial_secret.hex_value()).unwrap();
     let expected_hash = sha256_bytes(&raw);
-    assert_eq!(initial_proof.public_hash, expected_hash, "proof hash must match sha256 of raw bytes");
+    assert_eq!(
+        initial_proof.public_hash, expected_hash,
+        "proof hash must match sha256 of raw bytes"
+    );
 
     // Arbiter mints in witness
-    witness.mint_rgb21(&initial_secret, "RGB21:Contract").unwrap();
+    witness
+        .mint_rgb21(&initial_secret, "RGB21:Contract")
+        .unwrap();
 
     // Buyer stores contract in wallet
     let now = chrono::Utc::now().to_rfc3339();
@@ -361,7 +379,12 @@ fn test_6_phase_rgb21_contract_flow() {
     // ── Phase 4: Alice accepts + Bob transfers ownership ──────────────────────
     let accept_sig = seller_id.sign(&format!("accept:{contract_id}:{seller_fp}"));
     assert!(
-        Identity::verify(&seller_fp, &format!("accept:{contract_id}:{seller_fp}"), &accept_sig).unwrap(),
+        Identity::verify(
+            &seller_fp,
+            &format!("accept:{contract_id}:{seller_fp}"),
+            &accept_sig
+        )
+        .unwrap(),
         "accept signature must verify"
     );
 
@@ -413,29 +436,40 @@ fn test_6_phase_rgb21_contract_flow() {
 
     // Verify replace is idempotency-safe: cannot re-spend old secret
     assert!(
-        witness.replace_rgb21(&initial_secret, &WitnessSecret::generate(&contract_id)).is_err(),
+        witness
+            .replace_rgb21(&initial_secret, &WitnessSecret::generate(&contract_id))
+            .is_err(),
         "double-spend must fail"
     );
     println!("         Double-spend correctly rejected.");
 
     // ── Phase 5: Seller delivers + Arbiter evaluates ──────────────────────────
-    let delivered_text = "# Rust Tutorial for Autonomous Agents\n\nRust guarantees memory safety...";
+    let delivered_text =
+        "# Rust Tutorial for Autonomous Agents\n\nRust guarantees memory safety...";
     let deliver_sig = seller_id.sign(&format!("deliver:{contract_id}:{delivered_text}"));
     assert!(
         Identity::verify(
             &seller_fp,
             &format!("deliver:{contract_id}:{delivered_text}"),
             &deliver_sig
-        ).unwrap(),
+        )
+        .unwrap(),
         "deliver signature must verify"
     );
 
     // Arbiter receives witness_secret from seller — validates it belongs to contract + is live
-    let seller_secret_str = seller_wallet.get_contract(&contract_id).unwrap().unwrap()
-        .witness_secret.unwrap();
+    let seller_secret_str = seller_wallet
+        .get_contract(&contract_id)
+        .unwrap()
+        .unwrap()
+        .witness_secret
+        .unwrap();
     let seller_secret = WitnessSecret::parse(&seller_secret_str).unwrap();
     assert_eq!(seller_secret.contract_id(), &contract_id);
-    assert_eq!(witness.check_proof(&seller_secret.public_proof()), witnessStatus::Live);
+    assert_eq!(
+        witness.check_proof(&seller_secret.public_proof()),
+        witnessStatus::Live
+    );
 
     // Arbiter burns secret (settle: pay seller, burn contract)
     witness.burn_rgb21(&seller_secret).unwrap();
@@ -481,9 +515,7 @@ fn test_rgb21_refund_before_accept() {
 
     // Refund: buyer proves ownership (secret) → arbiter burns
     let refund_sig = buyer_id.sign(&format!("REFUND:{contract_id}"));
-    assert!(
-        Identity::verify(&buyer_fp, &format!("REFUND:{contract_id}"), &refund_sig).unwrap()
-    );
+    assert!(Identity::verify(&buyer_fp, &format!("REFUND:{contract_id}"), &refund_sig).unwrap());
     witness.burn_rgb21(&secret).unwrap();
     assert_eq!(witness.check_proof(&proof), witnessStatus::Burned);
     println!("Refund (before accept): contract burned. PASSED.");
@@ -505,19 +537,28 @@ fn test_rgb20_stablecash_split_and_merge() {
 
     // Verify format: `u1000000000:USDH_MAIN:secret:hex64`
     let display = total_secret.display();
-    assert!(display.starts_with("u1000000000:USDH_MAIN:secret:"), "bad format: {display}");
+    assert!(
+        display.starts_with("u1000000000:USDH_MAIN:secret:"),
+        "bad format: {display}"
+    );
     assert_eq!(display.len(), "u1000000000:USDH_MAIN:secret:".len() + 64);
 
     // Verify proof format: `u1000000000:USDH_MAIN:public:hash64`
     let proof_display = total_proof.display();
-    assert!(proof_display.starts_with("u1000000000:USDH_MAIN:public:"), "bad proof: {proof_display}");
+    assert!(
+        proof_display.starts_with("u1000000000:USDH_MAIN:public:"),
+        "bad proof: {proof_display}"
+    );
 
     // Split: 10 USDH → 3 USDH (payment) + 7 USDH (change)
     let pay_secret = StablecashSecret::generate(300_000_000, "USDH_MAIN");
     let change_secret = StablecashSecret::generate(700_000_000, "USDH_MAIN");
 
     witness
-        .replace_rgb20(&[total_secret], &[pay_secret.clone(), change_secret.clone()])
+        .replace_rgb20(
+            &[total_secret],
+            &[pay_secret.clone(), change_secret.clone()],
+        )
         .unwrap();
 
     let pay_proof = pay_secret.public_proof();
@@ -537,7 +578,10 @@ fn test_rgb20_stablecash_split_and_merge() {
 
     let merged_proof = merged_secret.public_proof();
     assert_eq!(witness.check_stablecash(&pay_proof), witnessStatus::Spent);
-    assert_eq!(witness.check_stablecash(&change_proof), witnessStatus::Spent);
+    assert_eq!(
+        witness.check_stablecash(&change_proof),
+        witnessStatus::Spent
+    );
     assert_eq!(witness.check_stablecash(&merged_proof), witnessStatus::Live);
 
     println!("Merge 3 + 7 USDH → 10 USDH: PASSED");
@@ -545,7 +589,9 @@ fn test_rgb20_stablecash_split_and_merge() {
     // Amount mismatch must fail
     let over_pay = StablecashSecret::generate(1_000_000_001, "USDH_MAIN");
     assert!(
-        witness.replace_rgb20(&[merged_secret.clone()], &[over_pay]).is_err(),
+        witness
+            .replace_rgb20(&[merged_secret.clone()], &[over_pay])
+            .is_err(),
         "amount mismatch must fail"
     );
     println!("Amount mismatch correctly rejected. PASSED.");
@@ -598,7 +644,10 @@ fn test_all_signature_messages() {
         format!("accept:{contract_id}:{fp}"),
         format!("deliver:{contract_id}:delivered content"),
         format!("REFUND:{contract_id}"),
-        format!("transfer:{contract_id}:n:{contract_id}:public:{}", "a".repeat(64)),
+        format!(
+            "transfer:{contract_id}:n:{contract_id}:public:{}",
+            "a".repeat(64)
+        ),
     ];
 
     for msg in &messages {
