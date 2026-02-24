@@ -3,14 +3,15 @@ use curve25519_dalek::edwards::CompressedEdwardsY;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use sha2::{Digest, Sha256, Sha512};
+use x25519_dalek::{x25519, EphemeralSecret, PublicKey};
 
 use crate::{
     client::HarmoniisClient,
     crypto::sha256_bytes,
-    error::Result,
+    error::{Error, Result},
     types::{WitnessProof, WitnessSecret},
+    Identity,
 };
 
 // ── Request types ─────────────────────────────────────────────────────────────
@@ -98,6 +99,98 @@ fn encrypt_for_seller_envelope(
         "ciphertext": hex::encode(ciphertext),
     })
     .to_string()
+}
+
+pub fn decrypt_witness_secret_envelope(
+    envelope: &str,
+    seller_identity: &Identity,
+) -> Result<String> {
+    let raw = envelope.trim();
+    if raw.is_empty() {
+        return Err(Error::InvalidFormat("empty witness envelope".to_string()));
+    }
+
+    if let Some(hex_payload) = raw.strip_prefix("sealed:v1:") {
+        let bytes = hex::decode(hex_payload)
+            .map_err(|e| Error::InvalidFormat(format!("invalid sealed:v1 hex payload: {e}")))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|e| Error::InvalidFormat(format!("sealed:v1 payload is not utf8: {e}")))?;
+        return Ok(text);
+    }
+
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        Error::InvalidFormat(format!("invalid encrypted witness envelope json: {e}"))
+    })?;
+    let scheme = value
+        .get("scheme")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if scheme != "sealed_v2_x25519_chacha20poly1305" {
+        return Err(Error::InvalidFormat(format!(
+            "unsupported witness envelope scheme: {scheme}"
+        )));
+    }
+
+    let eph_hex = value
+        .get("ephemeral_pub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::InvalidFormat("missing ephemeral_pub".to_string()))?;
+    let nonce_hex = value
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::InvalidFormat("missing nonce".to_string()))?;
+    let ciphertext_hex = value
+        .get("ciphertext")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::InvalidFormat("missing ciphertext".to_string()))?;
+
+    let eph_bytes = hex::decode(eph_hex)
+        .map_err(|e| Error::InvalidFormat(format!("invalid ephemeral_pub hex: {e}")))?;
+    let nonce_bytes = hex::decode(nonce_hex)
+        .map_err(|e| Error::InvalidFormat(format!("invalid nonce hex: {e}")))?;
+    let ciphertext = hex::decode(ciphertext_hex)
+        .map_err(|e| Error::InvalidFormat(format!("invalid ciphertext hex: {e}")))?;
+
+    if eph_bytes.len() != 32 {
+        return Err(Error::InvalidFormat(format!(
+            "ephemeral_pub must be 32 bytes, got {}",
+            eph_bytes.len()
+        )));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(Error::InvalidFormat(format!(
+            "nonce must be 12 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+
+    let seed = hex::decode(seller_identity.private_key_hex())
+        .map_err(|e| Error::InvalidFormat(format!("invalid seller private key hex: {e}")))?;
+    if seed.len() != 32 {
+        return Err(Error::InvalidFormat(format!(
+            "seller private key seed must be 32 bytes, got {}",
+            seed.len()
+        )));
+    }
+    let digest = Sha512::digest(seed);
+    let mut x_priv = [0u8; 32];
+    x_priv.copy_from_slice(&digest[..32]);
+    x_priv[0] &= 248;
+    x_priv[31] &= 127;
+    x_priv[31] |= 64;
+
+    let mut eph_pub = [0u8; 32];
+    eph_pub.copy_from_slice(&eph_bytes);
+    let shared = x25519(x_priv, eph_pub);
+    let key_material = Sha256::digest(shared);
+    let cipher = ChaCha20Poly1305::new((&key_material).into());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|e| Error::Crypto(format!("failed to decrypt witness envelope: {e}")))?;
+    let text = String::from_utf8(plaintext)
+        .map_err(|e| Error::InvalidFormat(format!("decrypted witness secret is not utf8: {e}")))?;
+    Ok(text)
 }
 
 /// Build a witness commitment payload for `/arbitration/contracts/buy`.
@@ -199,7 +292,12 @@ impl HarmoniisClient {
     }
 
     /// `POST /api/v1/arbitration/contracts/{id}/accept`
-    pub async fn accept_contract(&self, id: &str, seller_fp: &str, sig: &str) -> Result<()> {
+    pub async fn accept_contract(
+        &self,
+        id: &str,
+        seller_fp: &str,
+        sig: &str,
+    ) -> Result<serde_json::Value> {
         let body = json!({
             "seller_fingerprint": seller_fp,
             "signature": sig,
@@ -210,8 +308,8 @@ impl HarmoniisClient {
             .json(&body)
             .send()
             .await?;
-        Self::check_status(resp).await?;
-        Ok(())
+        let resp = Self::check_status(resp).await?;
+        Ok(resp.json().await?)
     }
 
     /// `POST /api/v1/arbitration/contracts/{id}/deliver`

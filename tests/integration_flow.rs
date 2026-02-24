@@ -52,7 +52,7 @@ fn required_amount_from_error(err: &harmoniis_wallet::error::Error) -> Option<St
     }
 }
 
-fn extract_webcash_secret(payment_output: &str) -> String {
+fn extract_webcash_token(payment_output: &str) -> String {
     if payment_output.starts_with('e') && payment_output.contains(":secret:") {
         return payment_output.to_string();
     }
@@ -68,7 +68,7 @@ fn extract_webcash_secret(payment_output: &str) -> String {
 async fn wallet_pay(wallet: &WebcashWallet, amount: &str, memo: &str) -> String {
     let parsed_amount = WebcashAmount::from_str(amount).expect("valid webcash amount");
     let payment_output = wallet.pay(parsed_amount, memo).await.expect("wallet pay");
-    extract_webcash_secret(&payment_output)
+    extract_webcash_token(&payment_output)
 }
 
 #[tokio::test]

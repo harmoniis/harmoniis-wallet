@@ -86,7 +86,7 @@ pub async fn open_webcash_wallet(
     Ok(webcash_wallet)
 }
 
-pub fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {
+pub fn extract_webcash_token(payment_output: &str) -> anyhow::Result<String> {
     let trimmed = payment_output.trim();
     if trimmed.starts_with('e') && trimmed.contains(":secret:") {
         return Ok(trimmed.to_string());
@@ -97,7 +97,7 @@ pub fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {
             return Ok(token.to_string());
         }
     }
-    anyhow::bail!("failed to extract webcash secret from payment output: {trimmed}");
+    anyhow::bail!("failed to extract webcash token from payment output: {trimmed}");
 }
 
 pub fn is_payment_required_error(err: &anyhow::Error) -> bool {
@@ -198,7 +198,7 @@ pub async fn pay_from_wallet(
         .pay(parsed_amount, memo)
         .await
         .with_context(|| format!("failed to create wallet payment for {memo}"))?;
-    extract_webcash_secret(&payment_output)
+    extract_webcash_token(&payment_output)
 }
 
 pub fn make_client(api: &str, direct: bool) -> HarmoniisClient {

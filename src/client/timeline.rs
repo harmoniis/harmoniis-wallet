@@ -27,7 +27,8 @@ pub struct DonationClaimRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DonationClaimResponse {
     pub status: String,
-    pub webcash_secret: Option<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
     pub message: Option<String>,
 }
 
@@ -120,7 +121,7 @@ pub struct RatePostRequest {
 
 impl HarmoniisClient {
     /// `POST /api/v1/donations`
-    /// Returns `{ status: donated|no_donation, webcash_secret?, message? }`.
+    /// Returns `{ status: donated|no_donation, secret?, message? }`.
     pub async fn claim_donation(
         &self,
         req: &DonationClaimRequest,

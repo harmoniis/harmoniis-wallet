@@ -9,17 +9,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.1.10] — 2026-02-24
+
 ### Changed
 
-- Refactored CLI helper logic out of `src/bin/hrmw.rs` into `src/bin/hrmw/hrmw_support.rs`
-  to separate command wiring from wallet/payment/metadata helpers.
+- `contract accept` now follows the current backend flow: seller decrypts
+  `witness_secret_encrypted_for_seller`, rotates custody via `witness/replace`,
+  and stores the seller-held witness secret locally.
 
 ### Fixed
 
-- Wallet payment retry now triggers only on real `HTTP 402 Payment Required` responses.
-  Non-402 API errors no longer consume Webcash.
-- `contract buy` fallback payment amount now uses requested contract amount when
-  `required_amount` is not returned.
+- Added support for decrypting `sealed_v2_x25519_chacha20poly1305` witness envelopes in CLI.
+- Removed outdated accept guidance that required buyer-side replace after seller acceptance.
 
 ---
 
@@ -134,7 +139,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.10
 [0.1.9]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.9
 [0.1.4]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.4
 [0.1.2]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.2

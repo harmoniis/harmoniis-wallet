@@ -15,7 +15,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use harmoniis_wallet::{
     client::{
-        arbitration::{build_witness_commitment, BuyRequest},
+        arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
         timeline::{
             DonationClaimRequest, PostAttachment, PublishPostRequest, RatePostRequest,
             RegisterRequest,
@@ -31,7 +31,7 @@ use webylib::{Amount as WebcashAmount, SecretWebcash};
 mod hrmw_support;
 use hrmw_support::{
     build_activity_metadata, build_post_attachments, default_webcash_wallet_path,
-    extract_webcash_secret, make_client, next_contract_id, now_utc, open_or_create_wallet,
+    extract_webcash_token, make_client, next_contract_id, now_utc, open_or_create_wallet,
     open_webcash_wallet, parse_amount_to_units, parse_keywords_csv, pay_from_wallet,
     required_amount_for_payment_retry, resolve_wallet_path,
 };
@@ -474,7 +474,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             match resp.status.as_str() {
                 "donated" => {
-                    if let Some(secret) = resp.webcash_secret {
+                    if let Some(secret) = resp.secret {
                         let webcash_wallet = open_webcash_wallet(&wallet_path, &id).await?;
                         let parsed = SecretWebcash::parse(&secret)
                             .map_err(|e| anyhow::anyhow!("invalid donated webcash format: {e}"))?;
@@ -488,7 +488,7 @@ async fn main() -> anyhow::Result<()> {
                             default_webcash_wallet_path(&wallet_path).display()
                         );
                     } else {
-                        anyhow::bail!("donation response missing webcash_secret");
+                        anyhow::bail!("donation response missing secret");
                     }
                 }
                 "no_donation" => {
@@ -552,7 +552,7 @@ async fn main() -> anyhow::Result<()> {
                 .pay(parsed_amount, &memo)
                 .await
                 .context("failed to create payment")?;
-            let token = extract_webcash_secret(&output)?;
+            let token = extract_webcash_token(&output)?;
             println!("Payment token:");
             println!("{token}");
         }
@@ -1111,24 +1111,99 @@ async fn main() -> anyhow::Result<()> {
             let identity = wallet.identity()?;
             let fp = identity.fingerprint();
             let sig = identity.sign(&format!("accept:{id}:{fp}"));
+            let client = make_client(api, direct);
 
-            make_client(api, direct)
-                .accept_contract(&id, &fp, &sig)
-                .await?;
+            let accept_response = client.accept_contract(&id, &fp, &sig).await?;
+            let mut rotated_secret: Option<WitnessSecret> = None;
+            let mut rotated_proof: Option<String> = accept_response
+                .get("witness_proof")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
 
-            if let Some(mut c) = wallet.get_contract(&id)? {
-                c.status = ContractStatus::Active;
-                c.updated_at = now_utc();
-                wallet.update_contract(&c)?;
+            if let Some(envelope) = accept_response
+                .get("witness_secret_encrypted_for_seller")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                let decrypted = decrypt_witness_secret_envelope(envelope, &identity)?;
+                let received_secret = WitnessSecret::parse(&decrypted)
+                    .context("accept returned malformed witness secret envelope")?;
+                let new_secret = WitnessSecret::generate(&id);
+                let new_proof = new_secret.public_proof();
+                client
+                    .witness_replace(&received_secret, &new_secret)
+                    .await?;
+                rotated_proof = Some(new_proof.display());
+                rotated_secret = Some(new_secret);
             }
+
+            let contract_view = client.get_contract(&id).await.unwrap_or_default();
+            let amount_units = contract_view
+                .get("amount")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
+                .unwrap_or(0);
+            let work_spec = contract_view
+                .get("work_spec")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Contract deliverable")
+                .to_string();
+            let contract_type = contract_view
+                .get("contract_type")
+                .and_then(|v| v.as_str())
+                .and_then(|s| ContractType::parse(s).ok())
+                .unwrap_or(ContractType::Service);
+            let buyer_fingerprint = contract_view
+                .get("buyer_fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let reference_post = contract_view
+                .get("reference_post")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let delivery_deadline = contract_view
+                .get("delivery_deadline")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+
+            let mut local_contract = wallet.get_contract(&id)?.unwrap_or_else(|| {
+                Contract::new(
+                    id.clone(),
+                    contract_type.clone(),
+                    amount_units,
+                    work_spec.clone(),
+                    buyer_fingerprint.clone(),
+                    Role::Seller,
+                )
+            });
+            local_contract.contract_type = contract_type;
+            local_contract.amount_units = amount_units;
+            local_contract.work_spec = work_spec;
+            local_contract.buyer_fingerprint = buyer_fingerprint;
+            local_contract.seller_fingerprint = Some(fp.clone());
+            local_contract.reference_post = reference_post;
+            local_contract.delivery_deadline = delivery_deadline;
+            local_contract.role = Role::Seller;
+            local_contract.status = ContractStatus::Active;
+            local_contract.witness_proof = rotated_proof;
+            local_contract.witness_secret = rotated_secret.map(|s| s.display());
+            local_contract.updated_at = now_utc();
+            wallet.update_contract(&local_contract)?;
+
             println!("Bid accepted. Contract {id} is now active.");
-            println!("Buyer should now run:  hrmw contract replace --id {id}");
+            if local_contract.witness_secret.is_some() {
+                println!("Seller custody rotated and witness secret stored locally.");
+            } else {
+                println!("No encrypted seller witness envelope was returned.");
+            }
         }
 
         // ── contract replace ──────────────────────────────────────────────────
-        // RGB21 bearer handover: buyer calls witness/replace, prints new secret
-        // for out-of-band delivery to the seller.
-        // Seller then runs: hrmw contract insert '<secret>'
+        // RGB21 bearer handover: current holder calls witness/replace and shares
+        // the new secret out-of-band with the next holder.
         Cmd::Contract(ContractCmd::Replace { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let mut contract = wallet
