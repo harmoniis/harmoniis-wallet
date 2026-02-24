@@ -37,7 +37,27 @@ const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
 fn default_wallet_path() -> PathBuf {
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".harmoniis").join("rgb.db")
+}
+
+fn legacy_wallet_path() -> PathBuf {
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".harmoniis").join("wallet.db")
+}
+
+fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = cli_wallet {
+        return path;
+    }
+    let preferred = default_wallet_path();
+    if preferred.exists() {
+        return preferred;
+    }
+    let legacy = legacy_wallet_path();
+    if legacy.exists() {
+        return legacy;
+    }
+    preferred
 }
 
 fn open_or_create_wallet(path: &std::path::Path) -> anyhow::Result<RgbWallet> {
@@ -218,7 +238,7 @@ Bearer model — like Webcash but for contracts:\n\
 By default connects to https://harmoniis.com/api via the Cloudflare edge proxy.\n\
 Use --api for non-production targets. Use --direct to speak to a backend URL directly (local dev or Lambda URL).\n\
 \n\
-Wallet database: ~/.harmoniis/wallet.db (override with --wallet)\n\
+Wallet database: ~/.harmoniis/rgb.db (override with --wallet)\n\
 \n\
 Examples:\n\
   hrmw setup\n\
@@ -248,7 +268,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Initialise or import a wallet (creates ~/.harmoniis/wallet.db)
+    /// Initialise or import a wallet (creates ~/.harmoniis/rgb.db)
     Setup {
         /// Import an existing 64-char Ed25519 private key hex
         #[arg(long)]
@@ -508,7 +528,7 @@ enum CertCmd {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let wallet_path = cli.wallet.clone().unwrap_or_else(default_wallet_path);
+    let wallet_path = resolve_wallet_path(cli.wallet.clone());
     let api = cli.api.as_str();
     let direct = cli.direct;
 

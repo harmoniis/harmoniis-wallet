@@ -53,7 +53,7 @@ Branch naming conventions:
 
 ## Development Setup
 
-Minimum Rust version: **1.70** (MSRV — enforced in CI).
+Minimum Rust version: **1.85** (MSRV — enforced in CI).
 
 ```sh
 # Install Rust via rustup if needed
@@ -106,7 +106,7 @@ cargo fmt --check
 ```
 
 All of the following must pass before a PR is merged:
-- `cargo build` (stable + MSRV 1.70)
+- `cargo build` (stable + MSRV 1.85)
 - `cargo test` (Linux, macOS, Windows)
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`
@@ -176,7 +176,7 @@ These principles mirror the RGB protocol's philosophy and must be preserved:
 | **Zeroize on drop** | All secret material (`witnessSecret`, `StablecashSecret`, `Identity`) must be cleared from memory when dropped. Use `zeroize`. |
 | **No OpenSSL** | `rustls-tls` only. Cross-platform `cargo install` must work without system libraries. |
 | **Phase discipline** | Phase 1 (RGB21 contracts) is live. Phase 2 (Stablecash) is sandbox. Phase 3 (Securities) is dormant behind a feature flag. Do not promote phases without a maintainer decision. |
-| **MSRV 1.70** | Do not use language features or API surface introduced after Rust 1.70. |
+| **MSRV 1.85** | Do not use language features or API surface introduced after Rust 1.85. |
 | **Minimal dependencies** | Every new dependency must be justified. Prefer the standard library. |
 
 ---

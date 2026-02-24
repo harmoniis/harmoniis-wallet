@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.5"
+version     = "0.1.6"
 edition     = "2021"
 rust-version = "1.85"
 description = "RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace (Witness-backed bearer state + Webcash fees)"
@@ -73,7 +73,7 @@ dirs-next   = "2"
 
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
-webylib     = { version = "0.1.0", path = "../harmoniis/backend/webylib" }
+webylib     = "0.1.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -71,7 +71,7 @@ _Nothing yet._
 - `StablecashProof` — RGB20 public proof.
 - `Identity` — Ed25519 key pair; `fingerprint()` equals the hex-encoded public key (64 chars).
 - `RgbWallet` — SQLite-backed local wallet:
-  - Persistent on-disk (default `~/.harmoniis/wallet.db`).
+  - Persistent on-disk (default `~/.harmoniis/rgb.db`).
   - In-memory mode (`open_memory()`) for tests.
   - Stores `contracts`, `certificates`, and `wallet_metadata`.
   - JSON snapshot export/import.

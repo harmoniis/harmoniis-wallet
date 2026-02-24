@@ -61,7 +61,7 @@ hrmw contract check --id CTR_abc
 hrmw --api http://localhost:9001 --direct info
 ```
 
-Default wallet: `~/.harmoniis/wallet.db`
+Default wallet: `~/.harmoniis/rgb.db`
 Webcash wallet: `~/.harmoniis/webcash.db`
 Default API: `https://harmoniis.com/api`
 
