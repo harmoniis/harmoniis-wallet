@@ -9,7 +9,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Refactored CLI helper logic out of `src/bin/hrmw.rs` into `src/bin/hrmw/hrmw_support.rs`
+  to separate command wiring from wallet/payment/metadata helpers.
+
+### Fixed
+
+- Wallet payment retry now triggers only on real `HTTP 402 Payment Required` responses.
+  Non-402 API errors no longer consume Webcash.
+- `contract buy` fallback payment amount now uses requested contract amount when
+  `required_amount` is not returned.
+
+---
+
+## [0.1.9] — 2026-02-24
+
+### Changed
+
+- Internal CLI refactor for clearer module boundaries (`hrmw` + helper module split).
+
+### Fixed
+
+- Prevented accidental Webcash spending on non-payment API errors by enforcing 402-only retry.
+- Improved `contract buy` payment fallback behavior to align with requested amount.
 
 ---
 
@@ -111,7 +134,8 @@ _Nothing yet._
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.9
 [0.1.4]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.4
 [0.1.2]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.2
 [0.1.1]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.1
