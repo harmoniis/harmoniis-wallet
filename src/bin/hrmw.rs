@@ -24,7 +24,7 @@ use harmoniis_wallet::{
 };
 use rand::Rng;
 
-const DEFAULT_API_URL: &str = "https://harmoniis.com";
+const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -123,8 +123,8 @@ Bearer model — like Webcash but for contracts:\n\
   list               — show all contracts (marks which ones you hold the secret for)\n\
   check   --id <id>  — verify contract is still live with the Witness\n\
 \n\
-By default connects to https://harmoniis.com via the Cloudflare edge proxy.\n\
-Use --direct to speak to a backend URL directly (local dev or Lambda URL).\n\
+By default connects to https://harmoniis.com/api via the Cloudflare edge proxy.\n\
+Use --api for non-production targets. Use --direct to speak to a backend URL directly (local dev or Lambda URL).\n\
 \n\
 Wallet database: ~/.harmoniis/wallet.db (override with --wallet)\n\
 \n\

@@ -19,41 +19,45 @@ hrmw setup
 hrmw info
 
 # Register on the network
-hrmw identity register --api http://localhost:9001 --nick alice --webcash "e1.0:secret:..."
+hrmw identity register --nick alice --webcash "e1.0:secret:..."
 
 # Claim a donation for this wallet keypair
-hrmw donation claim --api URL
+hrmw donation claim
 
 # Publish a post/comment and rate
-hrmw timeline post --api URL --content "Service offer" --type service_offer --webcash "e1.0:secret:..."
-hrmw timeline comment --api URL --post POST_xyz --content "Interested" --webcash "e1.0:secret:..."
-hrmw timeline rate --api URL --post POST_xyz --vote up --webcash "e1.0:secret:..."
+hrmw timeline post --content "Service offer" --post-type service_offer --webcash "e1.0:secret:..."
+hrmw timeline comment --post POST_xyz --content "Interested" --webcash "e1.0:secret:..."
+hrmw timeline rate --post POST_xyz --vote up --webcash "e1.0:secret:..."
 
 # Buy a contract (buyer)
-hrmw contract buy --api http://localhost:9001 --post POST_xyz \
+hrmw contract buy --post POST_xyz \
   --amount 1.0 --type service \
   --webcash "e1.0:secret:..."
 
 # Post a bid (buyer)
-hrmw contract bid --api URL --post POST_xyz --contract CTR_abc --webcash "e0.1:secret:..."
+hrmw contract bid --post POST_xyz --contract CTR_abc --webcash "e0.1:secret:..."
 
 # Accept bid (seller)
-hrmw contract accept --api URL --id CTR_abc
+hrmw contract accept --id CTR_abc
 
 # Transfer witness secret to seller (buyer, after accept)
-hrmw contract replace --api URL --id CTR_abc
+hrmw contract replace --id CTR_abc
 
 # Deliver work (seller)
-hrmw contract deliver --api URL --id CTR_abc --text "Here is your haiku..."
+hrmw contract deliver --id CTR_abc --text "Here is your haiku..."
 
 # Pick up work (buyer, pays 3% fee)
-hrmw contract pickup --api URL --id CTR_abc --webcash "e0.03:secret:..."
+hrmw contract pickup --id CTR_abc --webcash "e0.03:secret:..."
 
 # Check witness proof status
-hrmw contract check --api URL --id CTR_abc
+hrmw contract check --id CTR_abc
+
+# Non-production target (staging/dev)
+hrmw --api http://localhost:9001 --direct info
 ```
 
 Default wallet: `~/.harmoniis/wallet.db`
+Default API: `https://harmoniis.com/api`
 
 ## Building
 

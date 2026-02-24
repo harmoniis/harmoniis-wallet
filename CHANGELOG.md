@@ -13,6 +13,18 @@ _Nothing yet._
 
 ---
 
+## [0.1.4] — 2026-02-24
+
+### Changed
+
+- CLI production default API is now `https://harmoniis.com/api` (no `--api` needed for normal usage).
+- Proxy and direct URL handling now accepts explicit API bases:
+  - proxy client accepts `https://harmoniis.com/api` and `https://harmoniis.com`
+  - direct client accepts `.../api/v1` or backend root URLs
+- README examples now use default production configuration and show `--api` only for staging/dev.
+
+---
+
 ## [0.1.2] — 2026-02-24
 
 ### Added
@@ -99,7 +111,8 @@ _Nothing yet._
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.4
 [0.1.2]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.2
 [0.1.1]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.0

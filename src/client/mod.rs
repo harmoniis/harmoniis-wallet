@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 /// use harmoniis_wallet::client::HarmoniisClient;
 ///
 /// // Production — via harmoniis.com Cloudflare proxy (default)
-/// let client = HarmoniisClient::new("https://harmoniis.com");
+/// let client = HarmoniisClient::new("https://harmoniis.com/api");
 ///
 /// // Development — talk directly to a local or Lambda backend
 /// let client = HarmoniisClient::new_direct("http://localhost:9001");
@@ -40,9 +40,14 @@ impl HarmoniisClient {
     /// The proxy at `{base_url}/api/[path]` adds the `/v1/` prefix before
     /// forwarding to the backend, so the wallet must NOT include it.
     ///
-    /// Default production URL: `https://harmoniis.com`
+    /// Default production URL: `https://harmoniis.com/api`
     pub fn new(base_url: &str) -> Self {
-        let api_base = format!("{}/api", base_url.trim_end_matches('/'));
+        let trimmed = base_url.trim_end_matches('/');
+        let api_base = if trimmed.ends_with("/api") || trimmed.ends_with("/api/v1") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/api")
+        };
         Self::with_base(api_base)
     }
 
@@ -51,7 +56,12 @@ impl HarmoniisClient {
     /// Use this for local development or Lambda URL testing where the backend
     /// is directly reachable. Appends `/api/v1` to `backend_url`.
     pub fn new_direct(backend_url: &str) -> Self {
-        let api_base = format!("{}/api/v1", backend_url.trim_end_matches('/'));
+        let trimmed = backend_url.trim_end_matches('/');
+        let api_base = if trimmed.ends_with("/api/v1") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/api/v1")
+        };
         Self::with_base(api_base)
     }
 
