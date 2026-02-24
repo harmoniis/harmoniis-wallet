@@ -69,6 +69,37 @@ fn parse_keywords_csv(input: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn is_commercial_listing_post_type(post_type: &str) -> bool {
+    matches!(
+        post_type,
+        "service_offer"
+            | "service_request"
+            | "product_listing"
+            | "job_request"
+            | "provision"
+            | "goods_offer"
+    )
+}
+
+fn listing_descriptor_filename(post_type: &str) -> &'static str {
+    match post_type {
+        "service_offer" | "service_request" | "job_request" | "provision" => "service.md",
+        "product_listing" | "goods_offer" => "product.md",
+        _ => "description.md",
+    }
+}
+
+fn default_terms_markdown() -> String {
+    [
+        "# Terms",
+        "",
+        "1. Scope is exactly what is written in the listing descriptor attachment.",
+        "2. Buyer and seller must agree on delivery details through contract and bid flow.",
+        "3. Payment, pickup fee, and dispute/refund rules follow Harmoniis contract endpoints.",
+    ]
+    .join("\n")
+}
+
 fn next_contract_id() -> String {
     let n: u32 = rand::thread_rng().gen_range(1..999_999);
     format!("CTR_{}_{:06}", chrono::Utc::now().format("%Y"), n)
@@ -478,22 +509,48 @@ async fn main() -> anyhow::Result<()> {
             let nick = wallet
                 .nickname()?
                 .ok_or_else(|| anyhow::anyhow!("nickname not set; run 'hrmw identity register' first"))?;
+            let normalized_post_type = post_type.to_lowercase();
+            let attachments = if is_commercial_listing_post_type(&normalized_post_type) {
+                let descriptor_name = listing_descriptor_filename(&normalized_post_type);
+                let descriptor_title = descriptor_name
+                    .trim_end_matches(".md")
+                    .replace('_', " ")
+                    .replace('-', " ");
+                vec![
+                    PostAttachment {
+                        filename: "terms.md".to_string(),
+                        content: default_terms_markdown(),
+                        attachment_type: "text/markdown".to_string(),
+                    },
+                    PostAttachment {
+                        filename: descriptor_name.to_string(),
+                        content: format!(
+                            "# {}\n\n{}",
+                            descriptor_title,
+                            content
+                        ),
+                        attachment_type: "text/markdown".to_string(),
+                    },
+                ]
+            } else {
+                vec![PostAttachment {
+                    filename: "description.md".to_string(),
+                    content: format!("# Listing\n\n{}", content),
+                    attachment_type: "text/markdown".to_string(),
+                }]
+            };
             let post_id = make_client(api, direct)
                 .publish_post(
                     &PublishPostRequest {
                         author_fingerprint: fp,
                         author_nick: nick,
                         content: content.clone(),
-                        post_type,
+                        post_type: normalized_post_type,
                         witness_proof: None,
                         contract_id: None,
                         parent_id: None,
                         keywords: parse_keywords_csv(keywords.as_deref()),
-                        attachments: vec![PostAttachment {
-                            filename: "description.md".to_string(),
-                            content: format!("# Listing\n\n{}", content),
-                            attachment_type: "text/markdown".to_string(),
-                        }],
+                        attachments,
                         signature: id.sign(&format!("post:{content}")),
                     },
                     &webcash,
