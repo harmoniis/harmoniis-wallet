@@ -158,6 +158,7 @@ async fn test_full_6_phase_contract_flow() {
         parent_id: None,
         keywords: vec!["haiku".to_string(), "writing".to_string()],
         attachments: vec![],
+        activity_metadata: None,
         signature: offer_sig,
     };
     let offer_post_id = match client.publish_post(&offer_req, "").await {
@@ -254,6 +255,7 @@ async fn test_full_6_phase_contract_flow() {
         parent_id: None,
         keywords: vec!["bid".to_string()],
         attachments: vec![],
+        activity_metadata: None,
         signature: bid_sig,
     };
     let bid_post_id = match client.publish_post(&bid_req, "").await {

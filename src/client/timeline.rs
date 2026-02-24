@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -36,6 +38,58 @@ pub struct PostAttachment {
     pub attachment_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PostActivityMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_modes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_terms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_min: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_max: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participant_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fulfillment_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_urgency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compliance_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_cycle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invoice_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_label: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishPostRequest {
     pub author_fingerprint: String,
@@ -49,6 +103,8 @@ pub struct PublishPostRequest {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub attachments: Vec<PostAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_metadata: Option<PostActivityMetadata>,
     pub signature: String, // sign("post:{content}")
 }
 
