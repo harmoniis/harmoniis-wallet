@@ -14,6 +14,19 @@ pub struct RegisterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonationClaimRequest {
+    pub pgp_public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonationClaimResponse {
+    pub status: String,
+    pub webcash_secret: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishPostRequest {
     pub author_fingerprint: String,
     pub author_nick: String,
@@ -21,13 +34,39 @@ pub struct PublishPostRequest {
     pub post_type: String,            // "bid" | "service_offer" | "general"
     pub witness_proof: Option<String>, // for bids
     pub contract_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub keywords: Vec<String>,
     pub signature: String, // sign("post:{content}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RatePostRequest {
+    pub post_id: String,
+    pub actor_fingerprint: String,
+    pub vote: String,
+    pub signature: String, // sign("vote:{post_id}:{vote}")
 }
 
 // ── Client methods ────────────────────────────────────────────────────────────
 
 impl HarmoniisClient {
+    /// `POST /api/v1/donations`
+    /// Returns `{ status: donated|no_donation, webcash_secret?, message? }`.
+    pub async fn claim_donation(
+        &self,
+        req: &DonationClaimRequest,
+    ) -> Result<DonationClaimResponse> {
+        let resp = self
+            .http
+            .post(self.url("donations"))
+            .json(req)
+            .send()
+            .await?;
+        let resp = Self::check_status(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// `POST /api/v1/identity`
     /// Requires `X-Webcash-Secret` header.
     /// Returns the fingerprint.
@@ -76,6 +115,30 @@ impl HarmoniisClient {
             .ok_or_else(|| Error::InvalidFormat("missing post_id in publish response".into()))?
             .to_string();
         Ok(post_id)
+    }
+
+    /// `POST /api/v1/profiles/rate`
+    /// Requires `X-Webcash-Secret` header.
+    pub async fn rate_post(
+        &self,
+        req: &RatePostRequest,
+        webcash: &str,
+    ) -> Result<()> {
+        let body = json!({
+            "post_id": req.post_id,
+            "actor_fingerprint": req.actor_fingerprint,
+            "vote": req.vote,
+            "signature": req.signature,
+        });
+        let resp = self
+            .http
+            .post(self.url("profiles/rate"))
+            .header("X-Webcash-Secret", webcash)
+            .json(&body)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
     }
 
     /// `GET /api/v1/profile?fingerprint={fp}`

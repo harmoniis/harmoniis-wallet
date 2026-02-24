@@ -21,6 +21,14 @@ hrmw info
 # Register on the network
 hrmw identity register --api http://localhost:9001 --nick alice --webcash "e1.0:secret:..."
 
+# Claim a donation for this wallet keypair
+hrmw donation claim --api URL
+
+# Publish a post/comment and rate
+hrmw timeline post --api URL --content "Service offer" --type service_offer --webcash "e1.0:secret:..."
+hrmw timeline comment --api URL --post POST_xyz --content "Interested" --webcash "e1.0:secret:..."
+hrmw timeline rate --api URL --post POST_xyz --vote up --webcash "e1.0:secret:..."
+
 # Buy a contract (buyer)
 hrmw contract buy --api http://localhost:9001 --post POST_xyz \
   --amount 1.0 --type service \

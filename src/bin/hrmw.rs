@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use harmoniis_wallet::{
     client::{
         arbitration::{build_witness_commitment, BuyRequest},
-        timeline::{PublishPostRequest, RegisterRequest},
+        timeline::{DonationClaimRequest, PublishPostRequest, RatePostRequest, RegisterRequest},
         HarmoniisClient,
     },
     types::{Certificate, Contract, ContractStatus, ContractType, WitnessSecret, Role},
@@ -58,6 +58,15 @@ fn parse_amount_to_units(amount: &str) -> u64 {
         Ok(f) => (f * 1e8).round() as u64,
         Err(_) => 0,
     }
+}
+
+fn parse_keywords_csv(input: Option<&str>) -> Vec<String> {
+    input
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn next_contract_id() -> String {
@@ -125,9 +134,17 @@ enum Cmd {
     /// Show wallet summary (fingerprint, nickname, counts)
     Info,
 
+    /// Donation faucet operations
+    #[command(subcommand)]
+    Donation(DonationCmd),
+
     /// Identity operations
     #[command(subcommand)]
     Identity(IdentityCmd),
+
+    /// Timeline operations (post/comment/rate)
+    #[command(subcommand)]
+    Timeline(TimelineCmd),
 
     /// Contract lifecycle
     #[command(subcommand)]
@@ -141,6 +158,12 @@ enum Cmd {
 // ── Identity ──────────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
+enum DonationCmd {
+    /// Claim one donation token for this wallet fingerprint (one per key)
+    Claim,
+}
+
+#[derive(Subcommand)]
 enum IdentityCmd {
     /// Register this wallet's identity on the Harmoniis network
     Register {
@@ -150,6 +173,51 @@ enum IdentityCmd {
         webcash: String,
         #[arg(long)]
         about: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TimelineCmd {
+    /// Publish a public timeline post
+    Post {
+        /// Post content
+        #[arg(long)]
+        content: String,
+        /// Post type (e.g. general, service_offer)
+        #[arg(long, default_value = "general")]
+        post_type: String,
+        /// Webcash to pay post fee
+        #[arg(long)]
+        webcash: String,
+        /// Optional comma-separated keywords
+        #[arg(long)]
+        keywords: Option<String>,
+    },
+
+    /// Publish a public comment under an existing post
+    Comment {
+        /// Parent post ID
+        #[arg(long)]
+        post: String,
+        /// Comment content
+        #[arg(long)]
+        content: String,
+        /// Webcash to pay comment fee
+        #[arg(long)]
+        webcash: String,
+    },
+
+    /// Rate a post/comment (up/down)
+    Rate {
+        /// Target post ID
+        #[arg(long)]
+        post: String,
+        /// Vote: up|down
+        #[arg(long, default_value = "up")]
+        vote: String,
+        /// Webcash to pay rating fee
+        #[arg(long)]
+        webcash: String,
     },
 }
 
@@ -343,6 +411,40 @@ async fn main() -> anyhow::Result<()> {
             println!("API:           {} ({})", api, if direct { "direct" } else { "proxy" });
         }
 
+        // ── donation claim ────────────────────────────────────────────────────
+        Cmd::Donation(DonationCmd::Claim) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            let resp = make_client(api, direct)
+                .claim_donation(&DonationClaimRequest {
+                    pgp_public_key: id.public_key_hex(),
+                    signature: id.sign("donation-request"),
+                })
+                .await?;
+            match resp.status.as_str() {
+                "donated" => {
+                    if let Some(secret) = resp.webcash_secret {
+                        println!("Donation claimed.");
+                        println!("Webcash: {secret}");
+                    } else {
+                        anyhow::bail!("donation response missing webcash_secret");
+                    }
+                }
+                "no_donation" => {
+                    println!(
+                        "{}",
+                        resp.message.unwrap_or_else(|| "No donation available yet.".to_string())
+                    );
+                }
+                other => {
+                    anyhow::bail!(
+                        "unexpected donation status '{other}': {}",
+                        serde_json::to_string(&resp)?
+                    );
+                }
+            }
+        }
+
         // ── identity register ─────────────────────────────────────────────────
         Cmd::Identity(IdentityCmd::Register { nick, webcash, about }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
@@ -361,6 +463,87 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             wallet.set_nickname(&nick)?;
             println!("Registered as '{nick}'. Fingerprint: {fp}");
+        }
+
+        // ── timeline post ─────────────────────────────────────────────────────
+        Cmd::Timeline(TimelineCmd::Post {
+            content,
+            post_type,
+            webcash,
+            keywords,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            let fp = id.fingerprint();
+            let nick = wallet
+                .nickname()?
+                .ok_or_else(|| anyhow::anyhow!("nickname not set; run 'hrmw identity register' first"))?;
+            let post_id = make_client(api, direct)
+                .publish_post(
+                    &PublishPostRequest {
+                        author_fingerprint: fp,
+                        author_nick: nick,
+                        content: content.clone(),
+                        post_type,
+                        witness_proof: None,
+                        contract_id: None,
+                        parent_id: None,
+                        keywords: parse_keywords_csv(keywords.as_deref()),
+                        signature: id.sign(&format!("post:{content}")),
+                    },
+                    &webcash,
+                )
+                .await?;
+            println!("Post published: {post_id}");
+        }
+
+        // ── timeline comment ──────────────────────────────────────────────────
+        Cmd::Timeline(TimelineCmd::Comment { post, content, webcash }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            let fp = id.fingerprint();
+            let nick = wallet
+                .nickname()?
+                .ok_or_else(|| anyhow::anyhow!("nickname not set; run 'hrmw identity register' first"))?;
+            let comment_id = make_client(api, direct)
+                .publish_post(
+                    &PublishPostRequest {
+                        author_fingerprint: fp,
+                        author_nick: nick,
+                        content: content.clone(),
+                        post_type: "comment".to_string(),
+                        witness_proof: None,
+                        contract_id: None,
+                        parent_id: Some(post),
+                        keywords: vec!["comment".to_string()],
+                        signature: id.sign(&format!("post:{content}")),
+                    },
+                    &webcash,
+                )
+                .await?;
+            println!("Comment published: {comment_id}");
+        }
+
+        // ── timeline rate ─────────────────────────────────────────────────────
+        Cmd::Timeline(TimelineCmd::Rate { post, vote, webcash }) => {
+            let vote = vote.to_lowercase();
+            if vote != "up" && vote != "down" {
+                anyhow::bail!("vote must be 'up' or 'down'");
+            }
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            make_client(api, direct)
+                .rate_post(
+                    &RatePostRequest {
+                        post_id: post.clone(),
+                        actor_fingerprint: id.fingerprint(),
+                        vote: vote.clone(),
+                        signature: id.sign(&format!("vote:{post}:{vote}")),
+                    },
+                    &webcash,
+                )
+                .await?;
+            println!("Rated post {post}: {vote}");
         }
 
         // ── contract list ─────────────────────────────────────────────────────
@@ -606,7 +789,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── contract bid ──────────────────────────────────────────────────────
-        Cmd::Contract(ContractCmd::Bid { post: _, contract, webcash, content }) => {
+        Cmd::Contract(ContractCmd::Bid { post, contract, webcash, content }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
             let fp = id.fingerprint();
@@ -634,6 +817,7 @@ async fn main() -> anyhow::Result<()> {
                         post_type: "bid".to_string(),
                         witness_proof: Some(proof_str),
                         contract_id: Some(contract),
+                        parent_id: Some(post),
                         keywords: vec!["bid".to_string()],
                         signature: sig,
                     },

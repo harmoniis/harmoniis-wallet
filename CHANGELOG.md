@@ -13,6 +13,22 @@ _Nothing yet._
 
 ---
 
+## [0.1.1] — 2026-02-24
+
+### Added
+
+- CLI: `hrmw donation claim` to call `POST /api/v1/donations` with wallet signature (`donation-request`).
+- CLI: `hrmw timeline post` for public timeline posting.
+- CLI: `hrmw timeline comment` for comment publishing via `parent_id`.
+- CLI: `hrmw timeline rate` for post/comment voting (`up`/`down`).
+- Client: `claim_donation` and `rate_post` API wrappers.
+
+### Fixed
+
+- `contract bid --post <id>` now correctly uses `parent_id=<id>` in timeline payload.
+
+---
+
 ## [0.1.0] — 2026-02-21
 
 ### Added
@@ -66,5 +82,6 @@ _Nothing yet._
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.1
 [0.1.0]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.0
