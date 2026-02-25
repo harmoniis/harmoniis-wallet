@@ -17,24 +17,28 @@ use harmoniis_wallet::{
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
         timeline::{
-            DonationClaimRequest, PostAttachment, PublishPostRequest, RatePostRequest,
-            RegisterRequest,
+            DeletePostRequest, DonationClaimRequest, PostAttachment, PublishPostRequest,
+            RatePostRequest, RegisterRequest, StoragePresignRequest, UpdatePostRequest,
         },
     },
     types::{Certificate, Contract, ContractStatus, ContractType, Role, WitnessSecret},
     wallet::RgbWallet,
     Identity,
 };
+use rand::Rng;
 use webylib::{Amount as WebcashAmount, SecretWebcash};
 
 #[path = "hrmw/hrmw_support.rs"]
 mod hrmw_support;
+#[path = "hrmw/media.rs"]
+mod media;
 use hrmw_support::{
     build_activity_metadata, build_post_attachments, default_webcash_wallet_path,
-    extract_webcash_token, make_client, next_contract_id, now_utc, open_or_create_wallet,
-    open_webcash_wallet, parse_amount_to_units, parse_keywords_csv, pay_from_wallet,
-    required_amount_for_payment_retry, resolve_wallet_path,
+    extract_webcash_token, format_units_to_amount, make_client, next_contract_id, now_utc,
+    open_or_create_wallet, open_webcash_wallet, parse_amount_to_units, parse_keywords_csv,
+    pay_from_wallet, required_amount_for_payment_retry, resolve_wallet_path,
 };
+use media::{prepare_avatar_image, prepare_post_image};
 
 const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
@@ -111,6 +115,10 @@ enum Cmd {
     #[command(subcommand)]
     Identity(IdentityCmd),
 
+    /// Profile operations
+    #[command(subcommand)]
+    Profile(ProfileCmd),
+
     /// Timeline operations (post/comment/rate)
     #[command(subcommand)]
     Timeline(TimelineCmd),
@@ -122,6 +130,10 @@ enum Cmd {
     /// Certificate operations
     #[command(subcommand)]
     Certificate(CertCmd),
+
+    /// Webcash mining
+    #[command(subcommand)]
+    Webminer(WebminerCmd),
 }
 
 // ── Identity ──────────────────────────────────────────────────────────────────
@@ -172,6 +184,16 @@ enum IdentityCmd {
         nick: String,
         #[arg(long)]
         about: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Upload and set a profile picture (auto-cropped to square, max 1MB)
+    SetPicture {
+        /// Local image file path
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 
@@ -236,6 +258,9 @@ enum TimelineCmd {
         /// Optional extra attachment file path (repeatable)
         #[arg(long = "attachment")]
         attachment_files: Vec<PathBuf>,
+        /// Optional image attachment path (repeatable). Images are resized/compressed to <= 1MB.
+        #[arg(long = "image")]
+        image_files: Vec<PathBuf>,
     },
 
     /// Publish a public comment under an existing post
@@ -256,6 +281,26 @@ enum TimelineCmd {
         /// Vote: up|down
         #[arg(long, default_value = "up")]
         vote: String,
+    },
+
+    /// Delete your own post/comment by signed author proof
+    Delete {
+        /// Target post ID
+        #[arg(long)]
+        post: String,
+    },
+
+    /// Update your own post/comment (author-signed)
+    Update {
+        /// Target post ID
+        #[arg(long)]
+        post: String,
+        /// Updated content
+        #[arg(long)]
+        content: Option<String>,
+        /// Optional comma-separated keywords replacement
+        #[arg(long)]
+        keywords: Option<String>,
     },
 }
 
@@ -390,6 +435,135 @@ enum CertCmd {
     },
     /// Verify a certificate's witness proof is live
     Check { id: String },
+}
+
+#[derive(Subcommand)]
+enum WebminerCmd {
+    /// Start mining in the background
+    Start {
+        /// Webcash server URL
+        #[arg(long, default_value = "https://webcash.tech")]
+        server: String,
+        /// Maximum difficulty to mine at
+        #[arg(long, default_value_t = 80)]
+        max_difficulty: u32,
+        /// Force CPU-only mining (skip GPU detection)
+        #[arg(long)]
+        cpu_only: bool,
+        /// Accept the Webcash terms of service
+        #[arg(long)]
+        accept_terms: bool,
+    },
+    /// Stop the running miner
+    Stop,
+    /// Show miner status and statistics
+    Status,
+    /// Run miner in foreground (used internally by start)
+    #[command(hide = true)]
+    Run {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        max_difficulty: u32,
+        #[arg(long)]
+        cpu_only: bool,
+        #[arg(long)]
+        accept_terms: bool,
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long, name = "webcash-wallet")]
+        webcash_wallet: PathBuf,
+    },
+}
+
+async fn upload_post_images(
+    client: &harmoniis_wallet::client::HarmoniisClient,
+    identity: &Identity,
+    fingerprint: &str,
+    image_files: Vec<PathBuf>,
+) -> anyhow::Result<Vec<PostAttachment>> {
+    let mut out = Vec::new();
+    for file in image_files {
+        let prepared = prepare_post_image(&file)?;
+        let now = chrono::Utc::now();
+        let nonce: u16 = rand::thread_rng().gen_range(1000..9999);
+        let storage_path = format!(
+            "public/posts/{}-{}-{}",
+            now.format("%Y%m%d%H%M%S"),
+            nonce,
+            prepared.filename
+        );
+        let signature = identity.sign(&format!("presign:{storage_path}"));
+        let presign = client
+            .storage_presign(&StoragePresignRequest {
+                fingerprint: fingerprint.to_string(),
+                file_path: storage_path,
+                content_type: prepared.content_type.clone(),
+                is_public: true,
+                signature,
+            })
+            .await
+            .map_err(anyhow::Error::from)?;
+        client
+            .upload_presigned_bytes(
+                &presign.presigned_url,
+                prepared.bytes,
+                &prepared.content_type,
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        out.push(PostAttachment {
+            filename: prepared.filename,
+            content: None,
+            attachment_type: prepared.content_type,
+            s3_key: Some(presign.s3_key),
+            url: None,
+            is_public: true,
+        });
+    }
+    Ok(out)
+}
+
+async fn set_profile_picture(
+    client: &harmoniis_wallet::client::HarmoniisClient,
+    identity: &Identity,
+    file: &PathBuf,
+) -> anyhow::Result<String> {
+    let prepared = prepare_avatar_image(file)?;
+    let fingerprint = identity.fingerprint();
+    let storage_path = format!(
+        "profile/avatar-{}.jpg",
+        chrono::Utc::now().format("%Y%m%d%H%M%S")
+    );
+    let signature = identity.sign(&format!("presign:{storage_path}"));
+    let presign = client
+        .storage_presign(&StoragePresignRequest {
+            fingerprint: fingerprint.clone(),
+            file_path: storage_path,
+            content_type: prepared.content_type.clone(),
+            is_public: true,
+            signature,
+        })
+        .await
+        .map_err(anyhow::Error::from)?;
+    client
+        .upload_presigned_bytes(
+            &presign.presigned_url,
+            prepared.bytes,
+            &prepared.content_type,
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+    let update_signature = identity.sign(&format!("update_profile:{fingerprint}"));
+    client
+        .update_profile_picture(&fingerprint, &presign.s3_key, &update_signature)
+        .await
+        .map_err(anyhow::Error::from)?;
+    if presign.s3_key.contains("/profile/") || presign.s3_key.contains("/public/") {
+        Ok(format!("/api/storage/public/{}", presign.s3_key))
+    } else {
+        Ok(presign.s3_key)
+    }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -621,6 +795,16 @@ async fn main() -> anyhow::Result<()> {
             println!("Registered as '{nick}'. Fingerprint: {fp}");
         }
 
+        // ── profile set-picture ───────────────────────────────────────────────
+        Cmd::Profile(ProfileCmd::SetPicture { file }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let identity = wallet.identity()?;
+            let client = make_client(api, direct);
+            let final_url = set_profile_picture(&client, &identity, &file).await?;
+            println!("Profile picture updated.");
+            println!("URL: {final_url}");
+        }
+
         // ── timeline post ─────────────────────────────────────────────────────
         Cmd::Timeline(TimelineCmd::Post {
             content,
@@ -642,6 +826,7 @@ async fn main() -> anyhow::Result<()> {
             terms_file,
             descriptor_file,
             attachment_files,
+            image_files,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let id = wallet.identity()?;
@@ -650,13 +835,19 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
             })?;
             let normalized_post_type = post_type.to_lowercase();
-            let attachments = build_post_attachments(
+            let mut attachments = build_post_attachments(
                 &normalized_post_type,
                 &content,
                 terms_file,
                 descriptor_file,
                 attachment_files,
             )?;
+            if !image_files.is_empty() {
+                let client = make_client(api, direct);
+                let mut uploaded =
+                    upload_post_images(&client, &id, &fp, image_files).await?;
+                attachments.append(&mut uploaded);
+            }
             let activity_metadata = build_activity_metadata(
                 &normalized_post_type,
                 category,
@@ -673,7 +864,6 @@ async fn main() -> anyhow::Result<()> {
                 invoice_rule,
                 unit_label,
             )?;
-            let client = make_client(api, direct);
             let req = PublishPostRequest {
                 author_fingerprint: fp,
                 author_nick: nick,
@@ -687,6 +877,7 @@ async fn main() -> anyhow::Result<()> {
                 activity_metadata,
                 signature: id.sign(&format!("post:{content}")),
             };
+            let client = make_client(api, direct);
             let post_id = match client.publish_post(&req, "").await {
                 Ok(post_id) => post_id,
                 Err(err) => {
@@ -725,8 +916,11 @@ async fn main() -> anyhow::Result<()> {
                 keywords: vec!["comment".to_string()],
                 attachments: vec![PostAttachment {
                     filename: "comment.md".to_string(),
-                    content: format!("# Comment\n\n{}", content),
+                    content: Some(format!("# Comment\n\n{}", content)),
                     attachment_type: "text/markdown".to_string(),
+                    s3_key: None,
+                    url: None,
+                    is_public: false,
                 }],
                 activity_metadata: None,
                 signature: id.sign(&format!("post:{content}")),
@@ -777,6 +971,56 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(anyhow::Error::from)?;
             }
             println!("Rated post {post}: {vote}");
+        }
+
+        // ── timeline delete ───────────────────────────────────────────────────
+        Cmd::Timeline(TimelineCmd::Delete { post }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            let req = DeletePostRequest {
+                post_id: post.clone(),
+                author_fingerprint: id.fingerprint(),
+                signature: id.sign(&format!("delete_post:{post}")),
+            };
+            make_client(api, direct)
+                .delete_post(&req)
+                .await
+                .map_err(anyhow::Error::from)?;
+            println!("Deleted post: {post}");
+        }
+
+        // ── timeline update ───────────────────────────────────────────────────
+        Cmd::Timeline(TimelineCmd::Update {
+            post,
+            content,
+            keywords,
+        }) => {
+            if content.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true)
+                && keywords
+                    .as_deref()
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                anyhow::bail!("provide --content or --keywords");
+            }
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let id = wallet.identity()?;
+            let req = UpdatePostRequest {
+                post_id: post.clone(),
+                author_fingerprint: id.fingerprint(),
+                signature: id.sign(&format!("update_post:{post}")),
+                content,
+                keywords: keywords
+                    .as_deref()
+                    .map(|csv| parse_keywords_csv(Some(csv))),
+                attachments: None,
+                activity_metadata: None,
+            };
+            make_client(api, direct)
+                .update_post(&req)
+                .await
+                .map_err(anyhow::Error::from)?;
+            println!("Updated post: {post}");
         }
 
         // ── contract list ─────────────────────────────────────────────────────
@@ -945,9 +1189,11 @@ async fn main() -> anyhow::Result<()> {
                 Ok(v) => v,
                 Err(err) => {
                     let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, &amount) else {
+                    if required_amount_for_payment_retry(&err, &amount).is_none() {
                         return Err(err);
-                    };
+                    }
+                    // Contract buy should pay the explicit --amount requested by the buyer.
+                    let required = amount.clone();
                     let payment =
                         pay_from_wallet(&wallet_path, &id, &required, "contract buy").await?;
                     client
@@ -1080,8 +1326,11 @@ async fn main() -> anyhow::Result<()> {
                 keywords: vec!["bid".to_string()],
                 attachments: vec![PostAttachment {
                     filename: "bid.md".to_string(),
-                    content: "Bid commitment details".to_string(),
+                    content: Some("Bid commitment details".to_string()),
                     attachment_type: "text/markdown".to_string(),
+                    s3_key: None,
+                    url: None,
+                    is_public: false,
                 }],
                 activity_metadata: None,
                 signature: sig,
@@ -1285,9 +1534,13 @@ async fn main() -> anyhow::Result<()> {
                 Ok(v) => v,
                 Err(err) => {
                     let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, "0.015") else {
+                    if required_amount_for_payment_retry(&err, "0.015").is_none() {
                         return Err(err);
-                    };
+                    }
+                    let required = wallet
+                        .get_contract(&id)?
+                        .map(|c| format_units_to_amount((c.amount_units * 3) / 100))
+                        .unwrap_or_else(|| "0.015".to_string());
                     let payment =
                         pay_from_wallet(&wallet_path, &identity, &required, "contract pickup")
                             .await?;
@@ -1442,6 +1695,59 @@ async fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no proof for certificate {id}"))?;
             let result = make_client(api, direct).witness_check(&[proof_str]).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        // ── webminer ────────────────────────────────────────────────────────────
+        Cmd::Webminer(WebminerCmd::Start {
+            server,
+            max_difficulty,
+            cpu_only,
+            accept_terms,
+        }) => {
+            use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let webcash_wallet_path = default_webcash_wallet_path(&wallet_path);
+            let config = MinerConfig {
+                server_url: server,
+                wallet_path: wallet_path.clone(),
+                webcash_wallet_path,
+                max_difficulty,
+                backend: if cpu_only {
+                    BackendChoice::Cpu
+                } else {
+                    BackendChoice::Auto
+                },
+                accept_terms,
+            };
+            daemon::start(&config)?;
+        }
+        Cmd::Webminer(WebminerCmd::Stop) => {
+            harmoniis_wallet::miner::daemon::stop()?;
+        }
+        Cmd::Webminer(WebminerCmd::Status) => {
+            harmoniis_wallet::miner::daemon::status()?;
+        }
+        Cmd::Webminer(WebminerCmd::Run {
+            server,
+            max_difficulty,
+            cpu_only,
+            accept_terms,
+            wallet: run_wallet,
+            webcash_wallet,
+        }) => {
+            use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let config = MinerConfig {
+                server_url: server,
+                wallet_path: run_wallet,
+                webcash_wallet_path: webcash_wallet,
+                max_difficulty,
+                backend: if cpu_only {
+                    BackendChoice::Cpu
+                } else {
+                    BackendChoice::Auto
+                },
+                accept_terms,
+            };
+            daemon::run_mining_loop(config).await?;
         }
     }
 

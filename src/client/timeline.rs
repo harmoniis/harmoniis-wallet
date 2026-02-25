@@ -35,8 +35,44 @@ pub struct DonationClaimResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostAttachment {
     pub filename: String,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub attachment_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePresignRequest {
+    pub fingerprint: String,
+    pub file_path: String,
+    pub content_type: String,
+    pub is_public: bool,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePresignResponse {
+    pub presigned_url: String,
+    pub s3_key: String,
+    pub public_url: Option<String>,
+    pub expires_in: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileUpdateRequest {
+    pub fingerprint: String,
+    pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_picture: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -115,6 +151,28 @@ pub struct RatePostRequest {
     pub actor_fingerprint: String,
     pub vote: String,
     pub signature: String, // sign("vote:{post_id}:{vote}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletePostRequest {
+    pub post_id: String,
+    pub author_fingerprint: String,
+    pub signature: String, // sign("delete_post:{post_id}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePostRequest {
+    pub post_id: String,
+    pub author_fingerprint: String,
+    pub signature: String, // sign("update_post:{post_id}")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<PostAttachment>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_metadata: Option<PostActivityMetadata>,
 }
 
 // ── Client methods ────────────────────────────────────────────────────────────
@@ -198,6 +256,30 @@ impl HarmoniisClient {
         Ok(())
     }
 
+    /// `POST /api/v1/posts/delete`
+    pub async fn delete_post(&self, req: &DeletePostRequest) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.url("posts/delete"))
+            .json(req)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
+    /// `POST /api/v1/posts/update`
+    pub async fn update_post(&self, req: &UpdatePostRequest) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.url("posts/update"))
+            .json(req)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
+    }
+
     /// `GET /api/v1/profile?fingerprint={fp}`
     /// Returns the profile JSON (includes `public_key` field).
     pub async fn get_profile(&self, fingerprint: &str) -> Result<serde_json::Value> {
@@ -221,6 +303,68 @@ impl HarmoniisClient {
             .await?;
         let resp = Self::check_status(resp).await?;
         Ok(resp.json().await?)
+    }
+
+    /// `POST /api/v1/storage/presign`
+    pub async fn storage_presign(
+        &self,
+        req: &StoragePresignRequest,
+    ) -> Result<StoragePresignResponse> {
+        let resp = self
+            .http
+            .post(self.url("storage/presign"))
+            .json(req)
+            .send()
+            .await?;
+        let resp = Self::check_status(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Upload bytes to an S3 presigned PUT URL.
+    pub async fn upload_presigned_bytes(
+        &self,
+        presigned_url: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .put(presigned_url)
+            .header("Content-Type", content_type)
+            .body(bytes)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            Err(Error::Api { status, body })
+        }
+    }
+
+    /// `POST /api/v1/profile/update`
+    pub async fn update_profile_picture(
+        &self,
+        fingerprint: &str,
+        profile_picture: &str,
+        signature: &str,
+    ) -> Result<()> {
+        let req = ProfileUpdateRequest {
+            fingerprint: fingerprint.to_string(),
+            signature: signature.to_string(),
+            about: None,
+            skills: None,
+            profile_picture: Some(profile_picture.to_string()),
+        };
+        let resp = self
+            .http
+            .post(self.url("profile/update"))
+            .json(&req)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
     }
 
     /// `POST /api/v1/timeline` with an encrypted payload for private messaging.

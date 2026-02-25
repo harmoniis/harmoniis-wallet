@@ -156,21 +156,6 @@ pub fn required_amount_from_api_error(err: &anyhow::Error) -> Option<String> {
                     {
                         return Some(req);
                     }
-                    if let Some(req) = v
-                        .get("payment")
-                        .and_then(|p| p.get("normal_price"))
-                        .and_then(amount_to_string)
-                    {
-                        return Some(req);
-                    }
-                    if let Some(req) = v
-                        .get("payment")
-                        .and_then(|p| p.get("sale"))
-                        .and_then(|s| s.get("sale_price"))
-                        .and_then(amount_to_string)
-                    {
-                        return Some(req);
-                    }
                 }
             }
         }
@@ -218,6 +203,16 @@ pub fn parse_amount_to_units(amount: &str) -> u64 {
         Ok(f) => (f * 1e8).round() as u64,
         Err(_) => 0,
     }
+}
+
+pub fn format_units_to_amount(units: u64) -> String {
+    let whole = units / 100_000_000;
+    let frac = units % 100_000_000;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let frac_str = format!("{frac:08}");
+    format!("{whole}.{}", frac_str.trim_end_matches('0'))
 }
 
 pub fn parse_keywords_csv(input: Option<&str>) -> Vec<String> {
@@ -299,8 +294,11 @@ fn read_attachment(path: &Path) -> anyhow::Result<PostAttachment> {
         .to_string();
     Ok(PostAttachment {
         filename,
-        content,
+        content: Some(content),
         attachment_type: attachment_type_for(path),
+        s3_key: None,
+        url: None,
+        is_public: false,
     })
 }
 
@@ -402,10 +400,25 @@ pub fn build_post_attachments(
 ) -> anyhow::Result<Vec<PostAttachment>> {
     let mut attachments = Vec::new();
     if let Some(path) = terms_file {
-        attachments.push(read_attachment(&path)?);
+        let mut att = read_attachment(&path)?;
+        let lower = att.filename.to_lowercase();
+        att.filename = if lower.ends_with(".txt") {
+            "terms.txt".to_string()
+        } else {
+            "terms.md".to_string()
+        };
+        attachments.push(att);
     }
     if let Some(path) = descriptor_file {
-        attachments.push(read_attachment(&path)?);
+        let mut att = read_attachment(&path)?;
+        let default_name = listing_descriptor_filename(post_type);
+        let lower = att.filename.to_lowercase();
+        att.filename = if lower.ends_with(".txt") {
+            default_name.replacen(".md", ".txt", 1)
+        } else {
+            default_name.to_string()
+        };
+        attachments.push(att);
     }
     for path in attachment_files {
         attachments.push(read_attachment(&path)?);
@@ -423,20 +436,29 @@ pub fn build_post_attachments(
         Ok(vec![
             PostAttachment {
                 filename: "terms.md".to_string(),
-                content: default_terms_markdown(),
+                content: Some(default_terms_markdown()),
                 attachment_type: "text/markdown".to_string(),
+                s3_key: None,
+                url: None,
+                is_public: false,
             },
             PostAttachment {
                 filename: descriptor_name.to_string(),
-                content: format!("# {}\n\n{}", descriptor_title, content),
+                content: Some(format!("# {}\n\n{}", descriptor_title, content)),
                 attachment_type: "text/markdown".to_string(),
+                s3_key: None,
+                url: None,
+                is_public: false,
             },
         ])
     } else {
         Ok(vec![PostAttachment {
             filename: "description.md".to_string(),
-            content: format!("# Listing\n\n{}", content),
+            content: Some(format!("# Listing\n\n{}", content)),
             attachment_type: "text/markdown".to_string(),
+            s3_key: None,
+            url: None,
+            is_public: false,
         }])
     }
 }

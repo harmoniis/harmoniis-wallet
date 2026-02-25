@@ -30,8 +30,9 @@ path = "src/bin/hrmw.rs"
 [features]
 # Bundle SQLite from source — enables `cargo install` without system libsqlite3.
 # Disable with `default-features = false` to link against the system library instead.
-default = ["bundled-sqlite"]
+default = ["bundled-sqlite", "gpu"]
 bundled-sqlite = ["rusqlite/bundled"]
+gpu = ["dep:wgpu"]
 
 # DORMANT — Phase 3 security tokens (ContractBasket, Bond, RevenueShare).
 # Do NOT enable in production. Dependency order:
@@ -74,6 +75,17 @@ dirs-next   = "2"
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
 webylib     = "0.1.0"
+image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# Mining
+wgpu        = { version = "24", optional = true }
+rayon       = "1.10"
+base64      = "0.22"
+num-bigint  = "0.4"
+signal-hook = "0.3"
+async-trait = "0.1"
+bytemuck    = { version = "1", features = ["derive"] }
+libc        = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

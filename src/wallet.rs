@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
@@ -63,6 +64,7 @@ impl RgbWallet {
             );
             ",
         )?;
+        migrate_legacy_schema(&conn)?;
         Ok(Self { conn })
     }
 
@@ -263,6 +265,65 @@ impl RgbWallet {
         }
         Ok(())
     }
+}
+
+fn migrate_legacy_schema(conn: &Connection) -> Result<()> {
+    ensure_columns(
+        conn,
+        "contracts",
+        &[
+            ("contract_type", "TEXT NOT NULL DEFAULT 'service'"),
+            ("status", "TEXT NOT NULL DEFAULT 'issued'"),
+            ("witness_secret", "TEXT"),
+            ("witness_proof", "TEXT"),
+            ("amount_units", "INTEGER NOT NULL DEFAULT 0"),
+            ("work_spec", "TEXT NOT NULL DEFAULT ''"),
+            ("buyer_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+            ("seller_fingerprint", "TEXT"),
+            ("reference_post", "TEXT"),
+            ("delivery_deadline", "TEXT"),
+            ("role", "TEXT NOT NULL DEFAULT 'buyer'"),
+            ("delivered_text", "TEXT"),
+            ("certificate_id", "TEXT"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    )?;
+    ensure_columns(
+        conn,
+        "certificates",
+        &[
+            ("contract_id", "TEXT"),
+            ("witness_secret", "TEXT"),
+            ("witness_proof", "TEXT"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_columns(conn: &Connection, table: &str, required: &[(&str, &str)]) -> Result<()> {
+    let existing = current_columns(conn, table)?;
+    for (name, ddl) in required {
+        if existing.contains(*name) {
+            continue;
+        }
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {name} {ddl}");
+        conn.execute(&sql, [])?;
+    }
+    Ok(())
+}
+
+fn current_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let mut columns = HashSet::new();
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        columns.insert(name);
+    }
+    Ok(columns)
 }
 
 fn row_to_contract(row: &rusqlite::Row<'_>) -> Result<Contract> {

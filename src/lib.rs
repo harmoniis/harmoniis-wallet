@@ -3,6 +3,7 @@ pub mod client;
 pub mod crypto;
 pub mod error;
 pub mod identity;
+pub mod miner;
 pub mod types;
 pub mod wallet;
 

@@ -30,10 +30,16 @@ hrmw webcash info
 hrmw webcash insert "e1.0:secret:..."
 hrmw webcash check
 
-# Publish a post/comment and rate
-hrmw timeline post --content "Service offer" --post-type service_offer
+# Publish a listing with required text attachments (+ optional images)
+hrmw timeline post --content "Service offer" --post-type service_offer \
+  --terms-file terms.md --descriptor-file service.md --image offer.webp
+# Set profile picture (auto square-crop + <=1MB)
+hrmw profile set-picture --file avatar.png
+# Comment and rate
 hrmw timeline comment --post POST_xyz --content "Interested"
 hrmw timeline rate --post POST_xyz --vote up
+hrmw timeline update --post POST_xyz --content "Updated listing details"
+hrmw timeline delete --post POST_xyz
 
 # Buy a contract (buyer)
 hrmw contract buy --post POST_xyz \
