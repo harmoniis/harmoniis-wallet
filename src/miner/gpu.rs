@@ -4,14 +4,11 @@
 //! dispatch sizing and adapter capability limits.
 
 use async_trait::async_trait;
-use std::sync::atomic::Ordering;
 use wgpu::util::DeviceExt;
 
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
-use super::{
-    choose_best_result, CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
-};
+use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE};
 
 /// Default workgroup size (must match `@workgroup_size` in shader).
 const WORKGROUP_SIZE: u32 = 256;
@@ -307,14 +304,15 @@ impl GpuMiner {
         }
 
         encoder.copy_buffer_to_buffer(&result_buffer, 0, &staging_buffer, 0, RESULT_BUFFER_SIZE);
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = tokio::sync::oneshot::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device
+            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
         rx.await??;
 
         let data = buffer_slice.get_mapped_range();
@@ -370,20 +368,22 @@ impl MinerBackend for GpuMiner {
             .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
             .await?;
 
-        let mut total_attempts = 0u64;
-        let mut total_elapsed = 0.0f64;
+        let mut samples = Vec::with_capacity(8);
         for _ in 0..8 {
             let chunk = self
                 .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
                 .await?;
-            total_attempts = total_attempts.saturating_add(chunk.attempted);
-            total_elapsed += chunk.elapsed.as_secs_f64();
+            let secs = chunk.elapsed.as_secs_f64();
+            if secs > 0.0 {
+                samples.push(chunk.attempted as f64 / secs);
+            }
         }
 
-        if total_elapsed <= 0.0 {
+        if samples.is_empty() {
             return Ok(0.0);
         }
-        Ok(total_attempts as f64 / total_elapsed)
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(samples[samples.len() / 2])
     }
 
     fn max_batch_hint(&self) -> u32 {
@@ -397,7 +397,7 @@ impl MinerBackend for GpuMiner {
         difficulty: u32,
         start_nonce: u32,
         nonce_count: u32,
-        cancel: Option<CancelFlag>,
+        _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<MiningChunkResult> {
         let range_start = start_nonce.min(NONCE_SPACE_SIZE);
         let range_end = range_start
@@ -408,42 +408,14 @@ impl MinerBackend for GpuMiner {
         }
 
         let started = std::time::Instant::now();
-        let mut best: Option<MiningResult> = None;
-        let mut attempted = 0u64;
-        let mut cursor = range_start;
-
-        while cursor < range_end {
-            if let Some(flag) = cancel.as_ref() {
-                if flag.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-
-            let remaining = range_end - cursor;
-            let chunk_count = remaining.min(self.max_dispatch_nonces());
-            if chunk_count == 0 {
-                break;
-            }
-
-            let chunk_best = self
-                .dispatch_range(midstate, difficulty, cursor, chunk_count)
-                .await?;
-            attempted += chunk_count as u64;
-            best = choose_best_result(best, chunk_best);
-
-            if best.is_some() {
-                if let Some(flag) = cancel.as_ref() {
-                    flag.store(true, Ordering::Relaxed);
-                }
-                break;
-            }
-
-            cursor = cursor.saturating_add(chunk_count);
-        }
+        // Single large dispatch for GPU stability (especially AMD consumer GPUs).
+        let result = self
+            .dispatch_range(midstate, difficulty, range_start, range_end - range_start)
+            .await?;
 
         Ok(MiningChunkResult {
-            result: best,
-            attempted,
+            result,
+            attempted: (range_end - range_start) as u64,
             elapsed: started.elapsed(),
         })
     }

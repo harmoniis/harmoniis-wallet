@@ -63,17 +63,25 @@ hrmw contract pickup --id CTR_abc
 # Check witness proof status
 hrmw contract check --id CTR_abc
 
-# Webminer (CPU, GPU, or Hybrid)
+# Webminer (CPU or GPU)
+# Start mining (auto mode prefers GPU when available)
 hrmw webminer start --accept-terms
+# Run mining in foreground with real-time logs (no daemon)
+hrmw webminer run --accept-terms
+# Check miner status
 hrmw webminer status
+# Stop miner
+hrmw webminer stop
+
 # Force specific backend
 hrmw webminer start --backend gpu --accept-terms
-# Benchmark CPU/GPU/Hybrid locally
-hrmw webminer bench --cpu-threads 8 --cpu-target-mhs 90 --gpu-target-mhs 320
-# CPU with explicit worker cap
+hrmw webminer start --backend cpu --accept-terms
+
+# Limit CPU workers (CPU backend)
 hrmw webminer start --backend cpu --cpu-threads 4 --accept-terms
-# Hybrid with explicit CPU worker cap
-hrmw webminer start --backend hybrid --cpu-threads 4 --accept-terms
+
+# Optional local benchmark (numbers depend on hardware/thermal state/driver)
+hrmw webminer bench --cpu-threads 8
 
 # Non-production target (staging/dev)
 hrmw --api http://localhost:9001 --direct info

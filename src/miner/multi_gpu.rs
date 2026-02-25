@@ -162,20 +162,22 @@ impl MinerBackend for MultiGpuMiner {
             .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
             .await?;
 
-        let mut total_attempts = 0u64;
-        let mut total_elapsed = 0.0f64;
+        let mut samples = Vec::with_capacity(8);
         for _ in 0..8 {
             let chunk = self
                 .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
                 .await?;
-            total_attempts = total_attempts.saturating_add(chunk.attempted);
-            total_elapsed += chunk.elapsed.as_secs_f64();
+            let secs = chunk.elapsed.as_secs_f64();
+            if secs > 0.0 {
+                samples.push(chunk.attempted as f64 / secs);
+            }
         }
 
-        if total_elapsed <= 0.0 {
+        if samples.is_empty() {
             return Ok(0.0);
         }
-        Ok(total_attempts as f64 / total_elapsed)
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(samples[samples.len() / 2])
     }
 
     fn max_batch_hint(&self) -> u32 {

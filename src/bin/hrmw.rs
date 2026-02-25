@@ -440,7 +440,6 @@ enum CertCmd {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum WebminerBackendArg {
     Auto,
-    Hybrid,
     Gpu,
     Cpu,
 }
@@ -450,7 +449,6 @@ impl From<WebminerBackendArg> for harmoniis_wallet::miner::BackendChoice {
         use harmoniis_wallet::miner::BackendChoice;
         match value {
             WebminerBackendArg::Auto => BackendChoice::Auto,
-            WebminerBackendArg::Hybrid => BackendChoice::Hybrid,
             WebminerBackendArg::Gpu => BackendChoice::Gpu,
             WebminerBackendArg::Cpu => BackendChoice::Cpu,
         }
@@ -484,7 +482,7 @@ enum WebminerCmd {
     Stop,
     /// Show miner status and statistics
     Status,
-    /// Benchmark local mining backends (CPU -> GPU -> Hybrid)
+    /// Benchmark local mining backends (CPU -> GPU)
     Bench {
         /// Limit CPU worker threads (used by CPU benchmark)
         #[arg(long)]
@@ -499,12 +497,13 @@ enum WebminerCmd {
         #[arg(long)]
         strict: bool,
     },
-    /// Run miner in foreground (used internally by start)
-    #[command(hide = true)]
+    /// Run miner in foreground with live logs
     Run {
-        #[arg(long)]
+        /// Webcash server URL
+        #[arg(long, default_value = "https://webcash.tech")]
         server: String,
-        #[arg(long)]
+        /// Maximum difficulty to mine at
+        #[arg(long, default_value_t = 80)]
         max_difficulty: u32,
         #[arg(long, value_enum, default_value_t = WebminerBackendArg::Auto)]
         backend: WebminerBackendArg,
@@ -514,10 +513,12 @@ enum WebminerCmd {
         cpu_threads: Option<usize>,
         #[arg(long)]
         accept_terms: bool,
+        /// RGB wallet path (defaults to global --wallet / ~/.harmoniis/rgb.db)
         #[arg(long)]
-        wallet: PathBuf,
+        wallet: Option<PathBuf>,
+        /// Webcash wallet path (defaults to sibling webcash wallet path)
         #[arg(long, name = "webcash-wallet")]
-        webcash_wallet: PathBuf,
+        webcash_wallet: Option<PathBuf>,
     },
 }
 
@@ -535,14 +536,14 @@ async fn run_webminer_benchmarks(
     gpu_target_mhs: f64,
     strict: bool,
 ) -> anyhow::Result<()> {
-    use harmoniis_wallet::miner::cpu::CpuMiner;
+    use harmoniis_wallet::miner::simd_cpu::SimdCpuMiner;
     use harmoniis_wallet::miner::MinerBackend;
 
     let mut failed = false;
-    println!("Webminer benchmark plan: CPU -> GPU -> Hybrid");
+    println!("Webminer benchmark plan: CPU -> GPU");
     println!("cpu_threads={:?}", cpu_threads);
 
-    let cpu = CpuMiner::from_option(cpu_threads);
+    let cpu = SimdCpuMiner::from_option(cpu_threads);
     let cpu_mhs = cpu.benchmark().await? / 1_000_000.0;
     let cpu_status = benchmark_status_line(cpu_mhs, cpu_target_mhs);
     println!(
@@ -558,12 +559,12 @@ async fn run_webminer_benchmarks(
 
     #[cfg(feature = "gpu")]
     {
-        use harmoniis_wallet::miner::hybrid::HybridMiner;
         use harmoniis_wallet::miner::multi_gpu::MultiGpuMiner;
 
         match MultiGpuMiner::try_new().await {
             Some(gpu) => {
-                let gpu_mhs = gpu.benchmark().await? / 1_000_000.0;
+                let gpu_hps = gpu.benchmark().await?;
+                let gpu_mhs = gpu_hps / 1_000_000.0;
                 let gpu_status = benchmark_status_line(gpu_mhs, gpu_target_mhs);
                 println!(
                     "GPU: {:.2} Mh/s target={:.2} [{}]",
@@ -581,25 +582,11 @@ async fn run_webminer_benchmarks(
                 failed = true;
             }
         }
-
-        match HybridMiner::try_new(cpu_threads).await {
-            Some(hybrid) => {
-                let hybrid_mhs = hybrid.benchmark().await? / 1_000_000.0;
-                println!("Hybrid: {:.2} Mh/s", hybrid_mhs);
-                for line in hybrid.startup_summary() {
-                    println!("  {}", line);
-                }
-            }
-            None => {
-                println!("Hybrid: unavailable");
-            }
-        }
     }
 
     #[cfg(not(feature = "gpu"))]
     {
         println!("GPU: feature-disabled [MISS]");
-        println!("Hybrid: feature-disabled");
         failed = true;
     }
 
@@ -1882,6 +1869,9 @@ async fn main() -> anyhow::Result<()> {
             webcash_wallet,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let run_wallet = run_wallet.unwrap_or_else(|| wallet_path.clone());
+            let run_webcash_wallet =
+                webcash_wallet.unwrap_or_else(|| default_webcash_wallet_path(&run_wallet));
             let backend_choice = if cpu_only {
                 BackendChoice::Cpu
             } else {
@@ -1890,7 +1880,7 @@ async fn main() -> anyhow::Result<()> {
             let config = MinerConfig {
                 server_url: server,
                 wallet_path: run_wallet,
-                webcash_wallet_path: webcash_wallet,
+                webcash_wallet_path: run_webcash_wallet,
                 max_difficulty,
                 backend: backend_choice,
                 cpu_threads,

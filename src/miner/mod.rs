@@ -9,11 +9,10 @@ pub mod daemon;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 #[cfg(feature = "gpu")]
-pub mod hybrid;
-#[cfg(feature = "gpu")]
 pub mod multi_gpu;
 pub mod protocol;
 pub mod sha256;
+pub mod simd_cpu;
 pub mod stats;
 pub mod work_unit;
 
@@ -36,8 +35,6 @@ pub type CancelFlag = Arc<AtomicBool>;
 pub enum BackendChoice {
     /// Auto-detect fastest backend (GPU preferred).
     Auto,
-    /// Run CPU and GPU together.
-    Hybrid,
     /// Force GPU only.
     Gpu,
     /// Force CPU only.
@@ -48,7 +45,6 @@ impl BackendChoice {
     pub fn as_cli_str(self) -> &'static str {
         match self {
             BackendChoice::Auto => "auto",
-            BackendChoice::Hybrid => "hybrid",
             BackendChoice::Gpu => "gpu",
             BackendChoice::Cpu => "cpu",
         }
@@ -169,7 +165,7 @@ pub async fn select_backend(
 ) -> anyhow::Result<Box<dyn MinerBackend>> {
     match choice {
         BackendChoice::Cpu => {
-            let miner = cpu::CpuMiner::from_option(cpu_threads);
+            let miner = simd_cpu::SimdCpuMiner::from_option(cpu_threads);
             println!(
                 "Mining backend: {} ({} threads)",
                 miner.name(),
@@ -193,21 +189,6 @@ pub async fn select_backend(
                 anyhow::bail!("GPU support not compiled (enable 'gpu' feature)")
             }
         }
-        BackendChoice::Hybrid => {
-            #[cfg(feature = "gpu")]
-            {
-                if let Some(miner) = hybrid::HybridMiner::try_new(cpu_threads).await {
-                    println!("Mining backend: {}", miner.name());
-                    Ok(Box::new(miner))
-                } else {
-                    anyhow::bail!("Hybrid requested but no compatible GPU found")
-                }
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                anyhow::bail!("Hybrid support requires 'gpu' feature")
-            }
-        }
         BackendChoice::Auto => {
             #[cfg(feature = "gpu")]
             {
@@ -217,7 +198,7 @@ pub async fn select_backend(
                 }
             }
 
-            let miner = cpu::CpuMiner::from_option(cpu_threads);
+            let miner = simd_cpu::SimdCpuMiner::from_option(cpu_threads);
             println!("Mining backend: {} (no GPU available)", miner.name());
             Ok(Box::new(miner))
         }

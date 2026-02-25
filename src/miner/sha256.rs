@@ -139,6 +139,7 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use sha2::{Digest, Sha256};
 
     /// Verify our midstate + finalize matches sha2 crate on a 64-byte prefix + 12-byte tail.
@@ -231,6 +232,60 @@ mod tests {
         assert!(check_proof_of_work(&hash, 28));
         assert!(check_proof_of_work(&hash, 31));
         assert!(!check_proof_of_work(&hash, 32));
+    }
+
+    /// Mirrors the C++ webminer `check_proof_of_work` byte-by-byte.
+    fn cpp_check_proof_of_work(hash: &[u8; 32], mut difficulty: u32) -> bool {
+        let mut idx = 0usize;
+        while difficulty >= 8 {
+            if hash[idx] != 0 {
+                return false;
+            }
+            idx += 1;
+            difficulty -= 8;
+        }
+        match difficulty {
+            0 => true,
+            1 => hash[idx] <= 0x7f,
+            2 => hash[idx] <= 0x3f,
+            3 => hash[idx] <= 0x1f,
+            4 => hash[idx] <= 0x0f,
+            5 => hash[idx] <= 0x07,
+            6 => hash[idx] <= 0x03,
+            7 => hash[idx] <= 0x01,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn proof_of_work_check_matches_cpp_logic() {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+        for _ in 0..10_000 {
+            let mut hash = [0u8; 32];
+            rng.fill_bytes(&mut hash);
+            let d = rng.next_u32() % 64;
+            assert_eq!(
+                check_proof_of_work(&hash, d),
+                cpp_check_proof_of_work(&hash, d),
+                "difficulty mismatch at d={d}"
+            );
+        }
+    }
+
+    /// Vector from `webminer/test/server.cc`: accepted at difficulty 28.
+    #[test]
+    fn webminer_reference_preimage_vector_meets_mining_difficulty() {
+        let raw = "{\"legalese\": {\"terms\": true}, \"webcash\": [\"e190000:secret:b0e7525b420bc6efa5c356d0bb707d96a9d599c5c218134bd0f1dc5cf107e213\", \"e10000:secret:301b4fe3587ac6a871c6c7d4e06595d4eab9572a0515fe7295067d4e52772ed2\"], \"subsidy\": [\"e10000:secret:301b4fe3587ac6a871c6c7d4e06595d4eab9572a0515fe7295067d4e52772ed2\"], \"difficulty\": 28, \"nonce\":      1366624}";
+        let preimage_b64 = STANDARD.encode(raw.as_bytes());
+        let hash: [u8; 32] = Sha256::digest(preimage_b64.as_bytes()).into();
+        let bits = leading_zero_bits(&hash);
+        assert!(
+            bits >= 28,
+            "expected >=28 bits for reference preimage, got {bits}"
+        );
+        assert!(check_proof_of_work(&hash, 28));
+        assert!(cpp_check_proof_of_work(&hash, 28));
     }
 
     /// Fuzz test: random inputs with varying prefix sizes (1..8 blocks).

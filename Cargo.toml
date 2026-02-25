@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.12"
+version     = "0.1.13"
 edition     = "2021"
 rust-version = "1.85"
 description = "RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace (Witness-backed bearer state + Webcash fees)"

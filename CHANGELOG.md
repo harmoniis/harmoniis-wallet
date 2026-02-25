@@ -13,6 +13,15 @@ _Nothing yet._
 
 ---
 
+## [0.1.13] — 2026-02-25
+
+### Changed
+
+- Removed hybrid mining mode completely; supported webminer backends are now `auto|gpu|cpu`.
+- Updated CLI/docs/bench output to CPU+GPU only and removed all hybrid references.
+
+---
+
 ## [0.1.12] — 2026-02-25
 
 ### Added
@@ -23,7 +32,6 @@ _Nothing yet._
 
 ### Changed
 
-- Hybrid backend startup viability now applies explicit CPU-vs-GPU ratio thresholds and conservative CPU share caps to avoid GPU regressions.
 - Webminer startup diagnostics continue to print active setup details (backend mode, GPU devices, CPU threads, chunk size).
 
 ### Fixed
@@ -37,18 +45,17 @@ _Nothing yet._
 
 ### Added
 
-- Webminer backend selection now supports explicit `--backend auto|hybrid|gpu|cpu`.
-- Webminer now supports `--cpu-threads <N>` for CPU and hybrid worker control.
+- Webminer backend selection now supports explicit `--backend auto|gpu|cpu`.
+- Webminer now supports `--cpu-threads <N>` for CPU worker control.
 - Added `Multi-GPU` backend support that discovers and uses all compatible adapters concurrently.
 - Miner startup now prints setup diagnostics (backend mode, CPU threads, GPU device info, nonce chunking).
-- Added `Hybrid` backend mode for CPU + GPU combined mining.
 
 ### Changed
 
 - Miner backend trait now supports range-based mining with structured attempt/elapsed reporting.
 - GPU miner dispatch is now range-driven (`nonce_offset` + `nonce_count`) instead of hard-coded single-range execution.
 - Daemon hash rate and ETA now use actual attempted nonce counts returned by backends.
-- `BackendChoice::Auto` now prefers GPU backend (hybrid remains explicit opt-in).
+- `BackendChoice::Auto` now prefers GPU backend.
 
 ---
 

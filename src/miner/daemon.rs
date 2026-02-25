@@ -9,7 +9,7 @@ use webylib::SecretWebcash;
 use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-use super::{choose_best_result, select_backend, BackendChoice, MinerConfig, NONCE_SPACE_SIZE};
+use super::{select_backend, BackendChoice, MinerConfig, NONCE_SPACE_SIZE};
 
 /// PID file path: ~/.harmoniis/miner.pid
 pub fn pid_file_path() -> PathBuf {
@@ -290,7 +290,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
     // Select backend
     let backend = select_backend(config.backend, config.cpu_threads).await?;
-    let chunk_size = backend.max_batch_hint().clamp(1, NONCE_SPACE_SIZE);
+    let chunk_size = backend.max_batch_hint();
     println!("Mining setup:");
     println!("  backend_mode={}", config.backend.as_cli_str());
     println!("  backend_name={}", backend.name());
@@ -381,45 +381,19 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         // Mine
         work_unit_timer = std::time::Instant::now();
         let mut attempts_this_work_unit = 0u64;
-        let best_result = if chunk_size >= NONCE_SPACE_SIZE {
-            // Fast path: one full-range call (no chunk-loop overhead).
-            let chunk = backend
-                .mine_range(
-                    &wu.midstate,
-                    &nonce_table,
-                    target.difficulty,
-                    0,
-                    NONCE_SPACE_SIZE,
-                    None,
-                )
-                .await?;
-            attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
-            chunk.result
-        } else {
-            let mut nonce_start = 0u32;
-            let mut best_result = None;
-            while nonce_start < NONCE_SPACE_SIZE {
-                let count = (NONCE_SPACE_SIZE - nonce_start).min(chunk_size);
-                let chunk = backend
-                    .mine_range(
-                        &wu.midstate,
-                        &nonce_table,
-                        target.difficulty,
-                        nonce_start,
-                        count,
-                        None,
-                    )
-                    .await?;
-                attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
-                best_result = choose_best_result(best_result, chunk.result);
-
-                if best_result.is_some() {
-                    break;
-                }
-                nonce_start = nonce_start.saturating_add(count);
-            }
-            best_result
-        };
+        // Always mine a single full nonce-space range per work unit.
+        let chunk = backend
+            .mine_range(
+                &wu.midstate,
+                &nonce_table,
+                target.difficulty,
+                0,
+                NONCE_SPACE_SIZE,
+                None,
+            )
+            .await?;
+        attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
+        let best_result = chunk.result;
         let wu_elapsed = work_unit_timer.elapsed();
 
         tracker.add_attempts(attempts_this_work_unit);
@@ -432,13 +406,22 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 0.0
             };
             let snapshot = tracker.snapshot();
+            let expected_solutions = if target.difficulty > 0 {
+                let denom = 2.0_f64.powi(target.difficulty as i32);
+                snapshot.total_attempts as f64 / denom
+            } else {
+                0.0
+            };
+            let p_zero_pct = (-expected_solutions).exp() * 100.0;
             println!(
-                "speed={} difficulty={} solutions={}/{} eta={} (work_unit={:.2}s)",
+                "speed={} difficulty={} solutions={}/{} eta={} expected={:.2} p0={:.2}% (work_unit={:.2}s)",
                 stats::format_hash_rate(hps),
                 target.difficulty,
                 snapshot.solutions_accepted,
                 snapshot.solutions_found,
                 stats::estimate_time(hps, target.difficulty),
+                expected_solutions,
+                p_zero_pct,
                 wu_elapsed.as_secs_f64(),
             );
             last_stats_print = std::time::Instant::now();
