@@ -9,7 +9,7 @@ use webylib::SecretWebcash;
 use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-use super::{select_backend, BackendChoice, MinerConfig};
+use super::{choose_best_result, select_backend, BackendChoice, MinerConfig, NONCE_SPACE_SIZE};
 
 /// PID file path: ~/.harmoniis/miner.pid
 pub fn pid_file_path() -> PathBuf {
@@ -27,6 +27,73 @@ pub fn log_file_path() -> PathBuf {
 pub fn orphan_log_path() -> PathBuf {
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".harmoniis").join("miner_orphans.log")
+}
+
+/// Pending keep log (accepted on server but not persisted locally yet): ~/.harmoniis/miner_pending_keeps.log
+pub fn pending_keep_log_path() -> PathBuf {
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".harmoniis").join("miner_pending_keeps.log")
+}
+
+fn is_duplicate_wallet_row_error(err: &webylib::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("unique constraint failed") || msg.contains("constraint failed")
+}
+
+fn append_pending_keep_secret(
+    path: &std::path::Path,
+    keep_secret: &SecretWebcash,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let line = format!("{}\n", keep_secret);
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+async fn claim_accepted_keep_secret(
+    webcash_wallet: &webylib::Wallet,
+    wallet_path: &std::path::Path,
+    pending_path: &std::path::Path,
+    keep_secret: &SecretWebcash,
+) {
+    match webcash_wallet.insert(keep_secret.clone()).await {
+        Ok(()) => println!(
+            "Claimed/replaced mined webcash in wallet: {}",
+            wallet_path.display()
+        ),
+        Err(e) if is_duplicate_wallet_row_error(&e) => {
+            println!(
+                "Mined webcash already exists in wallet: {}",
+                wallet_path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to claim/replacement-insert mined webcash ({}): {}",
+                wallet_path.display(),
+                e
+            );
+            match append_pending_keep_secret(pending_path, keep_secret) {
+                Ok(()) => eprintln!(
+                    "Saved pending mined webcash claim code to {}",
+                    pending_path.display()
+                ),
+                Err(log_err) => eprintln!(
+                    "Warning: also failed to write pending keep log ({}): {}",
+                    pending_path.display(),
+                    log_err
+                ),
+            }
+        }
+    }
 }
 
 /// Check if a miner process is already running.
@@ -77,8 +144,14 @@ pub fn start(config: &MinerConfig) -> anyhow::Result<()> {
         .arg("run")
         .arg("--server")
         .arg(&config.server_url)
+        .arg("--backend")
+        .arg(config.backend.as_cli_str())
         .arg("--max-difficulty")
         .arg(config.max_difficulty.to_string());
+
+    if let Some(cpu_threads) = config.cpu_threads {
+        cmd.arg("--cpu-threads").arg(cpu_threads.to_string());
+    }
 
     if config.backend == BackendChoice::Cpu {
         cmd.arg("--cpu-only");
@@ -152,7 +225,10 @@ pub fn stop() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(pid_file_path());
 
     if is_running().is_some() {
-        println!("Miner (PID {}) did not stop gracefully, may need manual kill.", pid);
+        println!(
+            "Miner (PID {}) did not stop gracefully, may need manual kill.",
+            pid
+        );
     } else {
         println!("Miner stopped (PID {}).", pid);
     }
@@ -171,9 +247,15 @@ pub fn status() -> anyhow::Result<()> {
                 let json = std::fs::read_to_string(&status_path)?;
                 let s: stats::MinerStats = serde_json::from_str(&json)?;
                 println!("  Backend:    {}", s.backend);
-                println!("  Hash rate:  {}", stats::format_hash_rate(s.hash_rate_mhs * 1_000_000.0));
+                println!(
+                    "  Hash rate:  {}",
+                    stats::format_hash_rate(s.hash_rate_mhs * 1_000_000.0)
+                );
                 println!("  Attempts:   {}", s.total_attempts);
-                println!("  Solutions:  {} found, {} accepted", s.solutions_found, s.solutions_accepted);
+                println!(
+                    "  Solutions:  {} found, {} accepted",
+                    s.solutions_found, s.solutions_accepted
+                );
                 println!("  Difficulty: {}", s.difficulty);
                 println!("  Uptime:     {}s", s.uptime_secs);
                 let hps = s.hash_rate_mhs * 1_000_000.0;
@@ -207,7 +289,21 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     std::fs::write(pid_file_path(), pid.to_string())?;
 
     // Select backend
-    let backend = select_backend(config.backend).await?;
+    let backend = select_backend(config.backend, config.cpu_threads).await?;
+    let chunk_size = backend.max_batch_hint().clamp(1, NONCE_SPACE_SIZE);
+    println!("Mining setup:");
+    println!("  backend_mode={}", config.backend.as_cli_str());
+    println!("  backend_name={}", backend.name());
+    println!("  nonce_chunk_size={}", chunk_size);
+    println!(
+        "  cpu_system_threads={}",
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    );
+    for line in backend.startup_summary() {
+        println!("  {}", line);
+    }
 
     // Initialize protocol client
     let protocol = MiningProtocol::new(&config.server_url)?;
@@ -220,7 +316,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let webcash_wallet = webylib::Wallet::open(&config.webcash_wallet_path)
         .await
         .map_err(|e| anyhow::anyhow!("failed to open webcash wallet: {}", e))?;
+    let pending_keep_path = pending_keep_log_path();
     println!("Webcash wallet: {}", config.webcash_wallet_path.display());
+    println!("Pending keep log: {}", pending_keep_path.display());
 
     // Initialize nonce table (shared across all work units)
     let nonce_table = NonceTable::new();
@@ -235,7 +333,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     );
 
     let mut last_target_fetch = std::time::Instant::now();
+    let mut last_stats_print = std::time::Instant::now();
     let target_refresh_interval = std::time::Duration::from_secs(15);
+    let stats_print_interval = std::time::Duration::from_secs(5);
+    let mut work_unit_timer;
 
     // Main mining loop
     while !shutdown.load(Ordering::Relaxed) {
@@ -244,7 +345,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             match protocol.get_target().await {
                 Ok(new_target) => {
                     if new_target.difficulty != target.difficulty {
-                        println!("Difficulty changed: {} → {}", target.difficulty, new_target.difficulty);
+                        println!(
+                            "Difficulty changed: {} -> {}",
+                            target.difficulty, new_target.difficulty
+                        );
                     }
                     target = new_target;
                     tracker.set_difficulty(target.difficulty);
@@ -254,20 +358,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 }
             }
             last_target_fetch = std::time::Instant::now();
-
-            // Write stats
             let _ = tracker.write_to_file(&status_path);
-
-            // Print stats
-            let s = tracker.snapshot();
-            println!(
-                "speed={} difficulty={} solutions={}/{} eta={}",
-                stats::format_hash_rate(s.hash_rate_mhs * 1_000_000.0),
-                s.difficulty,
-                s.solutions_accepted,
-                s.solutions_found,
-                stats::estimate_time(s.hash_rate_mhs * 1_000_000.0, s.difficulty),
-            );
         }
 
         // Skip if difficulty exceeds our max
@@ -281,18 +372,82 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         }
 
         // Build work unit
-        let wu = WorkUnit::new(target.difficulty, target.mining_amount, target.subsidy_amount);
+        let wu = WorkUnit::new(
+            target.difficulty,
+            target.mining_amount,
+            target.subsidy_amount,
+        );
 
         // Mine
-        let result = backend
-            .mine_work_unit(&wu.midstate, &nonce_table, target.difficulty)
-            .await?;
+        work_unit_timer = std::time::Instant::now();
+        let mut attempts_this_work_unit = 0u64;
+        let best_result = if chunk_size >= NONCE_SPACE_SIZE {
+            // Fast path: one full-range call (no chunk-loop overhead).
+            let chunk = backend
+                .mine_range(
+                    &wu.midstate,
+                    &nonce_table,
+                    target.difficulty,
+                    0,
+                    NONCE_SPACE_SIZE,
+                    None,
+                )
+                .await?;
+            attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
+            chunk.result
+        } else {
+            let mut nonce_start = 0u32;
+            let mut best_result = None;
+            while nonce_start < NONCE_SPACE_SIZE {
+                let count = (NONCE_SPACE_SIZE - nonce_start).min(chunk_size);
+                let chunk = backend
+                    .mine_range(
+                        &wu.midstate,
+                        &nonce_table,
+                        target.difficulty,
+                        nonce_start,
+                        count,
+                        None,
+                    )
+                    .await?;
+                attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
+                best_result = choose_best_result(best_result, chunk.result);
 
-        tracker.add_attempts(1_000_000);
+                if best_result.is_some() {
+                    break;
+                }
+                nonce_start = nonce_start.saturating_add(count);
+            }
+            best_result
+        };
+        let wu_elapsed = work_unit_timer.elapsed();
 
-        if let Some(solution) = result {
+        tracker.add_attempts(attempts_this_work_unit);
+
+        // Print stats periodically (after each work unit if enough time passed)
+        if last_stats_print.elapsed() >= stats_print_interval {
+            let hps = if wu_elapsed.as_secs_f64() > 0.0 {
+                attempts_this_work_unit as f64 / wu_elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
+            let snapshot = tracker.snapshot();
+            println!(
+                "speed={} difficulty={} solutions={}/{} eta={} (work_unit={:.2}s)",
+                stats::format_hash_rate(hps),
+                target.difficulty,
+                snapshot.solutions_accepted,
+                snapshot.solutions_found,
+                stats::estimate_time(hps, target.difficulty),
+                wu_elapsed.as_secs_f64(),
+            );
+            last_stats_print = std::time::Instant::now();
+        }
+
+        if let Some(solution) = best_result {
             tracker.record_solution();
-            let preimage = wu.preimage_string(&nonce_table, solution.nonce1_idx, solution.nonce2_idx);
+            let preimage =
+                wu.preimage_string(&nonce_table, solution.nonce1_idx, solution.nonce2_idx);
 
             println!(
                 "SOLUTION FOUND! difficulty={} hash=0x{}",
@@ -304,31 +459,28 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             match protocol.submit_report(&preimage, &solution.hash).await {
                 Ok(resp) => {
                     tracker.record_accepted();
-                    println!(
-                        "Mining report accepted! keep={}",
-                        wu.keep_secret
-                    );
+                    println!("Mining report accepted! keep={}", wu.keep_secret);
 
                     // Update difficulty if server says so
                     if let Some(new_diff) = resp.difficulty_target {
                         if new_diff != target.difficulty {
-                            println!("Difficulty adjustment: {} → {}", target.difficulty, new_diff);
+                            println!(
+                                "Difficulty adjustment: {} → {}",
+                                target.difficulty, new_diff
+                            );
                             target.difficulty = new_diff;
                             tracker.set_difficulty(new_diff);
                         }
                     }
 
-                    // Insert mined webcash into the wallet
-                    let keep_str = wu.keep_secret.to_string();
-                    match SecretWebcash::parse(&keep_str) {
-                        Ok(parsed) => {
-                            match webcash_wallet.insert(parsed).await {
-                                Ok(()) => println!("Inserted into wallet: {}", config.webcash_wallet_path.display()),
-                                Err(e) => eprintln!("Warning: failed to insert into wallet: {}", e),
-                            }
-                        }
-                        Err(e) => eprintln!("Warning: failed to parse mined secret: {}", e),
-                    }
+                    // Claim and rotate mined keep secret through wallet insert/replace.
+                    claim_accepted_keep_secret(
+                        &webcash_wallet,
+                        &config.webcash_wallet_path,
+                        &pending_keep_path,
+                        &wu.keep_secret,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     eprintln!("Mining report rejected: {}", e);
@@ -360,4 +512,39 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let _ = tracker.write_to_file(&status_path);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use webylib::Error as WebylibError;
+
+    fn sample_secret() -> SecretWebcash {
+        SecretWebcash::parse(
+            "e1.0:secret:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .expect("valid secret")
+    }
+
+    #[test]
+    fn append_pending_keep_secret_writes_secret_token_line() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pending_path = temp.path().join("pending_keeps.log");
+        let secret = sample_secret();
+
+        append_pending_keep_secret(&pending_path, &secret).expect("append pending keep");
+
+        let content = fs::read_to_string(&pending_path).expect("read pending log");
+        assert_eq!(content, format!("{}\n", secret));
+    }
+
+    #[test]
+    fn duplicate_wallet_error_detection_matches_constraint_text() {
+        let duplicate =
+            WebylibError::wallet("UNIQUE constraint failed: unspent_outputs.secret_hash");
+        assert!(is_duplicate_wallet_row_error(&duplicate));
+        let other = WebylibError::wallet("network timeout");
+        assert!(!is_duplicate_wallet_row_error(&other));
+    }
 }

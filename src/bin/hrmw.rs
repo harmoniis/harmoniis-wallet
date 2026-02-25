@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use harmoniis_wallet::{
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
@@ -437,6 +437,26 @@ enum CertCmd {
     Check { id: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum WebminerBackendArg {
+    Auto,
+    Hybrid,
+    Gpu,
+    Cpu,
+}
+
+impl From<WebminerBackendArg> for harmoniis_wallet::miner::BackendChoice {
+    fn from(value: WebminerBackendArg) -> Self {
+        use harmoniis_wallet::miner::BackendChoice;
+        match value {
+            WebminerBackendArg::Auto => BackendChoice::Auto,
+            WebminerBackendArg::Hybrid => BackendChoice::Hybrid,
+            WebminerBackendArg::Gpu => BackendChoice::Gpu,
+            WebminerBackendArg::Cpu => BackendChoice::Cpu,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum WebminerCmd {
     /// Start mining in the background
@@ -447,9 +467,15 @@ enum WebminerCmd {
         /// Maximum difficulty to mine at
         #[arg(long, default_value_t = 80)]
         max_difficulty: u32,
+        /// Mining backend policy
+        #[arg(long, value_enum, default_value_t = WebminerBackendArg::Auto)]
+        backend: WebminerBackendArg,
         /// Force CPU-only mining (skip GPU detection)
         #[arg(long)]
         cpu_only: bool,
+        /// Limit CPU worker threads (used by CPU backend)
+        #[arg(long)]
+        cpu_threads: Option<usize>,
         /// Accept the Webcash terms of service
         #[arg(long)]
         accept_terms: bool,
@@ -458,6 +484,21 @@ enum WebminerCmd {
     Stop,
     /// Show miner status and statistics
     Status,
+    /// Benchmark local mining backends (CPU -> GPU -> Hybrid)
+    Bench {
+        /// Limit CPU worker threads (used by CPU benchmark)
+        #[arg(long)]
+        cpu_threads: Option<usize>,
+        /// Minimum expected CPU speed (Mh/s) for pass/fail reporting
+        #[arg(long, default_value_t = 90.0)]
+        cpu_target_mhs: f64,
+        /// Minimum expected GPU speed (Mh/s) for pass/fail reporting
+        #[arg(long, default_value_t = 320.0)]
+        gpu_target_mhs: f64,
+        /// Exit non-zero when a target is missed
+        #[arg(long)]
+        strict: bool,
+    },
     /// Run miner in foreground (used internally by start)
     #[command(hide = true)]
     Run {
@@ -465,8 +506,12 @@ enum WebminerCmd {
         server: String,
         #[arg(long)]
         max_difficulty: u32,
+        #[arg(long, value_enum, default_value_t = WebminerBackendArg::Auto)]
+        backend: WebminerBackendArg,
         #[arg(long)]
         cpu_only: bool,
+        #[arg(long)]
+        cpu_threads: Option<usize>,
         #[arg(long)]
         accept_terms: bool,
         #[arg(long)]
@@ -474,6 +519,94 @@ enum WebminerCmd {
         #[arg(long, name = "webcash-wallet")]
         webcash_wallet: PathBuf,
     },
+}
+
+fn benchmark_status_line(measured_mhs: f64, target_mhs: f64) -> &'static str {
+    if measured_mhs >= target_mhs {
+        "PASS"
+    } else {
+        "MISS"
+    }
+}
+
+async fn run_webminer_benchmarks(
+    cpu_threads: Option<usize>,
+    cpu_target_mhs: f64,
+    gpu_target_mhs: f64,
+    strict: bool,
+) -> anyhow::Result<()> {
+    use harmoniis_wallet::miner::cpu::CpuMiner;
+    use harmoniis_wallet::miner::MinerBackend;
+
+    let mut failed = false;
+    println!("Webminer benchmark plan: CPU -> GPU -> Hybrid");
+    println!("cpu_threads={:?}", cpu_threads);
+
+    let cpu = CpuMiner::from_option(cpu_threads);
+    let cpu_mhs = cpu.benchmark().await? / 1_000_000.0;
+    let cpu_status = benchmark_status_line(cpu_mhs, cpu_target_mhs);
+    println!(
+        "CPU: {:.2} Mh/s target={:.2} [{}]",
+        cpu_mhs, cpu_target_mhs, cpu_status
+    );
+    for line in cpu.startup_summary() {
+        println!("  {}", line);
+    }
+    if cpu_status == "MISS" {
+        failed = true;
+    }
+
+    #[cfg(feature = "gpu")]
+    {
+        use harmoniis_wallet::miner::hybrid::HybridMiner;
+        use harmoniis_wallet::miner::multi_gpu::MultiGpuMiner;
+
+        match MultiGpuMiner::try_new().await {
+            Some(gpu) => {
+                let gpu_mhs = gpu.benchmark().await? / 1_000_000.0;
+                let gpu_status = benchmark_status_line(gpu_mhs, gpu_target_mhs);
+                println!(
+                    "GPU: {:.2} Mh/s target={:.2} [{}]",
+                    gpu_mhs, gpu_target_mhs, gpu_status
+                );
+                for line in gpu.startup_summary() {
+                    println!("  {}", line);
+                }
+                if gpu_status == "MISS" {
+                    failed = true;
+                }
+            }
+            None => {
+                println!("GPU: unavailable [MISS]");
+                failed = true;
+            }
+        }
+
+        match HybridMiner::try_new(cpu_threads).await {
+            Some(hybrid) => {
+                let hybrid_mhs = hybrid.benchmark().await? / 1_000_000.0;
+                println!("Hybrid: {:.2} Mh/s", hybrid_mhs);
+                for line in hybrid.startup_summary() {
+                    println!("  {}", line);
+                }
+            }
+            None => {
+                println!("Hybrid: unavailable");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("GPU: feature-disabled [MISS]");
+        println!("Hybrid: feature-disabled");
+        failed = true;
+    }
+
+    if strict && failed {
+        anyhow::bail!("benchmark targets not met");
+    }
+    Ok(())
 }
 
 async fn upload_post_images(
@@ -844,8 +977,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
             if !image_files.is_empty() {
                 let client = make_client(api, direct);
-                let mut uploaded =
-                    upload_post_images(&client, &id, &fp, image_files).await?;
+                let mut uploaded = upload_post_images(&client, &id, &fp, image_files).await?;
                 attachments.append(&mut uploaded);
             }
             let activity_metadata = build_activity_metadata(
@@ -995,7 +1127,10 @@ async fn main() -> anyhow::Result<()> {
             content,
             keywords,
         }) => {
-            if content.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true)
+            if content
+                .as_deref()
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
                 && keywords
                     .as_deref()
                     .map(|v| v.trim().is_empty())
@@ -1010,9 +1145,7 @@ async fn main() -> anyhow::Result<()> {
                 author_fingerprint: id.fingerprint(),
                 signature: id.sign(&format!("update_post:{post}")),
                 content,
-                keywords: keywords
-                    .as_deref()
-                    .map(|csv| parse_keywords_csv(Some(csv))),
+                keywords: keywords.as_deref().map(|csv| parse_keywords_csv(Some(csv))),
                 attachments: None,
                 activity_metadata: None,
             };
@@ -1701,21 +1834,25 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Webminer(WebminerCmd::Start {
             server,
             max_difficulty,
+            backend,
             cpu_only,
+            cpu_threads,
             accept_terms,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
             let webcash_wallet_path = default_webcash_wallet_path(&wallet_path);
+            let backend_choice = if cpu_only {
+                BackendChoice::Cpu
+            } else {
+                backend.into()
+            };
             let config = MinerConfig {
                 server_url: server,
                 wallet_path: wallet_path.clone(),
                 webcash_wallet_path,
                 max_difficulty,
-                backend: if cpu_only {
-                    BackendChoice::Cpu
-                } else {
-                    BackendChoice::Auto
-                },
+                backend: backend_choice,
+                cpu_threads,
                 accept_terms,
             };
             daemon::start(&config)?;
@@ -1726,25 +1863,37 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Webminer(WebminerCmd::Status) => {
             harmoniis_wallet::miner::daemon::status()?;
         }
+        Cmd::Webminer(WebminerCmd::Bench {
+            cpu_threads,
+            cpu_target_mhs,
+            gpu_target_mhs,
+            strict,
+        }) => {
+            run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
+        }
         Cmd::Webminer(WebminerCmd::Run {
             server,
             max_difficulty,
+            backend,
             cpu_only,
+            cpu_threads,
             accept_terms,
             wallet: run_wallet,
             webcash_wallet,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let backend_choice = if cpu_only {
+                BackendChoice::Cpu
+            } else {
+                backend.into()
+            };
             let config = MinerConfig {
                 server_url: server,
                 wallet_path: run_wallet,
                 webcash_wallet_path: webcash_wallet,
                 max_difficulty,
-                backend: if cpu_only {
-                    BackendChoice::Cpu
-                } else {
-                    BackendChoice::Auto
-                },
+                backend: backend_choice,
+                cpu_threads,
                 accept_terms,
             };
             daemon::run_mining_loop(config).await?;

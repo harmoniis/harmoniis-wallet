@@ -5,7 +5,12 @@
 //
 // Layout:
 //   binding 0: nonce_table — 1000 × u32 (base64-encoded 3-digit nonces, big-endian packed)
-//   binding 1: input       — 9 × u32 (midstate[0..7] + difficulty)
+//   binding 1: input       — 12 × u32
+//                            input[0..7]  = midstate[0..7]
+//                            input[8]     = difficulty
+//                            input[9]     = prefix_len
+//                            input[10]    = nonce_offset
+//                            input[11]    = nonce_count
 //   binding 2: output      — 11 × u32 atomic (best_difficulty, nonce1, nonce2, hash[0..7])
 
 // SHA256 round constants
@@ -29,7 +34,7 @@ const K = array<u32, 64>(
 );
 
 @group(0) @binding(0) var<storage, read> nonce_table: array<u32, 1000>;
-@group(0) @binding(1) var<storage, read> input: array<u32, 10>;  // midstate[8] + difficulty + prefix_len
+@group(0) @binding(1) var<storage, read> input: array<u32, 12>;  // midstate + params
 @group(0) @binding(2) var<storage, read_write> output: array<atomic<u32>, 11>;
 
 // SHA256 helper functions
@@ -63,15 +68,22 @@ fn sig1(x: u32) -> u32 {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let thread_id = gid.x;
+    let difficulty = input[8];
+    let prefix_len = input[9];
+    let nonce_offset = input[10];
+    let nonce_count = input[11];
+
+    if (gid.x >= nonce_count) {
+        return;
+    }
+
+    let thread_id = nonce_offset + gid.x;
     if (thread_id >= 1000000u) {
         return;
     }
 
     let nonce1_idx = thread_id / 1000u;
     let nonce2_idx = thread_id % 1000u;
-    let difficulty = input[8];
-    let prefix_len = input[9];
 
     // Load midstate
     let s0 = input[0]; let s1 = input[1]; let s2 = input[2]; let s3 = input[3];

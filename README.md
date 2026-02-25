@@ -63,6 +63,18 @@ hrmw contract pickup --id CTR_abc
 # Check witness proof status
 hrmw contract check --id CTR_abc
 
+# Webminer (CPU, GPU, or Hybrid)
+hrmw webminer start --accept-terms
+hrmw webminer status
+# Force specific backend
+hrmw webminer start --backend gpu --accept-terms
+# Benchmark CPU/GPU/Hybrid locally
+hrmw webminer bench --cpu-threads 8 --cpu-target-mhs 90 --gpu-target-mhs 320
+# CPU with explicit worker cap
+hrmw webminer start --backend cpu --cpu-threads 4 --accept-terms
+# Hybrid with explicit CPU worker cap
+hrmw webminer start --backend hybrid --cpu-threads 4 --accept-terms
+
 # Non-production target (staging/dev)
 hrmw --api http://localhost:9001 --direct info
 ```
@@ -70,6 +82,15 @@ hrmw --api http://localhost:9001 --direct info
 Default wallet: `~/.harmoniis/rgb.db`
 Webcash wallet: `~/.harmoniis/webcash.db`
 Default API: `https://harmoniis.com/api`
+
+### Webminer safety notes
+
+- `--backend gpu` uses `MultiGpuMiner`, which discovers and uses all compatible GPUs.
+- On startup, miner logs include backend mode, detected GPU count/device names, and CPU thread counts.
+- Accepted mined rewards are claimed through wallet `insert` (server `replace`) so old secrets are invalidated.
+- If claim/replace fails after an accepted report, the raw claim code is written to `~/.harmoniis/miner_pending_keeps.log` for manual recovery.
+- Recover pending claim codes with:
+  `cat ~/.harmoniis/miner_pending_keeps.log | xargs -n 1 hrmw webcash insert`
 
 ## Building
 

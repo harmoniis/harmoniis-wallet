@@ -13,6 +13,45 @@ _Nothing yet._
 
 ---
 
+## [0.1.12] — 2026-02-25
+
+### Added
+
+- CPU miner now includes AVX2 SIMD hashing path with runtime feature detection on `x86_64`.
+- Added unit coverage for multi-GPU nonce range splitting and miner pending-claim logging.
+- Added webminer benchmark command guidance and mining safety notes to README.
+
+### Changed
+
+- Hybrid backend startup viability now applies explicit CPU-vs-GPU ratio thresholds and conservative CPU share caps to avoid GPU regressions.
+- Webminer startup diagnostics continue to print active setup details (backend mode, GPU devices, CPU threads, chunk size).
+
+### Fixed
+
+- Accepted mining rewards are now claimed using wallet `insert` (`replace`) semantics so mined secrets are rotated and old secrets become invalid.
+- If claim/replace fails after accepted mining report, raw claim codes are persisted to `~/.harmoniis/miner_pending_keeps.log` for manual recovery.
+
+---
+
+## [0.1.11] — 2026-02-25
+
+### Added
+
+- Webminer backend selection now supports explicit `--backend auto|hybrid|gpu|cpu`.
+- Webminer now supports `--cpu-threads <N>` for CPU and hybrid worker control.
+- Added `Multi-GPU` backend support that discovers and uses all compatible adapters concurrently.
+- Miner startup now prints setup diagnostics (backend mode, CPU threads, GPU device info, nonce chunking).
+- Added `Hybrid` backend mode for CPU + GPU combined mining.
+
+### Changed
+
+- Miner backend trait now supports range-based mining with structured attempt/elapsed reporting.
+- GPU miner dispatch is now range-driven (`nonce_offset` + `nonce_count`) instead of hard-coded single-range execution.
+- Daemon hash rate and ETA now use actual attempted nonce counts returned by backends.
+- `BackendChoice::Auto` now prefers GPU backend (hybrid remains explicit opt-in).
+
+---
+
 ## [0.1.10] — 2026-02-24
 
 ### Changed
@@ -139,7 +178,9 @@ _Nothing yet._
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.12
+[0.1.11]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.11
 [0.1.10]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.10
 [0.1.9]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.9
 [0.1.4]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.4

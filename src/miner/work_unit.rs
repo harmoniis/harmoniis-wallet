@@ -101,7 +101,8 @@ impl WorkUnit {
         let keep_str_full = format!("e{}:secret:{}", keep_amount, hex::encode(keep_sk));
         let subsidy_str_full = format!("e{}:secret:{}", subsidy_amount, hex::encode(subsidy_sk));
         let keep_secret = SecretWebcash::parse(&keep_str_full).expect("valid keep secret format");
-        let subsidy_secret = SecretWebcash::parse(&subsidy_str_full).expect("valid subsidy secret format");
+        let subsidy_secret =
+            SecretWebcash::parse(&subsidy_str_full).expect("valid subsidy secret format");
 
         // Zero out raw key bytes
         keep_sk.fill(0);
@@ -197,10 +198,7 @@ mod tests {
     fn nonce_table_matches_cpp_webminer() {
         let table = NonceTable::new();
         // The C++ webminer starts with "MDAwMDAx..." which is "MDAw" + "MDAx" = nonces[0]+nonces[1]
-        assert_eq!(
-            std::str::from_utf8(&table.data[0..8]).unwrap(),
-            "MDAwMDAx"
-        );
+        assert_eq!(std::str::from_utf8(&table.data[0..8]).unwrap(), "MDAwMDAx");
     }
 
     #[test]
@@ -211,15 +209,30 @@ mod tests {
 
     #[test]
     fn work_unit_prefix_is_multiple_of_64() {
-        let wu = WorkUnit::new(28, Amount::from_wats(20_000_000_000_000), Amount::from_wats(1_000_000_000_000));
-        assert_eq!(wu.prefix_b64.len() % 64, 0, "prefix must be a multiple of 64 bytes");
-        assert!(wu.prefix_b64.len() >= 64, "prefix must be at least 64 bytes");
+        let wu = WorkUnit::new(
+            28,
+            Amount::from_wats(20_000_000_000_000),
+            Amount::from_wats(1_000_000_000_000),
+        );
+        assert_eq!(
+            wu.prefix_b64.len() % 64,
+            0,
+            "prefix must be a multiple of 64 bytes"
+        );
+        assert!(
+            wu.prefix_b64.len() >= 64,
+            "prefix must be at least 64 bytes"
+        );
     }
 
     #[test]
     fn work_unit_preimage_length() {
         let table = NonceTable::new();
-        let wu = WorkUnit::new(28, Amount::from_wats(20_000_000_000_000), Amount::from_wats(1_000_000_000_000));
+        let wu = WorkUnit::new(
+            28,
+            Amount::from_wats(20_000_000_000_000),
+            Amount::from_wats(1_000_000_000_000),
+        );
         let preimage = wu.preimage_string(&table, 0, 0);
         // preimage = prefix_b64 + nonce1(4) + nonce2(4) + "fQ=="(4)
         assert_eq!(preimage.len(), wu.prefix_b64.len() + 12);
@@ -228,7 +241,11 @@ mod tests {
     #[test]
     fn work_unit_preimage_hashes_correctly() {
         let table = NonceTable::new();
-        let wu = WorkUnit::new(28, Amount::from_wats(20_000_000_000_000), Amount::from_wats(1_000_000_000_000));
+        let wu = WorkUnit::new(
+            28,
+            Amount::from_wats(20_000_000_000_000),
+            Amount::from_wats(1_000_000_000_000),
+        );
 
         for n1 in [0u16, 42, 999] {
             for n2 in [0u16, 500, 999] {

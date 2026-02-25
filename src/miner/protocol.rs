@@ -58,16 +58,18 @@ impl MiningProtocol {
         let url = format!("{}/api/v1/target", self.server_url);
         let resp: TargetResponse = self.http.get(&url).send().await?.json().await?;
 
-        let mining_amount = Amount::from_wats(
-            resp.mining_amount
-                .parse::<i64>()
-                .map_err(|e| anyhow::anyhow!("invalid mining_amount: {}", e))?,
-        );
-        let subsidy_amount = Amount::from_wats(
-            resp.mining_subsidy_amount
-                .parse::<i64>()
-                .map_err(|e| anyhow::anyhow!("invalid mining_subsidy_amount: {}", e))?,
-        );
+        // Server returns amounts as decimal strings like "195.3125", not raw wats.
+        // Amount::from_str handles decimal parsing.
+        let mining_amount: Amount = resp.mining_amount.parse().map_err(|e| {
+            anyhow::anyhow!("invalid mining_amount '{}': {}", resp.mining_amount, e)
+        })?;
+        let subsidy_amount: Amount = resp.mining_subsidy_amount.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "invalid mining_subsidy_amount '{}': {}",
+                resp.mining_subsidy_amount,
+                e
+            )
+        })?;
 
         Ok(TargetInfo {
             difficulty: resp.difficulty_target_bits,

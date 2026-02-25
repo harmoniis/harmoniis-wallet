@@ -1,56 +1,97 @@
 //! GPU mining backend using wgpu compute shaders.
 //!
-//! Dispatches 1M threads on the GPU, each computing one SHA256 hash from midstate.
-//! Uses WGSL shader with atomicMax for the best solution found.
+//! Supports range-based mining over the fixed 1M nonce space using dynamic
+//! dispatch sizing and adapter capability limits.
 
 use async_trait::async_trait;
+use std::sync::atomic::Ordering;
 use wgpu::util::DeviceExt;
 
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
-use super::{MinerBackend, MiningResult};
+use super::{
+    choose_best_result, CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
+};
 
-/// Number of nonce combinations per dispatch (1000 × 1000).
-const TOTAL_NONCES: u32 = 1_000_000;
-
-/// Workgroup size (must match @workgroup_size in the WGSL shader).
+/// Default workgroup size (must match `@workgroup_size` in shader).
 const WORKGROUP_SIZE: u32 = 256;
 
-/// Result buffer layout (u32 words):
-/// [0] = best difficulty found (0 = no solution)
+/// Input buffer words:
+/// [0..8] = midstate words
+/// [8] = difficulty
+/// [9] = prefix_len
+/// [10] = nonce_offset
+/// [11] = nonce_count
+const INPUT_WORDS: usize = 12;
+
+/// Result buffer words:
+/// [0] = best difficulty found (0 = no valid solution)
 /// [1] = nonce1_idx
 /// [2] = nonce2_idx
-/// [3..11] = hash (8 × u32, big-endian)
-const RESULT_BUFFER_SIZE: u64 = 11 * 4; // 11 u32s = 44 bytes
+/// [3..11] = hash (8 x u32, big-endian)
+const RESULT_WORDS: usize = 11;
+const RESULT_BUFFER_SIZE: u64 = (RESULT_WORDS * 4) as u64;
 
 pub struct GpuMiner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    nonce_buffer: wgpu::Buffer,
     adapter_name: String,
+    adapter_backend: wgpu::Backend,
+    max_dispatch_nonces: u32,
 }
 
 impl GpuMiner {
-    /// Try to initialize a GPU miner. Returns None if no compatible GPU is found.
+    /// Try to initialize the default high-performance adapter.
     pub async fn try_new() -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
-        let adapter = instance
+        // Fast path: ask wgpu for a high-performance adapter.
+        let preferred = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
-            .await?;
+            .await;
+        if let Some(adapter) = preferred {
+            if let Some(miner) = Self::try_from_adapter(adapter).await {
+                return Some(miner);
+            }
+        }
 
-        let adapter_name = adapter.get_info().name.clone();
-        println!("GPU adapter: {} ({:?})", adapter_name, adapter.get_info().backend);
+        // Fallback: scan all adapters and pick the first one we can open.
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        if adapters.is_empty() {
+            eprintln!("No GPU adapters visible to wgpu (enumerate_adapters returned 0)");
+            return None;
+        }
+        for adapter in adapters {
+            if let Some(miner) = Self::try_from_adapter(adapter).await {
+                return Some(miner);
+            }
+        }
 
-        let (device, queue) = adapter
+        eprintln!("No compatible GPU adapter could be initialized");
+        None
+    }
+
+    /// Try to initialize from a specific adapter.
+    pub async fn try_from_adapter(adapter: wgpu::Adapter) -> Option<Self> {
+        let info = adapter.get_info();
+        if info.device_type == wgpu::DeviceType::Cpu {
+            return None;
+        }
+
+        let adapter_name = info.name.clone();
+        println!("GPU adapter: {} ({:?})", adapter_name, info.backend);
+
+        let req_default = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("webminer"),
@@ -60,17 +101,35 @@ impl GpuMiner {
                 },
                 None,
             )
-            .await
-            .ok()?;
+            .await;
+        let (device, queue) = match req_default {
+            Ok(ok) => ok,
+            Err(err_default) => {
+                eprintln!(
+                    "GPU adapter '{}' failed default limits ({}), retrying with downlevel limits",
+                    adapter_name, err_default
+                );
+                adapter
+                    .request_device(
+                        &wgpu::DeviceDescriptor {
+                            label: Some("webminer-downlevel"),
+                            required_features: wgpu::Features::empty(),
+                            required_limits: wgpu::Limits::downlevel_defaults(),
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .await
+                    .ok()?
+            }
+        };
 
-        // Load the WGSL shader
         let shader_source = include_str!("shader/sha256_mine.wgsl");
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sha256_mine"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
-        // Bind group layout: 3 storage buffers
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("miner_bind_group_layout"),
             entries: &[
@@ -85,7 +144,7 @@ impl GpuMiner {
                     },
                     count: None,
                 },
-                // binding 1: input (midstate + difficulty, read-only storage)
+                // binding 1: input (midstate + run params, read-only storage)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -125,49 +184,71 @@ impl GpuMiner {
             cache: None,
         });
 
-        Some(GpuMiner {
-            device,
-            queue,
-            pipeline,
-            bind_group_layout,
-            adapter_name,
-        })
-    }
-
-    /// Create GPU buffers and bind group for a mining work unit.
-    fn create_bind_group(
-        &self,
-        midstate: &Sha256Midstate,
-        nonce_table: &NonceTable,
-        difficulty: u32,
-    ) -> (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer) {
-        // Nonce table buffer: 1000 × u32
+        let nonce_table = NonceTable::new();
         let nonce_data = nonce_table.as_u32_slice();
-        let nonce_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let nonce_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("nonce_table"),
             contents: bytemuck::cast_slice(&nonce_data),
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        // Input buffer: midstate (8 × u32) + difficulty (1 × u32) + prefix_len (1 × u32) = 10 × u32
-        let mut input_data = [0u32; 10];
+        let limits = device.limits();
+        let max_dispatch_nonces = limits
+            .max_compute_workgroups_per_dimension
+            .max(1)
+            .saturating_mul(WORKGROUP_SIZE)
+            .max(WORKGROUP_SIZE);
+
+        Some(GpuMiner {
+            device,
+            queue,
+            pipeline,
+            bind_group_layout,
+            nonce_buffer,
+            adapter_name,
+            adapter_backend: info.backend,
+            max_dispatch_nonces,
+        })
+    }
+
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    pub fn max_dispatch_nonces(&self) -> u32 {
+        self.max_dispatch_nonces
+    }
+
+    fn create_bind_group(
+        &self,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+        nonce_offset: u32,
+        nonce_count: u32,
+    ) -> (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer) {
+        let mut input_data = [0u32; INPUT_WORDS];
         input_data[..8].copy_from_slice(midstate.state_words());
         input_data[8] = difficulty;
         input_data[9] = midstate.prefix_len as u32;
-        let input_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("input"),
-            contents: bytemuck::cast_slice(&input_data),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        input_data[10] = nonce_offset;
+        input_data[11] = nonce_count;
 
-        // Result buffer: 11 × u32 (initialized to zero)
-        let result_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("result"),
-            contents: &[0u8; 44], // 11 × 4
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        });
+        let input_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("input"),
+                contents: bytemuck::cast_slice(&input_data),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
-        // Staging buffer for reading results back to CPU
+        let result_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("result"),
+                contents: &[0u8; RESULT_WORDS * 4],
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
             size: RESULT_BUFFER_SIZE,
@@ -181,7 +262,7 @@ impl GpuMiner {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: nonce_buffer.as_entire_binding(),
+                    resource: self.nonce_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -196,39 +277,17 @@ impl GpuMiner {
 
         (bind_group, result_buffer, staging_buffer)
     }
-}
 
-#[async_trait]
-impl MinerBackend for GpuMiner {
-    fn name(&self) -> &str {
-        &self.adapter_name
-    }
-
-    async fn benchmark(&self) -> anyhow::Result<f64> {
-        let nonce_table = NonceTable::new();
-        let midstate = Sha256Midstate::from_prefix(&[0u8; 64]);
-
-        let start = std::time::Instant::now();
-
-        // Run one full dispatch (1M hashes) for benchmark
-        let _ = self
-            .mine_work_unit(&midstate, &nonce_table, 256) // impossibly high difficulty
-            .await?;
-
-        let elapsed = start.elapsed().as_secs_f64();
-        Ok(TOTAL_NONCES as f64 / elapsed)
-    }
-
-    async fn mine_work_unit(
+    async fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
-        nonce_table: &NonceTable,
         difficulty: u32,
+        nonce_offset: u32,
+        nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
         let (bind_group, result_buffer, staging_buffer) =
-            self.create_bind_group(midstate, nonce_table, difficulty);
+            self.create_bind_group(midstate, difficulty, nonce_offset, nonce_count);
 
-        // Encode and submit compute pass
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -243,16 +302,13 @@ impl MinerBackend for GpuMiner {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
 
-            let num_workgroups = (TOTAL_NONCES + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            let num_workgroups = nonce_count.div_ceil(WORKGROUP_SIZE);
             pass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
-        // Copy result to staging buffer
         encoder.copy_buffer_to_buffer(&result_buffer, 0, &staging_buffer, 0, RESULT_BUFFER_SIZE);
-
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Read back results
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = tokio::sync::oneshot::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -262,29 +318,133 @@ impl MinerBackend for GpuMiner {
         rx.await??;
 
         let data = buffer_slice.get_mapped_range();
-        let result_words: &[u32] =
-            bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
+        let result_words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
 
         let best_difficulty = result_words[0];
-
-        if best_difficulty >= difficulty {
+        let out = if best_difficulty >= difficulty {
             let nonce1_idx = result_words[1] as u16;
             let nonce2_idx = result_words[2] as u16;
 
-            // Reconstruct hash from u32 words (big-endian)
             let mut hash = [0u8; 32];
             for i in 0..8 {
                 hash[i * 4..(i + 1) * 4].copy_from_slice(&result_words[3 + i].to_be_bytes());
             }
 
-            Ok(Some(MiningResult {
+            Some(MiningResult {
                 nonce1_idx,
                 nonce2_idx,
                 hash,
                 difficulty_achieved: best_difficulty,
-            }))
+            })
         } else {
-            Ok(None)
+            None
+        };
+
+        drop(data);
+        staging_buffer.unmap();
+        Ok(out)
+    }
+}
+
+#[async_trait]
+impl MinerBackend for GpuMiner {
+    fn name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    fn startup_summary(&self) -> Vec<String> {
+        vec![
+            format!("gpu_name={}", self.adapter_name),
+            format!("gpu_backend={:?}", self.adapter_backend),
+            format!("workgroup_size={}", WORKGROUP_SIZE),
+            format!("max_dispatch_nonces={}", self.max_dispatch_nonces),
+        ]
+    }
+
+    async fn benchmark(&self) -> anyhow::Result<f64> {
+        let nonce_table = NonceTable::new();
+        let midstate = Sha256Midstate::from_prefix(&[0u8; 64]);
+
+        // Warm up GPU pipeline/driver state.
+        let _ = self
+            .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
+            .await?;
+
+        let mut total_attempts = 0u64;
+        let mut total_elapsed = 0.0f64;
+        for _ in 0..8 {
+            let chunk = self
+                .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
+                .await?;
+            total_attempts = total_attempts.saturating_add(chunk.attempted);
+            total_elapsed += chunk.elapsed.as_secs_f64();
         }
+
+        if total_elapsed <= 0.0 {
+            return Ok(0.0);
+        }
+        Ok(total_attempts as f64 / total_elapsed)
+    }
+
+    fn max_batch_hint(&self) -> u32 {
+        NONCE_SPACE_SIZE
+    }
+
+    async fn mine_range(
+        &self,
+        midstate: &Sha256Midstate,
+        _nonce_table: &NonceTable,
+        difficulty: u32,
+        start_nonce: u32,
+        nonce_count: u32,
+        cancel: Option<CancelFlag>,
+    ) -> anyhow::Result<MiningChunkResult> {
+        let range_start = start_nonce.min(NONCE_SPACE_SIZE);
+        let range_end = range_start
+            .saturating_add(nonce_count)
+            .min(NONCE_SPACE_SIZE);
+        if range_start >= range_end {
+            return Ok(MiningChunkResult::empty());
+        }
+
+        let started = std::time::Instant::now();
+        let mut best: Option<MiningResult> = None;
+        let mut attempted = 0u64;
+        let mut cursor = range_start;
+
+        while cursor < range_end {
+            if let Some(flag) = cancel.as_ref() {
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+
+            let remaining = range_end - cursor;
+            let chunk_count = remaining.min(self.max_dispatch_nonces());
+            if chunk_count == 0 {
+                break;
+            }
+
+            let chunk_best = self
+                .dispatch_range(midstate, difficulty, cursor, chunk_count)
+                .await?;
+            attempted += chunk_count as u64;
+            best = choose_best_result(best, chunk_best);
+
+            if best.is_some() {
+                if let Some(flag) = cancel.as_ref() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                break;
+            }
+
+            cursor = cursor.saturating_add(chunk_count);
+        }
+
+        Ok(MiningChunkResult {
+            result: best,
+            attempted,
+            elapsed: started.elapsed(),
+        })
     }
 }
