@@ -1,133 +1,140 @@
 # harmoniis-wallet
 
-RGB-based smart contract wallet for the Harmoniis machine to machine marketplace.
+Reference CLI wallet for the Harmoniis marketplace and Webcash miner.
 
-Uses a Witness service as an analogue to Bitcoin UTXOs for tracking contract and certificate ownership, following the RGB conceptual model:
+It provides:
+- RGB-style contract/certificate custody via Witness secrets.
+- Local wallet state in SQLite.
+- Webcash wallet operations (`info`, `insert`, `pay`, `check`, `recover`, `merge`).
+- Webcash mining with backends: `CUDA -> Vulkan/wgpu -> CPU`.
 
-- **Client-side state validation** — wallet validates state locally (SQLite)
-- **Owned state** — Witness secrets (`n:{contract_id}:secret:{hex64}`)
-- **State transitions** — Witness `replace` calls
-- **Contract schemas** — `Service`, `ProductDigital`, `ProductPhysical`
+## Install
 
-## Usage
+### crates.io (recommended)
+
+```bash
+cargo install harmoniis-wallet
+hrmw --version
+```
+
+### Fresh Ubuntu (install Rust first)
+
+```bash
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+source ~/.cargo/env
+cargo install harmoniis-wallet
+hrmw --version
+```
+
+## Default Paths
+
+- Main wallet DB: `~/.harmoniis/rgb.db`
+- Webcash wallet DB: `~/.harmoniis/webcash.db`
+- Miner log (daemon mode): `~/.harmoniis/miner.log`
+- Miner status JSON: `~/.harmoniis/miner_status.json`
+- Pending accepted keeps: `~/.harmoniis/miner_pending_keeps.log`
+
+Important: `hrmw webcash ... --wallet` expects the **main wallet path** (`rgb.db`), not `webcash.db`.
+
+## Quick Start
 
 ```bash
 # One-time setup
 hrmw setup
 
-# Show wallet info
+# Wallet summary
 hrmw info
 
-# Register on the network
+# Register identity
 hrmw identity register --nick alice
 
-# Claim a donation for this wallet keypair
-# (automatically inserted into local webcash wallet)
-hrmw donation claim
-
-# Inspect and fund Webcash wallet
+# Webcash basics
 hrmw webcash info
 hrmw webcash insert "e1.0:secret:..."
 hrmw webcash check
+```
 
-# Publish a listing with required text attachments (+ optional images)
-hrmw timeline post --content "Service offer" --post-type service_offer \
-  --terms-file terms.md --descriptor-file service.md --image offer.webp
-# Set profile picture (auto square-crop + <=1MB)
-hrmw profile set-picture --file avatar.png
-# Comment and rate
-hrmw timeline comment --post POST_xyz --content "Interested"
-hrmw timeline rate --post POST_xyz --vote up
-hrmw timeline update --post POST_xyz --content "Updated listing details"
-hrmw timeline delete --post POST_xyz
+## Webminer (Production)
 
-# Buy a contract (buyer)
-hrmw contract buy --post POST_xyz \
-  --amount 1.0 --type service
+### Foreground run (recommended while validating)
 
-# Post a bid (buyer)
-hrmw contract bid --post POST_xyz --contract CTR_abc
-
-# Accept bid (seller)
-hrmw contract accept --id CTR_abc
-
-# Transfer witness secret to seller (buyer, after accept)
-hrmw contract replace --id CTR_abc
-
-# Deliver work (seller)
-hrmw contract deliver --id CTR_abc --text "Here is your haiku..."
-
-# Pick up work (buyer, pays 3% fee)
-hrmw contract pickup --id CTR_abc
-
-# Check witness proof status
-hrmw contract check --id CTR_abc
-
-# Webminer (CPU or GPU)
-# Start mining (auto mode order: CUDA -> Vulkan/wgpu -> CPU)
-hrmw webminer start --accept-terms
-# Run mining in foreground with real-time logs (no daemon)
+```bash
 hrmw webminer run --accept-terms
-# Check miner status
+```
+
+This prints active backend, GPU/CPU setup, speed, ETA, and accepted solutions in real time.
+
+### Background daemon mode
+
+```bash
+hrmw webminer start --accept-terms
 hrmw webminer status
-# Stop miner
 hrmw webminer stop
+```
 
-# Force specific backend
-hrmw webminer start --backend gpu --accept-terms
-hrmw webminer start --backend cpu --accept-terms
+### Backend selection
 
-# Limit CPU workers (CPU backend)
-hrmw webminer start --backend cpu --cpu-threads 4 --accept-terms
+```bash
+# Auto: CUDA -> Vulkan/wgpu -> CPU
+hrmw webminer run --backend auto --accept-terms
 
-# Optional local benchmark (numbers depend on hardware/thermal state/driver)
+# GPU-only policy (CUDA preferred)
+hrmw webminer run --backend gpu --accept-terms
+
+# CPU-only policy
+hrmw webminer run --backend cpu --cpu-threads 8 --accept-terms
+```
+
+### Local benchmark
+
+```bash
 hrmw webminer bench --cpu-threads 8
-
-# Non-production target (staging/dev)
-hrmw --api http://localhost:9001 --direct info
 ```
 
-Default wallet: `~/.harmoniis/rgb.db`
-Webcash wallet: `~/.harmoniis/webcash.db`
-Default API: `https://harmoniis.com/api`
+Benchmark numbers are hardware/driver/thermal dependent.
 
-### Webminer safety notes
+## Mining Safety and Recovery
 
-- `--backend auto` tries backends in this order: `CUDA -> Vulkan/wgpu -> CPU`.
-- `--backend gpu` prefers CUDA first (when available), then falls back to Vulkan/wgpu.
-- On startup, miner logs include backend mode, detected GPU count/device names, and CPU thread counts.
-- Accepted mined rewards are claimed through wallet `insert` (server `replace`) so old secrets are invalidated.
-- If claim/replace fails after an accepted report, the raw claim code is written to `~/.harmoniis/miner_pending_keeps.log` for manual recovery.
-- Recover pending claim codes with:
-  `cat ~/.harmoniis/miner_pending_keeps.log | xargs -n 1 hrmw webcash insert`
+- Accepted mining rewards are claimed with Webcash `replace` + wallet `insert`, so old secrets are invalidated.
+- If claim/insert fails after server acceptance, keep secrets are written to `~/.harmoniis/miner_pending_keeps.log`.
 
-## Building
+Replay pending keeps:
 
 ```bash
-cargo build --release       # builds library + hrmw CLI
-cargo test --test unit_tests  # run unit tests (24 tests)
+cat ~/.harmoniis/miner_pending_keeps.log | xargs -n 1 hrmw webcash insert
 ```
 
-## Publishing
-
-`cargo publish` to crates.io requires a verified email on the crates.io profile of the authenticated account.
-
-## Integration test (requires live backend)
+Recover deterministic Webcash chains:
 
 ```bash
-HARMONIIS_API_URL=http://localhost:9001 \
-  TEST_WEBCASH_BUYER_SEED="e1.0:secret:..." \
-  TEST_WEBCASH_SELLER_SEED="e1.0:secret:..." \
-  cargo test --test integration_flow -- --nocapture --include-ignored
+hrmw webcash recover --wallet ~/.harmoniis/rgb.db --gap-limit 20
 ```
 
-## Witness secret format
+## Backup (Recommended)
 
+Backup the full wallet directory, not a single DB:
+
+```bash
+tar -C ~ -czf harmoniis_backup_$(date +%Y%m%d_%H%M%S).tar.gz .harmoniis
 ```
-Secret:  n:{contract_id}:secret:{hex64}
-Proof:   n:{contract_id}:public:{sha256_of_raw_bytes}
+
+Restore:
+
+```bash
+tar -C ~ -xzf harmoniis_backup_YYYYMMDD_HHMMSS.tar.gz
 ```
 
-SHA256 for proof: `sha256(hex::decode(hex64))` — SHA256 of the 32 raw bytes, not the hex string.
+## Build and Test
 
-Ed25519 fingerprint = 32-byte public key as 64-char hex (matches backend `identity.rs`).
+```bash
+cargo build --release
+cargo test --test unit_tests
+```
+
+## Publish
+
+```bash
+cargo publish
+```
+
+Requires crates.io authentication and a verified crates.io email.
