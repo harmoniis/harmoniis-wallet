@@ -165,7 +165,7 @@ impl MinerBackend for MultiCudaMiner {
     async fn mine_range(
         &self,
         midstate: &Sha256Midstate,
-        nonce_table: &NonceTable,
+        _nonce_table: &NonceTable,
         difficulty: u32,
         start_nonce: u32,
         nonce_count: u32,
@@ -173,14 +173,7 @@ impl MinerBackend for MultiCudaMiner {
     ) -> anyhow::Result<MiningChunkResult> {
         if self.miners.len() == 1 {
             return self.miners[0]
-                .mine_range(
-                    midstate,
-                    nonce_table,
-                    difficulty,
-                    start_nonce,
-                    nonce_count,
-                    cancel,
-                )
+                .mine_range_direct(midstate, difficulty, start_nonce, nonce_count, cancel)
                 .await;
         }
 
@@ -194,18 +187,10 @@ impl MinerBackend for MultiCudaMiner {
         for (idx, range_start, range_count) in assignments {
             let miner = self.miners[idx].clone();
             let midstate = midstate.clone();
-            let nonce_table = nonce_table.clone();
             let cancel = cancel.clone();
             tasks.spawn(async move {
                 miner
-                    .mine_range(
-                        &midstate,
-                        &nonce_table,
-                        difficulty,
-                        range_start,
-                        range_count,
-                        cancel,
-                    )
+                    .mine_range_direct(&midstate, difficulty, range_start, range_count, cancel)
                     .await
             });
         }

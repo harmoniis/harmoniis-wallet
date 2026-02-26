@@ -8,7 +8,7 @@ use cudarc::driver::{
     CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
 use cudarc::nvrtc::compile_ptx;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
 use super::work_unit::NonceTable;
@@ -20,6 +20,8 @@ pub struct CudaMiner {
     stream: Arc<CudaStream>,
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
+    // Single packed u64 result on device: [zeros:32 | nonce:32].
+    result_dev: Mutex<CudaSlice<u64>>,
     nonce_words: Vec<u32>,
     device_name: String,
     ordinal: usize,
@@ -37,11 +39,13 @@ impl CudaMiner {
 
         let nonce_words = NonceTable::new().as_u32_slice();
         let nonce_table_dev = stream.clone_htod(&nonce_words).ok()?;
+        let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
 
         Some(Self {
             stream,
             kernel,
             nonce_table_dev,
+            result_dev: Mutex::new(result_dev),
             nonce_words,
             device_name,
             ordinal,
@@ -56,30 +60,26 @@ impl CudaMiner {
         ((nonce / 1000) as usize, (nonce % 1000) as usize)
     }
 
-    fn best_result_from_scores(
+    fn best_result_from_packed(
         &self,
         midstate: &Sha256Midstate,
         difficulty: u32,
-        start_nonce: u32,
-        scores: &[u32],
+        packed_best: u64,
     ) -> Option<MiningResult> {
-        let mut best_zeros = 0u32;
-        let mut best_idx = 0usize;
-        for (idx, &score) in scores.iter().enumerate() {
-            if score > best_zeros {
-                best_zeros = score;
-                best_idx = idx;
-            }
-        }
+        let best_zeros = (packed_best >> 32) as u32;
         if best_zeros < difficulty {
             return None;
         }
 
-        let nonce = start_nonce + best_idx as u32;
+        let nonce = (packed_best & 0xFFFF_FFFF) as u32;
+        if nonce >= NONCE_SPACE_SIZE {
+            return None;
+        }
+
         let (n1, n2) = Self::nonce_indices(nonce);
-        let state =
+        let state_words =
             midstate.finalize_words_from_nonce_u32(self.nonce_words[n1], self.nonce_words[n2]);
-        let achieved = leading_zero_bits_words(&state);
+        let achieved = leading_zero_bits_words(&state_words);
         if achieved < difficulty {
             return None;
         }
@@ -87,7 +87,7 @@ impl CudaMiner {
         Some(MiningResult {
             nonce1_idx: n1 as u16,
             nonce2_idx: n2 as u16,
-            hash: state_words_to_bytes(&state),
+            hash: state_words_to_bytes(&state_words),
             difficulty_achieved: achieved,
         })
     }
@@ -96,10 +96,17 @@ impl CudaMiner {
         &self,
         midstate: &Sha256Midstate,
         difficulty: u32,
-        start_nonce: u32,
+        nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
-        let mut out_scores = self.stream.alloc_zeros::<u32>(nonce_count as usize)?;
+        let mut result_dev = self
+            .result_dev
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cuda result buffer mutex poisoned"))?;
+
+        // Reset packed best result to 0 for this launch.
+        self.stream.memset_zeros(&mut *result_dev)?;
+
         let s = midstate.state_words();
         let s0 = s[0];
         let s1 = s[1];
@@ -110,6 +117,7 @@ impl CudaMiner {
         let s6 = s[6];
         let s7 = s[7];
         let prefix_len = midstate.prefix_len as u32;
+
         let cfg = LaunchConfig {
             grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
             block_dim: (CUDA_BLOCK_SIZE, 1, 1),
@@ -128,14 +136,47 @@ impl CudaMiner {
         launch.arg(&s7);
         launch.arg(&difficulty);
         launch.arg(&prefix_len);
-        launch.arg(&start_nonce);
+        launch.arg(&nonce_offset);
         launch.arg(&nonce_count);
-        launch.arg(&mut out_scores);
+        launch.arg(&mut *result_dev);
         unsafe { launch.launch(cfg) }?;
 
+        let mut host_best = [0u64; 1];
+        self.stream.memcpy_dtoh(&*result_dev, &mut host_best)?;
         self.stream.synchronize()?;
-        let host_scores = self.stream.clone_dtoh(&out_scores)?;
-        Ok(self.best_result_from_scores(midstate, difficulty, start_nonce, &host_scores))
+
+        Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
+    }
+
+    pub async fn mine_range_direct(
+        &self,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+        start_nonce: u32,
+        nonce_count: u32,
+        cancel: Option<CancelFlag>,
+    ) -> anyhow::Result<MiningChunkResult> {
+        if let Some(flag) = cancel.as_ref() {
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(MiningChunkResult::empty());
+            }
+        }
+
+        let range_start = start_nonce.min(NONCE_SPACE_SIZE);
+        let range_end = range_start.saturating_add(nonce_count).min(NONCE_SPACE_SIZE);
+        if range_start >= range_end {
+            return Ok(MiningChunkResult::empty());
+        }
+
+        let started = std::time::Instant::now();
+        let result =
+            self.dispatch_range(midstate, difficulty, range_start, range_end - range_start)?;
+
+        Ok(MiningChunkResult {
+            result,
+            attempted: (range_end - range_start) as u64,
+            elapsed: started.elapsed(),
+        })
     }
 }
 
@@ -150,22 +191,22 @@ impl MinerBackend for CudaMiner {
             format!("cuda_device={}", self.device_name),
             format!("cuda_ordinal={}", self.ordinal),
             format!("cuda_block_size={}", CUDA_BLOCK_SIZE),
+            "cuda_result_mode=atomic_best_u64".to_string(),
         ]
     }
 
     async fn benchmark(&self) -> anyhow::Result<f64> {
-        let nonce_table = NonceTable::new();
         let midstate = Sha256Midstate::from_prefix(&[0u8; 64]);
 
         // Warmup.
         let _ = self
-            .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
+            .mine_range_direct(&midstate, 256, 0, NONCE_SPACE_SIZE, None)
             .await?;
 
         let mut samples = Vec::with_capacity(6);
         for _ in 0..6 {
             let chunk = self
-                .mine_range(&midstate, &nonce_table, 256, 0, NONCE_SPACE_SIZE, None)
+                .mine_range_direct(&midstate, 256, 0, NONCE_SPACE_SIZE, None)
                 .await?;
             let secs = chunk.elapsed.as_secs_f64();
             if secs > 0.0 {
@@ -193,28 +234,7 @@ impl MinerBackend for CudaMiner {
         nonce_count: u32,
         cancel: Option<CancelFlag>,
     ) -> anyhow::Result<MiningChunkResult> {
-        if let Some(flag) = cancel.as_ref() {
-            if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return Ok(MiningChunkResult::empty());
-            }
-        }
-
-        let range_start = start_nonce.min(NONCE_SPACE_SIZE);
-        let range_end = range_start
-            .saturating_add(nonce_count)
-            .min(NONCE_SPACE_SIZE);
-        if range_start >= range_end {
-            return Ok(MiningChunkResult::empty());
-        }
-
-        let started = std::time::Instant::now();
-        let result =
-            self.dispatch_range(midstate, difficulty, range_start, range_end - range_start)?;
-
-        Ok(MiningChunkResult {
-            result,
-            attempted: (range_end - range_start) as u64,
-            elapsed: started.elapsed(),
-        })
+        self.mine_range_direct(midstate, difficulty, start_nonce, nonce_count, cancel)
+            .await
     }
 }

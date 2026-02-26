@@ -1,9 +1,10 @@
 // CUDA SHA256 mining kernel.
 //
-// Matches the WGSL miner logic:
+// Optimized output mode:
 // - Midstate words are provided by host.
 // - Each thread evaluates one nonce candidate.
-// - Output is the achieved leading-zero-bit count per nonce (0 when below difficulty).
+// - Threads atomically reduce to one best packed u64:
+//   upper 32 bits = leading-zero-bit count, lower 32 bits = nonce id.
 
 extern "C" {
 
@@ -76,7 +77,7 @@ __global__ void mine_sha256(
     const unsigned int prefix_len,
     const unsigned int nonce_offset,
     const unsigned int nonce_count,
-    unsigned int* out_zeros
+    unsigned long long* out_best
 ) {
     const unsigned int local_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (local_id >= nonce_count) {
@@ -91,7 +92,8 @@ __global__ void mine_sha256(
     const unsigned int nonce1_idx = thread_id / 1000u;
     const unsigned int nonce2_idx = thread_id % 1000u;
 
-    unsigned int w[64];
+    // 16-word rolling message schedule.
+    unsigned int w[16];
     w[0] = nonce_table[nonce1_idx];
     w[1] = nonce_table[nonce2_idx];
     w[2] = 0x66513d3du;  // "fQ=="
@@ -102,11 +104,6 @@ __global__ void mine_sha256(
     w[14] = 0u;
     w[15] = (prefix_len + 12u) * 8u;
 
-    #pragma unroll 16
-    for (unsigned int i = 16u; i < 64u; ++i) {
-        w[i] = sig1(w[i - 2u]) + w[i - 7u] + sig0(w[i - 15u]) + w[i - 16u];
-    }
-
     unsigned int a = s0;
     unsigned int b = s1;
     unsigned int c = s2;
@@ -116,9 +113,18 @@ __global__ void mine_sha256(
     unsigned int g = s6;
     unsigned int h = s7;
 
-    #pragma unroll 64
+    #pragma unroll
     for (unsigned int i = 0u; i < 64u; ++i) {
-        const unsigned int t1 = h + ep1(e) + ch(e, f, g) + K[i] + w[i];
+        unsigned int wi;
+        if (i < 16u) {
+            wi = w[i];
+        } else {
+            const unsigned int s0v = sig0(w[(i + 1u) & 15u]);
+            const unsigned int s1v = sig1(w[(i + 14u) & 15u]);
+            wi = w[i & 15u] = w[i & 15u] + s0v + s1v + w[(i + 9u) & 15u];
+        }
+
+        const unsigned int t1 = h + ep1(e) + ch(e, f, g) + K[i] + wi;
         const unsigned int t2 = ep0(a) + maj(a, b, c);
         h = g;
         g = f;
@@ -139,13 +145,13 @@ __global__ void mine_sha256(
     const unsigned int h6 = s6 + g;
     const unsigned int h7 = s7 + h;
 
-    unsigned int zeros = 0u;
+    unsigned int zeros;
     if (h0 != 0u) {
         zeros = __clz(h0);
     } else {
         zeros = 32u;
         const unsigned int words[7] = {h1, h2, h3, h4, h5, h6, h7};
-        #pragma unroll 7
+        #pragma unroll
         for (unsigned int i = 0u; i < 7u; ++i) {
             if (words[i] == 0u) {
                 zeros += 32u;
@@ -156,7 +162,14 @@ __global__ void mine_sha256(
         }
     }
 
-    out_zeros[local_id] = (zeros >= difficulty) ? zeros : 0u;
+    if (zeros < difficulty) {
+        return;
+    }
+
+    const unsigned long long packed =
+        (static_cast<unsigned long long>(zeros) << 32) |
+        static_cast<unsigned long long>(thread_id);
+    atomicMax(out_best, packed);
 }
 
 } // extern "C"
