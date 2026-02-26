@@ -150,7 +150,7 @@ hrmw webcash merge --group 20
 ## Payment Rails
 
 - Active settlement rail today: **Webcash** (`X-Webcash-Secret`).
-- `X-Bitcoin-Secret` parsing is wired for forward compatibility, but settlement is not yet enabled server-side.
+- `X-Bitcoin-Secret` is supported when backend enables Bitcoin mode (`HARMONIIS_BITCOIN_PAYMENT_MODE`).
 - Client API exposes payment-header abstractions so Bitcoin/ARK can be enabled without breaking existing Webcash flows.
 
 CLI rail flags:
@@ -159,7 +159,7 @@ CLI rail flags:
 # default (webcash)
 hrmw --payment-rail webcash timeline post --content "hello"
 
-# forward-compatible bitcoin header mode (requires explicit secret)
+# bitcoin header mode (requires explicit secret and backend support)
 hrmw --payment-rail bitcoin --bitcoin-secret "<vtxo-or-ark-secret>" timeline post --content "hello"
 
 # or via env
