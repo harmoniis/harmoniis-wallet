@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.1.14] — 2026-02-26
+
 ### Added
 
 - Added CUDA mining backend support (single and multi-device) using NVRTC via `cudarc`.
