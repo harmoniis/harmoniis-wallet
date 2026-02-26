@@ -5,9 +5,13 @@
 //! is computed once, and each nonce attempt processes a single additional block.
 
 pub mod cpu;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+pub mod cuda;
 pub mod daemon;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+pub mod multi_cuda;
 #[cfg(feature = "gpu")]
 pub mod multi_gpu;
 pub mod protocol;
@@ -174,26 +178,45 @@ pub async fn select_backend(
             Ok(Box::new(miner))
         }
         BackendChoice::Gpu => {
-            #[cfg(feature = "gpu")]
+            #[cfg(all(feature = "cuda", target_os = "linux"))]
             {
-                match multi_gpu::MultiGpuMiner::try_new().await {
-                    Some(miner) => {
-                        println!("Mining backend: {}", miner.name());
-                        Ok(Box::new(miner))
-                    }
-                    None => anyhow::bail!("GPU requested but no compatible GPU found"),
+                if let Some(miner) = multi_cuda::MultiCudaMiner::try_new().await {
+                    println!("Mining backend: {}", miner.name());
+                    return Ok(Box::new(miner));
                 }
             }
-            #[cfg(not(feature = "gpu"))]
+            #[cfg(feature = "gpu")]
             {
-                anyhow::bail!("GPU support not compiled (enable 'gpu' feature)")
+                if let Some(miner) = multi_gpu::MultiGpuMiner::try_new().await {
+                    println!("Mining backend: {}", miner.name());
+                    return Ok(Box::new(miner));
+                }
+            }
+            #[cfg(not(any(feature = "gpu", all(feature = "cuda", target_os = "linux"))))]
+            {
+                anyhow::bail!("GPU support not compiled (enable 'gpu' and/or 'cuda' feature)")
+            }
+            #[cfg(any(feature = "gpu", all(feature = "cuda", target_os = "linux")))]
+            {
+                anyhow::bail!("GPU requested but no compatible CUDA/Vulkan GPU found")
             }
         }
         BackendChoice::Auto => {
+            #[cfg(all(feature = "cuda", target_os = "linux"))]
+            {
+                if let Some(multi_cuda) = multi_cuda::MultiCudaMiner::try_new().await {
+                    println!("Selected: {} (auto prefers CUDA)", multi_cuda.name());
+                    return Ok(Box::new(multi_cuda));
+                }
+            }
+
             #[cfg(feature = "gpu")]
             {
                 if let Some(multi_gpu) = multi_gpu::MultiGpuMiner::try_new().await {
-                    println!("Selected: {} (auto prefers GPU)", multi_gpu.name());
+                    println!(
+                        "Selected: {} (auto fallback: Vulkan/wgpu)",
+                        multi_gpu.name()
+                    );
                     return Ok(Box::new(multi_gpu));
                 }
             }

@@ -557,17 +557,40 @@ async fn run_webminer_benchmarks(
         failed = true;
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(any(all(feature = "cuda", target_os = "linux"), feature = "gpu"))]
     {
-        use harmoniis_wallet::miner::multi_gpu::MultiGpuMiner;
+        let mut gpu_reported = false;
 
-        match MultiGpuMiner::try_new().await {
-            Some(gpu) => {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        if !gpu_reported {
+            use harmoniis_wallet::miner::multi_cuda::MultiCudaMiner;
+            if let Some(cuda) = MultiCudaMiner::try_new().await {
+                let gpu_hps = cuda.benchmark().await?;
+                let gpu_mhs = gpu_hps / 1_000_000.0;
+                let gpu_status = benchmark_status_line(gpu_mhs, gpu_target_mhs);
+                println!(
+                    "GPU: {:.2} Mh/s target={:.2} [{}] (CUDA)",
+                    gpu_mhs, gpu_target_mhs, gpu_status
+                );
+                for line in cuda.startup_summary() {
+                    println!("  {}", line);
+                }
+                if gpu_status == "MISS" {
+                    failed = true;
+                }
+                gpu_reported = true;
+            }
+        }
+
+        #[cfg(feature = "gpu")]
+        if !gpu_reported {
+            use harmoniis_wallet::miner::multi_gpu::MultiGpuMiner;
+            if let Some(gpu) = MultiGpuMiner::try_new().await {
                 let gpu_hps = gpu.benchmark().await?;
                 let gpu_mhs = gpu_hps / 1_000_000.0;
                 let gpu_status = benchmark_status_line(gpu_mhs, gpu_target_mhs);
                 println!(
-                    "GPU: {:.2} Mh/s target={:.2} [{}]",
+                    "GPU: {:.2} Mh/s target={:.2} [{}] (Vulkan/wgpu)",
                     gpu_mhs, gpu_target_mhs, gpu_status
                 );
                 for line in gpu.startup_summary() {
@@ -576,15 +599,17 @@ async fn run_webminer_benchmarks(
                 if gpu_status == "MISS" {
                     failed = true;
                 }
+                gpu_reported = true;
             }
-            None => {
-                println!("GPU: unavailable [MISS]");
-                failed = true;
-            }
+        }
+
+        if !gpu_reported {
+            println!("GPU: unavailable [MISS]");
+            failed = true;
         }
     }
 
-    #[cfg(not(feature = "gpu"))]
+    #[cfg(not(any(all(feature = "cuda", target_os = "linux"), feature = "gpu")))]
     {
         println!("GPU: feature-disabled [MISS]");
         failed = true;

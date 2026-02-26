@@ -64,7 +64,7 @@ hrmw contract pickup --id CTR_abc
 hrmw contract check --id CTR_abc
 
 # Webminer (CPU or GPU)
-# Start mining (auto mode prefers GPU when available)
+# Start mining (auto mode order: CUDA -> Vulkan/wgpu -> CPU)
 hrmw webminer start --accept-terms
 # Run mining in foreground with real-time logs (no daemon)
 hrmw webminer run --accept-terms
@@ -93,7 +93,8 @@ Default API: `https://harmoniis.com/api`
 
 ### Webminer safety notes
 
-- `--backend gpu` uses `MultiGpuMiner`, which discovers and uses all compatible GPUs.
+- `--backend auto` tries backends in this order: `CUDA -> Vulkan/wgpu -> CPU`.
+- `--backend gpu` prefers CUDA first (when available), then falls back to Vulkan/wgpu.
 - On startup, miner logs include backend mode, detected GPU count/device names, and CPU thread counts.
 - Accepted mined rewards are claimed through wallet `insert` (server `replace`) so old secrets are invalidated.
 - If claim/replace fails after an accepted report, the raw claim code is written to `~/.harmoniis/miner_pending_keeps.log` for manual recovery.

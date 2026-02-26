@@ -9,7 +9,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Added CUDA mining backend support (single and multi-device) using NVRTC via `cudarc`.
+
+### Changed
+
+- Backend auto-selection order is now `CUDA -> Vulkan/wgpu -> CPU`.
+- `--backend gpu` now prefers CUDA first and falls back to Vulkan/wgpu.
 
 ---
 

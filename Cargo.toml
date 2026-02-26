@@ -30,9 +30,10 @@ path = "src/bin/hrmw.rs"
 [features]
 # Bundle SQLite from source — enables `cargo install` without system libsqlite3.
 # Disable with `default-features = false` to link against the system library instead.
-default = ["bundled-sqlite", "gpu"]
+default = ["bundled-sqlite", "gpu", "cuda"]
 bundled-sqlite = ["rusqlite/bundled"]
 gpu = ["dep:wgpu"]
+cuda = ["dep:cudarc"]
 
 # DORMANT — Phase 3 security tokens (ContractBasket, Bond, RevenueShare).
 # Do NOT enable in production. Dependency order:
@@ -86,6 +87,17 @@ signal-hook = "0.3"
 async-trait = "0.1"
 bytemuck    = { version = "1", features = ["derive"] }
 libc        = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cudarc      = { version = "0.19.3", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    "runtime",
+    "nvrtc",
+    "fallback-dynamic-loading",
+    "cuda-version-from-build-system",
+    "fallback-latest",
+] }
 
 [dev-dependencies]
 tempfile = "3"
