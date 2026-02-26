@@ -163,7 +163,9 @@ impl CudaMiner {
         }
 
         let range_start = start_nonce.min(NONCE_SPACE_SIZE);
-        let range_end = range_start.saturating_add(nonce_count).min(NONCE_SPACE_SIZE);
+        let range_end = range_start
+            .saturating_add(nonce_count)
+            .min(NONCE_SPACE_SIZE);
         if range_start >= range_end {
             return Ok(MiningChunkResult::empty());
         }

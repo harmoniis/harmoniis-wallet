@@ -1,4 +1,5 @@
 pub mod arbiter;
+pub mod bitcoin;
 pub mod client;
 pub mod crypto;
 pub mod error;
@@ -19,7 +20,7 @@ pub use types::{
     Certificate, Contract, ContractStatus, ContractType, Role, StablecashProof, StablecashSecret,
     WitnessProof, WitnessSecret,
 };
-pub use wallet::{RgbWallet, WalletSnapshot};
+pub use wallet::{PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSnapshot};
 
 #[cfg(feature = "securities")]
 pub use securities::{SecurityDeed, SecurityType, SecurityUnderlying};

@@ -193,7 +193,8 @@ impl MinerBackend for MultiCudaMiner {
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
-            let (idx, chunk) = joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
+            let (idx, chunk) =
+                joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
             ordered[idx] = Some(chunk);
         }
 

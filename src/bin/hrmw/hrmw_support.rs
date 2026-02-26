@@ -9,11 +9,8 @@ use harmoniis_wallet::{
         HarmoniisClient,
     },
     wallet::RgbWallet,
-    Identity,
 };
-use hkdf::Hkdf;
 use rand::Rng;
-use sha2::Sha256;
 use webylib::{Amount as WebcashAmount, Wallet as WebcashWallet};
 
 pub fn default_wallet_path() -> PathBuf {
@@ -28,6 +25,23 @@ fn legacy_wallet_path() -> PathBuf {
 
 pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
     if let Some(path) = cli_wallet {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("webcash.db"))
+            .unwrap_or(false)
+        {
+            let rgb_path = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("rgb.db");
+            eprintln!(
+                "Note: --wallet points to webcash.db; using RGB wallet {}",
+                rgb_path.display()
+            );
+            return rgb_path;
+        }
         return path;
     }
     let preferred = default_wallet_path();
@@ -57,19 +71,9 @@ pub fn default_webcash_wallet_path(rgb_wallet_path: &Path) -> PathBuf {
     base_dir.join("webcash.db")
 }
 
-fn derive_webcash_master_secret_hex(identity: &Identity) -> anyhow::Result<String> {
-    let root_key =
-        hex::decode(identity.private_key_hex()).context("invalid root private key hex")?;
-    let hk = Hkdf::<Sha256>::new(None, &root_key);
-    let mut output = [0u8; 32];
-    hk.expand(b"harmoniis/hrmw/webcash/master/v1|chain:3", &mut output)
-        .map_err(|_| anyhow::anyhow!("failed to derive webcash master secret"))?;
-    Ok(hex::encode(output))
-}
-
 pub async fn open_webcash_wallet(
     rgb_wallet_path: &Path,
-    identity: &Identity,
+    wallet: &RgbWallet,
 ) -> anyhow::Result<WebcashWallet> {
     let webcash_path = default_webcash_wallet_path(rgb_wallet_path);
     let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
@@ -78,7 +82,9 @@ pub async fn open_webcash_wallet(
             webcash_path.display()
         )
     })?;
-    let master_secret = derive_webcash_master_secret_hex(identity)?;
+    let master_secret = wallet
+        .derive_webcash_master_secret_hex()
+        .context("failed to derive wallet webcash master secret")?;
     webcash_wallet
         .store_master_secret(&master_secret)
         .await
@@ -172,11 +178,11 @@ pub fn required_amount_for_payment_retry(err: &anyhow::Error, fallback: &str) ->
 
 pub async fn pay_from_wallet(
     rgb_wallet_path: &Path,
-    identity: &Identity,
+    wallet: &RgbWallet,
     amount: &str,
     memo: &str,
 ) -> anyhow::Result<String> {
-    let webcash_wallet = open_webcash_wallet(rgb_wallet_path, identity).await?;
+    let webcash_wallet = open_webcash_wallet(rgb_wallet_path, wallet).await?;
     let parsed_amount = WebcashAmount::from_str(amount)
         .with_context(|| format!("invalid webcash amount '{amount}'"))?;
     let payment_output = webcash_wallet

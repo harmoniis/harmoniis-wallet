@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    client::HarmoniisClient,
+    client::{apply_payment_header, HarmoniisClient, PaymentSecret},
     error::{Error, Result},
 };
 
@@ -194,17 +194,21 @@ impl HarmoniisClient {
         Ok(resp.json().await?)
     }
 
-    /// `POST /api/v1/identity`
-    /// Requires `X-Webcash-Secret` header.
-    /// Returns the fingerprint.
     pub async fn register_identity(&self, req: &RegisterRequest, webcash: &str) -> Result<String> {
-        let resp = self
-            .http
-            .post(self.url("identity"))
-            .header("X-Webcash-Secret", webcash)
-            .json(req)
-            .send()
-            .await?;
+        self.register_identity_with_payment(req, PaymentSecret::Webcash(webcash))
+            .await
+    }
+
+    /// `POST /api/v1/identity`
+    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
+    /// Returns the fingerprint.
+    pub async fn register_identity_with_payment(
+        &self,
+        req: &RegisterRequest,
+        payment: PaymentSecret<'_>,
+    ) -> Result<String> {
+        let resp = self.http.post(self.url("identity"));
+        let resp = apply_payment_header(resp, payment).json(req).send().await?;
         let resp = Self::check_status(resp).await?;
         let body: serde_json::Value = resp.json().await?;
         let fp = body
@@ -215,17 +219,21 @@ impl HarmoniisClient {
         Ok(fp)
     }
 
-    /// `POST /api/v1/timeline`
-    /// Requires `X-Webcash-Secret` header.
-    /// Returns the post ID.
     pub async fn publish_post(&self, req: &PublishPostRequest, webcash: &str) -> Result<String> {
-        let resp = self
-            .http
-            .post(self.url("timeline"))
-            .header("X-Webcash-Secret", webcash)
-            .json(req)
-            .send()
-            .await?;
+        self.publish_post_with_payment(req, PaymentSecret::Webcash(webcash))
+            .await
+    }
+
+    /// `POST /api/v1/timeline`
+    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
+    /// Returns the post ID.
+    pub async fn publish_post_with_payment(
+        &self,
+        req: &PublishPostRequest,
+        payment: PaymentSecret<'_>,
+    ) -> Result<String> {
+        let resp = self.http.post(self.url("timeline"));
+        let resp = apply_payment_header(resp, payment).json(req).send().await?;
         let resp = Self::check_status(resp).await?;
         let body: serde_json::Value = resp.json().await?;
         let post_id = body
@@ -236,19 +244,26 @@ impl HarmoniisClient {
         Ok(post_id)
     }
 
-    /// `POST /api/v1/profiles/rate`
-    /// Requires `X-Webcash-Secret` header.
     pub async fn rate_post(&self, req: &RatePostRequest, webcash: &str) -> Result<()> {
+        self.rate_post_with_payment(req, PaymentSecret::Webcash(webcash))
+            .await
+    }
+
+    /// `POST /api/v1/profiles/rate`
+    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
+    pub async fn rate_post_with_payment(
+        &self,
+        req: &RatePostRequest,
+        payment: PaymentSecret<'_>,
+    ) -> Result<()> {
         let body = json!({
             "post_id": req.post_id,
             "actor_fingerprint": req.actor_fingerprint,
             "vote": req.vote,
             "signature": req.signature,
         });
-        let resp = self
-            .http
-            .post(self.url("profiles/rate"))
-            .header("X-Webcash-Secret", webcash)
+        let resp = self.http.post(self.url("profiles/rate"));
+        let resp = apply_payment_header(resp, payment)
             .json(&body)
             .send()
             .await?;
@@ -379,6 +394,30 @@ impl HarmoniisClient {
         signature: &str,
         webcash: &str,
     ) -> Result<String> {
+        self.publish_encrypted_reply_with_payment(
+            author_fingerprint,
+            author_nick,
+            recipient_fingerprint,
+            parent_id,
+            encrypted_payload,
+            signature,
+            PaymentSecret::Webcash(webcash),
+        )
+        .await
+    }
+
+    /// `POST /api/v1/timeline` with an encrypted payload for private messaging.
+    /// The `encrypted_payload` field carries the new witness secret for the seller.
+    pub async fn publish_encrypted_reply_with_payment(
+        &self,
+        author_fingerprint: &str,
+        author_nick: &str,
+        recipient_fingerprint: &str,
+        parent_id: &str,
+        encrypted_payload: &str,
+        signature: &str,
+        payment: PaymentSecret<'_>,
+    ) -> Result<String> {
         let body = json!({
             "author_fingerprint": author_fingerprint,
             "author_nick": author_nick,
@@ -390,10 +429,8 @@ impl HarmoniisClient {
             "keywords": [],
             "signature": signature,
         });
-        let resp = self
-            .http
-            .post(self.url("timeline"))
-            .header("X-Webcash-Secret", webcash)
+        let resp = self.http.post(self.url("timeline"));
+        let resp = apply_payment_header(resp, payment)
             .json(&body)
             .send()
             .await?;

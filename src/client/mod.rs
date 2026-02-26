@@ -1,9 +1,26 @@
 pub mod arbiter;
 pub mod arbitration;
+pub mod recovery;
 pub mod timeline;
 pub mod witness;
 
 use crate::error::{Error, Result};
+
+#[derive(Debug, Clone, Copy)]
+pub enum PaymentSecret<'a> {
+    Webcash(&'a str),
+    Bitcoin(&'a str),
+}
+
+pub(crate) fn apply_payment_header(
+    req: reqwest::RequestBuilder,
+    payment: PaymentSecret<'_>,
+) -> reqwest::RequestBuilder {
+    match payment {
+        PaymentSecret::Webcash(secret) => req.header("X-Webcash-Secret", secret),
+        PaymentSecret::Bitcoin(secret) => req.header("X-Bitcoin-Secret", secret),
+    }
+}
 
 /// HTTP client for the Harmoniis backend API.
 ///

@@ -10,16 +10,21 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::{fs, io::Write};
 
 use anyhow::Context;
+use bdk_wallet::bitcoin::Network;
 use clap::{Parser, Subcommand, ValueEnum};
 use harmoniis_wallet::{
+    bitcoin::DeterministicBitcoinWallet,
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
+        recovery::{RecoveryProbe, RecoveryScanRequest},
         timeline::{
             DeletePostRequest, DonationClaimRequest, PostAttachment, PublishPostRequest,
             RatePostRequest, RegisterRequest, StoragePresignRequest, UpdatePostRequest,
         },
+        PaymentSecret,
     },
     types::{Certificate, Contract, ContractStatus, ContractType, Role, WitnessSecret},
     wallet::RgbWallet,
@@ -41,6 +46,12 @@ use hrmw_support::{
 use media::{prepare_avatar_image, prepare_post_image};
 
 const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PaymentRail {
+    Webcash,
+    Bitcoin,
+}
 
 // ── CLI structure ─────────────────────────────────────────────────────────────
 
@@ -87,6 +98,14 @@ struct Cli {
     #[arg(long, global = true, default_value_t = false)]
     direct: bool,
 
+    /// Payment rail for paid API actions.
+    #[arg(long, global = true, value_enum, default_value_t = PaymentRail::Webcash)]
+    payment_rail: PaymentRail,
+
+    /// Bitcoin/ARK secret header value used when --payment-rail bitcoin.
+    #[arg(long, global = true)]
+    bitcoin_secret: Option<String>,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -111,6 +130,10 @@ enum Cmd {
     #[command(subcommand)]
     Webcash(WebcashCmd),
 
+    /// Deterministic Bitcoin/Taproot wallet operations
+    #[command(subcommand)]
+    Bitcoin(BitcoinCmd),
+
     /// Identity operations
     #[command(subcommand)]
     Identity(IdentityCmd),
@@ -130,6 +153,14 @@ enum Cmd {
     /// Certificate operations
     #[command(subcommand)]
     Certificate(CertCmd),
+
+    /// Root key backup and restore
+    #[command(subcommand)]
+    Key(KeyCmd),
+
+    /// Deterministic wallet reconstruction
+    #[command(subcommand)]
+    Recover(RecoverCmd),
 
     /// Webcash mining
     #[command(subcommand)]
@@ -176,6 +207,73 @@ enum WebcashCmd {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BitcoinNetworkArg {
+    Bitcoin,
+    Testnet,
+    Testnet4,
+    Signet,
+    Regtest,
+}
+
+impl From<BitcoinNetworkArg> for Network {
+    fn from(value: BitcoinNetworkArg) -> Self {
+        match value {
+            BitcoinNetworkArg::Bitcoin => Network::Bitcoin,
+            BitcoinNetworkArg::Testnet => Network::Testnet,
+            BitcoinNetworkArg::Testnet4 => Network::Testnet4,
+            BitcoinNetworkArg::Signet => Network::Signet,
+            BitcoinNetworkArg::Regtest => Network::Regtest,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum BitcoinCmd {
+    /// Show deterministic taproot wallet summary and optionally sync via Esplora
+    Info {
+        /// Bitcoin network
+        #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
+        network: BitcoinNetworkArg,
+        /// Esplora base URL (defaults per network)
+        #[arg(long)]
+        esplora: Option<String>,
+        /// Skip sync and only print deterministic descriptors/address
+        #[arg(long, default_value_t = false)]
+        no_sync: bool,
+        /// Gap limit used for full scan
+        #[arg(long, default_value_t = 20)]
+        stop_gap: usize,
+        /// Max parallel HTTP requests used during scan
+        #[arg(long, default_value_t = 4)]
+        parallel_requests: usize,
+    },
+    /// Show receive address at a deterministic index
+    Address {
+        /// Bitcoin network
+        #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
+        network: BitcoinNetworkArg,
+        /// Address index (external keychain)
+        #[arg(long, default_value_t = 0)]
+        index: u32,
+    },
+    /// Run explicit Esplora sync and print balances
+    Sync {
+        /// Bitcoin network
+        #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
+        network: BitcoinNetworkArg,
+        /// Esplora base URL (defaults per network)
+        #[arg(long)]
+        esplora: Option<String>,
+        /// Gap limit used for full scan
+        #[arg(long, default_value_t = 20)]
+        stop_gap: usize,
+        /// Max parallel HTTP requests used during scan
+        #[arg(long, default_value_t = 4)]
+        parallel_requests: usize,
+    },
+}
+
 #[derive(Subcommand)]
 enum IdentityCmd {
     /// Register this wallet's identity on the Harmoniis network
@@ -184,6 +282,76 @@ enum IdentityCmd {
         nick: String,
         #[arg(long)]
         about: Option<String>,
+        /// Use a specific labeled PGP identity (defaults to active label)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Create a new labeled PGP identity derived from root key
+    PgpNew {
+        #[arg(long)]
+        label: String,
+        /// Set newly created identity as active
+        #[arg(long, default_value_t = false)]
+        active: bool,
+    },
+    /// List labeled PGP identities and active status
+    PgpList,
+    /// Set which PGP identity label is active
+    PgpUse {
+        #[arg(long)]
+        label: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCmd {
+    /// Export root master key
+    Export {
+        /// Output format: hex or mnemonic
+        #[arg(long, default_value = "mnemonic")]
+        format: KeyExportFormat,
+        /// Optional file path to write the exported key
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Import root master key into this wallet
+    Import {
+        /// 64-char root key hex
+        #[arg(long)]
+        hex: Option<String>,
+        /// BIP39 mnemonic phrase
+        #[arg(long)]
+        mnemonic: Option<String>,
+        /// Allow import even when wallet has local contracts/certificates
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Show non-secret fingerprints for deterministic slots
+    Fingerprint,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KeyExportFormat {
+    Hex,
+    Mnemonic,
+}
+
+#[derive(Subcommand)]
+enum RecoverCmd {
+    /// Recover deterministic identities and contracts from root key + server scan
+    Deterministic {
+        /// First PGP slot index (inclusive)
+        #[arg(long, default_value_t = 0)]
+        pgp_start: u32,
+        /// Last PGP slot index (inclusive, max 999)
+        #[arg(long, default_value_t = 999)]
+        pgp_end: u32,
+        /// Harmoniis API batch size
+        #[arg(long, default_value_t = 50)]
+        batch_size: usize,
+        /// Skip server scan and only ensure local deterministic slots
+        #[arg(long, default_value_t = false)]
+        no_server: bool,
     },
 }
 
@@ -530,6 +698,21 @@ fn benchmark_status_line(measured_mhs: f64, target_mhs: f64) -> &'static str {
     }
 }
 
+fn format_btc_from_sats(sats: u64) -> String {
+    let whole = sats / 100_000_000;
+    let frac = sats % 100_000_000;
+    if frac == 0 {
+        format!("{whole}")
+    } else {
+        format!("{whole}.{}", format!("{frac:08}").trim_end_matches('0'))
+    }
+}
+
+fn resolved_esplora_url(network: Network, override_url: Option<String>) -> String {
+    override_url
+        .unwrap_or_else(|| DeterministicBitcoinWallet::default_esplora_url(network).to_string())
+}
+
 async fn run_webminer_benchmarks(
     cpu_threads: Option<usize>,
     cpu_target_mhs: f64,
@@ -711,6 +894,86 @@ async fn set_profile_picture(
     }
 }
 
+fn active_pgp_identity(wallet: &RgbWallet) -> anyhow::Result<(String, Identity)> {
+    let (meta, identity) = wallet.active_pgp_identity()?;
+    Ok((meta.label, identity))
+}
+
+fn pick_pgp_identity(
+    wallet: &RgbWallet,
+    label: Option<&str>,
+) -> anyhow::Result<(String, Identity)> {
+    match label {
+        Some(name) => {
+            let (meta, identity) = wallet.pgp_identity_by_label(name)?;
+            Ok((meta.label, identity))
+        }
+        None => active_pgp_identity(wallet),
+    }
+}
+
+fn payment_secret_for_rail<'a>(
+    rail: PaymentRail,
+    webcash_secret: Option<&'a str>,
+    bitcoin_secret: Option<&'a str>,
+) -> anyhow::Result<PaymentSecret<'a>> {
+    match rail {
+        PaymentRail::Webcash => Ok(PaymentSecret::Webcash(webcash_secret.unwrap_or_default())),
+        PaymentRail::Bitcoin => {
+            let secret = bitcoin_secret
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--bitcoin-secret (or HRMW_BITCOIN_SECRET) is required when --payment-rail bitcoin"
+                    )
+                })?;
+            Ok(PaymentSecret::Bitcoin(secret))
+        }
+    }
+}
+
+fn contract_from_recovery(
+    rc: &harmoniis_wallet::client::recovery::RecoveryContract,
+) -> Option<Contract> {
+    let contract_type = rc
+        .contract_type
+        .as_deref()
+        .and_then(|s| ContractType::parse(s).ok())
+        .unwrap_or(ContractType::Service);
+    let status = rc
+        .status
+        .as_deref()
+        .and_then(|s| ContractStatus::parse(s).ok())
+        .unwrap_or(ContractStatus::Issued);
+    let amount_units = rc.amount.as_deref().map(parse_amount_to_units).unwrap_or(0);
+    let buyer_fingerprint = rc.buyer_fingerprint.clone().unwrap_or_default();
+    if rc.contract_id.trim().is_empty() {
+        return None;
+    }
+    Some(Contract {
+        contract_id: rc.contract_id.clone(),
+        contract_type,
+        status,
+        witness_secret: None,
+        witness_proof: rc.witness_proof.clone(),
+        amount_units,
+        work_spec: rc
+            .reference_post
+            .clone()
+            .unwrap_or_else(|| "Recovered from server".to_string()),
+        buyer_fingerprint,
+        seller_fingerprint: rc.seller_fingerprint.clone(),
+        reference_post: rc.reference_post.clone(),
+        delivery_deadline: rc.delivery_deadline.clone(),
+        role: Role::Buyer,
+        delivered_text: None,
+        certificate_id: None,
+        created_at: rc.created_at.clone().unwrap_or_else(now_utc),
+        updated_at: rc.updated_at.clone().unwrap_or_else(now_utc),
+    })
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -719,6 +982,11 @@ async fn main() -> anyhow::Result<()> {
     let wallet_path = resolve_wallet_path(cli.wallet.clone());
     let api = cli.api.as_str();
     let direct = cli.direct;
+    let payment_rail = cli.payment_rail;
+    let bitcoin_secret = cli
+        .bitcoin_secret
+        .clone()
+        .or_else(|| std::env::var("HRMW_BITCOIN_SECRET").ok());
 
     match cli.command {
         // ── setup ─────────────────────────────────────────────────────────────
@@ -732,6 +1000,9 @@ async fn main() -> anyhow::Result<()> {
                 let id = Identity::from_hex(&hex).context("invalid private key hex")?;
                 wallet.import_snapshot(&harmoniis_wallet::wallet::WalletSnapshot {
                     private_key_hex: id.private_key_hex(),
+                    root_private_key_hex: Some(id.private_key_hex()),
+                    wallet_label: wallet.wallet_label()?,
+                    pgp_identities: vec![],
                     nickname: None,
                     contracts: vec![],
                     certificates: vec![],
@@ -742,19 +1013,29 @@ async fn main() -> anyhow::Result<()> {
                 println!("Wallet created at {}", wallet_path.display());
                 println!("Fingerprint: {}", wallet.fingerprint()?);
             }
+            if let Some(label) = wallet.wallet_label()? {
+                println!("Wallet label: {label}");
+            }
+            let pgp = wallet.list_pgp_identities()?;
+            println!("PGP identities: {}", pgp.len());
         }
 
         // ── info ──────────────────────────────────────────────────────────────
         Cmd::Info => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let (active_label, active_pgp) = active_pgp_identity(&wallet)?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let webcash_balance = webcash_wallet
                 .balance()
                 .await
                 .unwrap_or_else(|_| "0".to_string());
             let webcash_stats = webcash_wallet.stats().await.ok();
-            println!("Fingerprint:   {}", wallet.fingerprint()?);
+            println!("RGB fingerprint: {}", wallet.fingerprint()?);
+            println!("PGP fingerprint: {}", active_pgp.fingerprint());
+            println!("PGP label:      {}", active_label);
+            if let Some(label) = wallet.wallet_label()? {
+                println!("Wallet label:   {label}");
+            }
             match wallet.nickname()? {
                 Some(nick) => println!("Nickname:      {nick}"),
                 None => println!("Nickname:      (not registered)"),
@@ -784,7 +1065,7 @@ async fn main() -> anyhow::Result<()> {
         // ── donation claim ────────────────────────────────────────────────────
         Cmd::Donation(DonationCmd::Claim) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let resp = make_client(api, direct)
                 .claim_donation(&DonationClaimRequest {
                     pgp_public_key: id.public_key_hex(),
@@ -794,7 +1075,7 @@ async fn main() -> anyhow::Result<()> {
             match resp.status.as_str() {
                 "donated" => {
                     if let Some(secret) = resp.secret {
-                        let webcash_wallet = open_webcash_wallet(&wallet_path, &id).await?;
+                        let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
                         let parsed = SecretWebcash::parse(&secret)
                             .map_err(|e| anyhow::anyhow!("invalid donated webcash format: {e}"))?;
                         webcash_wallet
@@ -829,8 +1110,7 @@ async fn main() -> anyhow::Result<()> {
         // ── webcash ───────────────────────────────────────────────────────────
         Cmd::Webcash(WebcashCmd::Info) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let balance = webcash_wallet.balance().await?;
             let stats = webcash_wallet.stats().await?;
             println!(
@@ -845,8 +1125,7 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Insert { secret }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let parsed = SecretWebcash::parse(&secret)
                 .map_err(|e| anyhow::anyhow!("invalid webcash secret format: {e}"))?;
             webcash_wallet
@@ -863,8 +1142,7 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Pay { amount, memo }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let parsed_amount = WebcashAmount::from_str(&amount)
                 .with_context(|| format!("invalid webcash amount '{amount}'"))?;
             let output = webcash_wallet
@@ -878,8 +1156,7 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Check) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             webcash_wallet
                 .check()
                 .await
@@ -889,8 +1166,7 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Recover { gap_limit }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let summary = webcash_wallet
                 .recover_from_wallet(gap_limit)
                 .await
@@ -900,8 +1176,7 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Merge { group }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &identity).await?;
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
             let summary = webcash_wallet
                 .merge(group)
                 .await
@@ -909,10 +1184,268 @@ async fn main() -> anyhow::Result<()> {
             println!("{summary}");
         }
 
-        // ── identity register ─────────────────────────────────────────────────
-        Cmd::Identity(IdentityCmd::Register { nick, about }) => {
+        // ── bitcoin deterministic wallet ───────────────────────────────────
+        Cmd::Bitcoin(BitcoinCmd::Info {
+            network,
+            esplora,
+            no_sync,
+            stop_gap,
+            parallel_requests,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let network = Network::from(network);
+            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let (external, internal) = btc.descriptor_strings()?;
+            println!("Bitcoin deterministic wallet");
+            println!("Network:     {}", network);
+            println!(
+                "Esplora:     {}",
+                resolved_esplora_url(network, esplora.clone())
+            );
+            println!("Descriptor ext: {external}");
+            println!("Descriptor int: {internal}");
+            println!("Address[0]:  {}", btc.receive_address_at(0)?);
+            if !no_sync {
+                let snapshot = btc.sync(
+                    &resolved_esplora_url(network, esplora),
+                    stop_gap,
+                    parallel_requests,
+                )?;
+                println!(
+                    "Confirmed:   {} BTC",
+                    format_btc_from_sats(snapshot.confirmed_sats)
+                );
+                println!(
+                    "Pending(tr): {} BTC",
+                    format_btc_from_sats(snapshot.trusted_pending_sats)
+                );
+                println!(
+                    "Pending(un): {} BTC",
+                    format_btc_from_sats(snapshot.untrusted_pending_sats)
+                );
+                println!(
+                    "Immature:    {} BTC",
+                    format_btc_from_sats(snapshot.immature_sats)
+                );
+                println!(
+                    "Total:       {} BTC",
+                    format_btc_from_sats(snapshot.total_sats)
+                );
+                println!(
+                    "Next receive: {} (index {})",
+                    snapshot.receive_address, snapshot.receive_index
+                );
+                println!("UTXOs:       {}", snapshot.unspent_count);
+            }
+        }
+
+        Cmd::Bitcoin(BitcoinCmd::Address { network, index }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let network = Network::from(network);
+            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let addr = btc.receive_address_at(index)?;
+            println!("{addr}");
+        }
+
+        Cmd::Bitcoin(BitcoinCmd::Sync {
+            network,
+            esplora,
+            stop_gap,
+            parallel_requests,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let network = Network::from(network);
+            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let esplora_url = resolved_esplora_url(network, esplora);
+            let snapshot = btc.sync(&esplora_url, stop_gap, parallel_requests)?;
+            println!("Network:       {}", snapshot.network);
+            println!("Esplora:       {}", snapshot.esplora_url);
+            println!(
+                "Confirmed:     {} BTC",
+                format_btc_from_sats(snapshot.confirmed_sats)
+            );
+            println!(
+                "Trusted pend.: {} BTC",
+                format_btc_from_sats(snapshot.trusted_pending_sats)
+            );
+            println!(
+                "Untrusted pen: {} BTC",
+                format_btc_from_sats(snapshot.untrusted_pending_sats)
+            );
+            println!(
+                "Immature:      {} BTC",
+                format_btc_from_sats(snapshot.immature_sats)
+            );
+            println!(
+                "Total:         {} BTC",
+                format_btc_from_sats(snapshot.total_sats)
+            );
+            println!(
+                "Next receive:  {} (index {})",
+                snapshot.receive_address, snapshot.receive_index
+            );
+            println!("UTXOs:         {}", snapshot.unspent_count);
+        }
+
+        // ── key management ───────────────────────────────────────────────────
+        Cmd::Key(KeyCmd::Export { format, output }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let payload = match format {
+                KeyExportFormat::Hex => wallet.export_master_key_hex()?,
+                KeyExportFormat::Mnemonic => wallet.export_master_key_mnemonic()?,
+            };
+            if let Some(path) = output {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("failed creating export directory {}", parent.display())
+                    })?;
+                }
+                let mut f = fs::File::create(&path)
+                    .with_context(|| format!("failed creating {}", path.display()))?;
+                writeln!(f, "{payload}")?;
+                println!(
+                    "Exported {} master key to {}",
+                    format!("{:?}", format).to_lowercase(),
+                    path.display()
+                );
+            } else {
+                println!("{payload}");
+            }
+        }
+
+        Cmd::Key(KeyCmd::Import {
+            hex,
+            mnemonic,
+            force,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            if wallet.has_local_state()? && !force {
+                anyhow::bail!(
+                    "wallet contains local contracts/certificates; rerun with --force to overwrite key material"
+                );
+            }
+            match (hex, mnemonic) {
+                (Some(h), None) => wallet.apply_master_key_hex(h.trim())?,
+                (None, Some(m)) => wallet.apply_master_key_mnemonic(m.trim())?,
+                (Some(_), Some(_)) => anyhow::bail!("provide either --hex or --mnemonic, not both"),
+                (None, None) => anyhow::bail!("provide --hex or --mnemonic"),
+            }
+            let (label, pgp) = active_pgp_identity(&wallet)?;
+            println!("Imported master key.");
+            println!("RGB fingerprint: {}", wallet.fingerprint()?);
+            println!("PGP fingerprint: {} ({})", pgp.fingerprint(), label);
+        }
+
+        Cmd::Key(KeyCmd::Fingerprint) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let root_hex = wallet.root_private_key_hex()?;
+            let root_checksum = {
+                use sha2::Digest;
+                let digest = sha2::Sha256::digest(hex::decode(root_hex)?);
+                hex::encode(digest)[..16].to_string()
+            };
+            let (label, pgp) = active_pgp_identity(&wallet)?;
+            let webcash_slot = wallet.derive_webcash_master_secret_hex()?;
+            let bitcoin_slot = wallet.derive_bitcoin_master_key_hex()?;
+            println!("Root checksum:   {root_checksum}");
+            println!("RGB fingerprint: {}", wallet.fingerprint()?);
+            println!("PGP fingerprint: {} ({label})", pgp.fingerprint());
+            println!("Webcash slot:    {}", &webcash_slot[..16]);
+            println!("Bitcoin slot:    {}", &bitcoin_slot[..16]);
+        }
+
+        // ── deterministic recovery ───────────────────────────────────────────
+        Cmd::Recover(RecoverCmd::Deterministic {
+            pgp_start,
+            pgp_end,
+            batch_size,
+            no_server,
+        }) => {
+            if pgp_start > pgp_end {
+                anyhow::bail!("pgp_start must be <= pgp_end");
+            }
+            if pgp_end >= 1_000 {
+                anyhow::bail!("pgp_end must be <= 999");
+            }
+            if batch_size == 0 {
+                anyhow::bail!("batch_size must be > 0");
+            }
+
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            // Ensure deterministic base slots are reachable.
+            let _ = wallet.derive_slot_hex("rgb", 0)?;
+            let _ = wallet.derive_slot_hex("webcash", 0)?;
+            let _ = wallet.derive_slot_hex("bitcoin", 0)?;
+
+            let mut recovered_identities = 0usize;
+            let mut recovered_contracts = 0usize;
+
+            if !no_server {
+                let challenge = format!("recover:{}:{}", wallet.fingerprint()?, now_utc());
+                let client = make_client(api, direct);
+                let mut index = pgp_start;
+                while index <= pgp_end {
+                    let end =
+                        (index.saturating_add(batch_size as u32).saturating_sub(1)).min(pgp_end);
+                    let mut probes = Vec::with_capacity((end - index + 1) as usize);
+                    for key_index in index..=end {
+                        let id = wallet.derive_pgp_identity_for_index(key_index)?;
+                        probes.push(RecoveryProbe {
+                            key_index,
+                            fingerprint: id.fingerprint(),
+                            signature: id.sign(&challenge),
+                        });
+                    }
+                    let resp = client
+                        .recovery_scan(&RecoveryScanRequest {
+                            challenge: challenge.clone(),
+                            probes,
+                            include_contracts: true,
+                            contract_limit: 500,
+                        })
+                        .await
+                        .context("server recovery scan failed")?;
+
+                    for item in resp.identities {
+                        let label = item
+                            .nickname
+                            .as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|s| s.replace(' ', "-"))
+                            .unwrap_or_else(|| format!("pgp-{}", item.key_index));
+                        wallet.ensure_pgp_identity_index(item.key_index, Some(&label), false)?;
+                        recovered_identities += 1;
+                    }
+                    for rc in resp.contracts {
+                        if let Some(contract) = contract_from_recovery(&rc) {
+                            wallet.store_contract(&contract)?;
+                            recovered_contracts += 1;
+                        }
+                    }
+
+                    if end == pgp_end {
+                        break;
+                    }
+                    index = end.saturating_add(1);
+                }
+            }
+
+            // Deterministic webcash reconstruction.
+            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_summary = webcash_wallet
+                .recover_from_wallet(40)
+                .await
+                .unwrap_or_else(|e| format!("webcash recover skipped: {e}"));
+            println!("Deterministic recovery complete.");
+            println!("Recovered identities: {recovered_identities}");
+            println!("Recovered contracts:  {recovered_contracts}");
+            println!("{webcash_summary}");
+        }
+
+        // ── identity register ─────────────────────────────────────────────────
+        Cmd::Identity(IdentityCmd::Register { nick, about, label }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let (selected_label, id) = pick_pgp_identity(&wallet, label.as_deref())?;
             let client = make_client(api, direct);
             let req = RegisterRequest {
                 nickname: nick.clone(),
@@ -920,30 +1453,112 @@ async fn main() -> anyhow::Result<()> {
                 signature: id.sign(&format!("register:{nick}")),
                 about,
             };
-            let preflight = client.register_identity(&req, "").await;
-            let fp = match preflight {
-                Ok(fp) => fp,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, "0.6") else {
-                        return Err(err);
-                    };
-                    let payment =
-                        pay_from_wallet(&wallet_path, &id, &required, "identity register").await?;
-                    client
-                        .register_identity(&req, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
+            let fp = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .register_identity_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(fp) => fp,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            let Some(required) = required_amount_for_payment_retry(&err, "0.6")
+                            else {
+                                return Err(err);
+                            };
+                            let payment = pay_from_wallet(
+                                &wallet_path,
+                                &wallet,
+                                &required,
+                                "identity register",
+                            )
+                            .await?;
+                            client
+                                .register_identity_with_payment(
+                                    &req,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
+                    }
                 }
+                PaymentRail::Bitcoin => client
+                    .register_identity_with_payment(
+                        &req,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
             wallet.set_nickname(&nick)?;
-            println!("Registered as '{nick}'. Fingerprint: {fp}");
+            println!("Registered as '{nick}'. Fingerprint: {fp} (pgp label: {selected_label})");
+        }
+
+        Cmd::Identity(IdentityCmd::PgpNew { label, active }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let created = wallet.create_pgp_identity(&label)?;
+            if active {
+                wallet.set_active_pgp_identity(&label)?;
+            }
+            let state = if active { "active" } else { "inactive" };
+            println!(
+                "Created PGP identity '{}' (index {}, {})",
+                created.label, created.key_index, state
+            );
+            println!("Fingerprint: {}", created.public_key_hex);
+        }
+
+        Cmd::Identity(IdentityCmd::PgpList) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let ids = wallet.list_pgp_identities()?;
+            if ids.is_empty() {
+                println!("No PGP identities.");
+            } else {
+                println!(
+                    "{:<20} {:>8} {:>8}  fingerprint",
+                    "label", "index", "active"
+                );
+                println!("{}", "─".repeat(80));
+                for rec in ids {
+                    println!(
+                        "{:<20} {:>8} {:>8}  {}",
+                        rec.label,
+                        rec.key_index,
+                        if rec.is_active { "yes" } else { "no" },
+                        rec.public_key_hex
+                    );
+                }
+            }
+        }
+
+        Cmd::Identity(IdentityCmd::PgpUse { label }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            wallet.set_active_pgp_identity(&label)?;
+            let (active, identity) = active_pgp_identity(&wallet)?;
+            println!("Active PGP label: {active}");
+            println!("Fingerprint: {}", identity.fingerprint());
         }
 
         // ── profile set-picture ───────────────────────────────────────────────
         Cmd::Profile(ProfileCmd::SetPicture { file }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
+            let (_, identity) = active_pgp_identity(&wallet)?;
             let client = make_client(api, direct);
             let final_url = set_profile_picture(&client, &identity, &file).await?;
             println!("Profile picture updated.");
@@ -974,7 +1589,7 @@ async fn main() -> anyhow::Result<()> {
             image_files,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let fp = id.fingerprint();
             let nick = wallet.nickname()?.ok_or_else(|| {
                 anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
@@ -1022,20 +1637,54 @@ async fn main() -> anyhow::Result<()> {
                 signature: id.sign(&format!("post:{content}")),
             };
             let client = make_client(api, direct);
-            let post_id = match client.publish_post(&req, "").await {
-                Ok(post_id) => post_id,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, "0.3") else {
-                        return Err(err);
-                    };
-                    let payment =
-                        pay_from_wallet(&wallet_path, &id, &required, "timeline post").await?;
-                    client
-                        .publish_post(&req, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
+            let post_id = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .publish_post_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(post_id) => post_id,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            let Some(required) = required_amount_for_payment_retry(&err, "0.3")
+                            else {
+                                return Err(err);
+                            };
+                            let payment =
+                                pay_from_wallet(&wallet_path, &wallet, &required, "timeline post")
+                                    .await?;
+                            client
+                                .publish_post_with_payment(
+                                    &req,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
+                    }
                 }
+                PaymentRail::Bitcoin => client
+                    .publish_post_with_payment(
+                        &req,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
             println!("Post published: {post_id}");
         }
@@ -1043,7 +1692,7 @@ async fn main() -> anyhow::Result<()> {
         // ── timeline comment ──────────────────────────────────────────────────
         Cmd::Timeline(TimelineCmd::Comment { post, content }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let fp = id.fingerprint();
             let nick = wallet.nickname()?.ok_or_else(|| {
                 anyhow::anyhow!("nickname not set; run 'hrmw identity register' first")
@@ -1069,20 +1718,58 @@ async fn main() -> anyhow::Result<()> {
                 activity_metadata: None,
                 signature: id.sign(&format!("post:{content}")),
             };
-            let comment_id = match client.publish_post(&req, "").await {
-                Ok(comment_id) => comment_id,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, "0.01") else {
-                        return Err(err);
-                    };
-                    let payment =
-                        pay_from_wallet(&wallet_path, &id, &required, "timeline comment").await?;
-                    client
-                        .publish_post(&req, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
+            let comment_id = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .publish_post_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(comment_id) => comment_id,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            let Some(required) = required_amount_for_payment_retry(&err, "0.01")
+                            else {
+                                return Err(err);
+                            };
+                            let payment = pay_from_wallet(
+                                &wallet_path,
+                                &wallet,
+                                &required,
+                                "timeline comment",
+                            )
+                            .await?;
+                            client
+                                .publish_post_with_payment(
+                                    &req,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
+                    }
                 }
+                PaymentRail::Bitcoin => client
+                    .publish_post_with_payment(
+                        &req,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
             println!("Comment published: {comment_id}");
         }
@@ -1094,7 +1781,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("vote must be 'up' or 'down'");
             }
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let client = make_client(api, direct);
             let req = RatePostRequest {
                 post_id: post.clone(),
@@ -1102,17 +1789,53 @@ async fn main() -> anyhow::Result<()> {
                 vote: vote.clone(),
                 signature: id.sign(&format!("vote:{post}:{vote}")),
             };
-            if let Err(err) = client.rate_post(&req, "").await {
-                let err = anyhow::Error::from(err);
-                let Some(required) = required_amount_for_payment_retry(&err, "0.001") else {
-                    return Err(err);
-                };
-                let payment =
-                    pay_from_wallet(&wallet_path, &id, &required, "timeline rate").await?;
-                client
-                    .rate_post(&req, &payment)
-                    .await
-                    .map_err(anyhow::Error::from)?;
+            match payment_rail {
+                PaymentRail::Webcash => {
+                    if let Err(err) = client
+                        .rate_post_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await
+                    {
+                        let err = anyhow::Error::from(err);
+                        let Some(required) = required_amount_for_payment_retry(&err, "0.001")
+                        else {
+                            return Err(err);
+                        };
+                        let payment =
+                            pay_from_wallet(&wallet_path, &wallet, &required, "timeline rate")
+                                .await?;
+                        client
+                            .rate_post_with_payment(
+                                &req,
+                                payment_secret_for_rail(
+                                    PaymentRail::Webcash,
+                                    Some(&payment),
+                                    bitcoin_secret.as_deref(),
+                                )?,
+                            )
+                            .await
+                            .map_err(anyhow::Error::from)?;
+                    }
+                }
+                PaymentRail::Bitcoin => {
+                    client
+                        .rate_post_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Bitcoin,
+                                None,
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await
+                        .map_err(anyhow::Error::from)?;
+                }
             }
             println!("Rated post {post}: {vote}");
         }
@@ -1120,7 +1843,7 @@ async fn main() -> anyhow::Result<()> {
         // ── timeline delete ───────────────────────────────────────────────────
         Cmd::Timeline(TimelineCmd::Delete { post }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let req = DeletePostRequest {
                 post_id: post.clone(),
                 author_fingerprint: id.fingerprint(),
@@ -1151,7 +1874,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("provide --content or --keywords");
             }
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let req = UpdatePostRequest {
                 post_id: post.clone(),
                 author_fingerprint: id.fingerprint(),
@@ -1232,7 +1955,8 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let fp = wallet.fingerprint()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
+            let fp = id.fingerprint();
             let parsed_role = Role::parse(&role).unwrap_or(Role::Seller);
 
             // If the contract already exists in the wallet, update it
@@ -1277,7 +2001,7 @@ async fn main() -> anyhow::Result<()> {
             contract_id,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let fp = id.fingerprint();
             let client = make_client(api, direct);
 
@@ -1330,22 +2054,55 @@ async fn main() -> anyhow::Result<()> {
                 reference_post: post.clone(),
                 signature: sig,
             };
-            let buy_response = match client.buy_contract(&req, "").await {
-                Ok(v) => v,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    if required_amount_for_payment_retry(&err, &amount).is_none() {
-                        return Err(err);
+            let buy_response = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .buy_contract_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(v) => v,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            if required_amount_for_payment_retry(&err, &amount).is_none() {
+                                return Err(err);
+                            }
+                            // Contract buy should pay the explicit --amount requested by the buyer.
+                            let required = amount.clone();
+                            let payment =
+                                pay_from_wallet(&wallet_path, &wallet, &required, "contract buy")
+                                    .await?;
+                            client
+                                .buy_contract_with_payment(
+                                    &req,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
                     }
-                    // Contract buy should pay the explicit --amount requested by the buyer.
-                    let required = amount.clone();
-                    let payment =
-                        pay_from_wallet(&wallet_path, &id, &required, "contract buy").await?;
-                    client
-                        .buy_contract(&req, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
                 }
+                PaymentRail::Bitcoin => client
+                    .buy_contract_with_payment(
+                        &req,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
 
             let contract_id = buy_response
@@ -1442,7 +2199,7 @@ async fn main() -> anyhow::Result<()> {
             content,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let id = wallet.identity()?;
+            let (_, id) = active_pgp_identity(&wallet)?;
             let fp = id.fingerprint();
             let c = wallet
                 .get_contract(&contract)?
@@ -1481,20 +2238,54 @@ async fn main() -> anyhow::Result<()> {
                 signature: sig,
             };
             let client = make_client(api, direct);
-            let post_id = match client.publish_post(&req, "").await {
-                Ok(post_id) => post_id,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    let Some(required) = required_amount_for_payment_retry(&err, "0.01") else {
-                        return Err(err);
-                    };
-                    let payment =
-                        pay_from_wallet(&wallet_path, &id, &required, "contract bid").await?;
-                    client
-                        .publish_post(&req, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
+            let post_id = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .publish_post_with_payment(
+                            &req,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(post_id) => post_id,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            let Some(required) = required_amount_for_payment_retry(&err, "0.01")
+                            else {
+                                return Err(err);
+                            };
+                            let payment =
+                                pay_from_wallet(&wallet_path, &wallet, &required, "contract bid")
+                                    .await?;
+                            client
+                                .publish_post_with_payment(
+                                    &req,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
+                    }
                 }
+                PaymentRail::Bitcoin => client
+                    .publish_post_with_payment(
+                        &req,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
             println!("Bid posted: {post_id}");
         }
@@ -1502,7 +2293,7 @@ async fn main() -> anyhow::Result<()> {
         // ── contract accept ───────────────────────────────────────────────────
         Cmd::Contract(ContractCmd::Accept { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
+            let (_, identity) = active_pgp_identity(&wallet)?;
             let fp = identity.fingerprint();
             let sig = identity.sign(&format!("accept:{id}:{fp}"));
             let client = make_client(api, direct);
@@ -1642,7 +2433,7 @@ async fn main() -> anyhow::Result<()> {
         // ── contract deliver ──────────────────────────────────────────────────
         Cmd::Contract(ContractCmd::Deliver { id, text }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
+            let (_, identity) = active_pgp_identity(&wallet)?;
             let fp = identity.fingerprint();
             let contract = wallet
                 .get_contract(&id)?
@@ -1671,29 +2462,71 @@ async fn main() -> anyhow::Result<()> {
         // ── contract pickup ───────────────────────────────────────────────────
         Cmd::Contract(ContractCmd::Pickup { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
+            let (_, identity) = active_pgp_identity(&wallet)?;
             let fp = identity.fingerprint();
             let sig = identity.sign(&id);
             let client = make_client(api, direct);
-            let resp = match client.pickup(&id, &fp, &sig, "").await {
-                Ok(v) => v,
-                Err(err) => {
-                    let err = anyhow::Error::from(err);
-                    if required_amount_for_payment_retry(&err, "0.015").is_none() {
-                        return Err(err);
-                    }
-                    let required = wallet
-                        .get_contract(&id)?
-                        .map(|c| format_units_to_amount((c.amount_units * 3) / 100))
-                        .unwrap_or_else(|| "0.015".to_string());
-                    let payment =
-                        pay_from_wallet(&wallet_path, &identity, &required, "contract pickup")
+            let resp = match payment_rail {
+                PaymentRail::Webcash => {
+                    let preflight = client
+                        .pickup_with_payment(
+                            &id,
+                            &fp,
+                            &sig,
+                            payment_secret_for_rail(
+                                PaymentRail::Webcash,
+                                Some(""),
+                                bitcoin_secret.as_deref(),
+                            )?,
+                        )
+                        .await;
+                    match preflight {
+                        Ok(v) => v,
+                        Err(err) => {
+                            let err = anyhow::Error::from(err);
+                            if required_amount_for_payment_retry(&err, "0.015").is_none() {
+                                return Err(err);
+                            }
+                            let required = wallet
+                                .get_contract(&id)?
+                                .map(|c| format_units_to_amount((c.amount_units * 3) / 100))
+                                .unwrap_or_else(|| "0.015".to_string());
+                            let payment = pay_from_wallet(
+                                &wallet_path,
+                                &wallet,
+                                &required,
+                                "contract pickup",
+                            )
                             .await?;
-                    client
-                        .pickup(&id, &fp, &sig, &payment)
-                        .await
-                        .map_err(anyhow::Error::from)?
+                            client
+                                .pickup_with_payment(
+                                    &id,
+                                    &fp,
+                                    &sig,
+                                    payment_secret_for_rail(
+                                        PaymentRail::Webcash,
+                                        Some(&payment),
+                                        bitcoin_secret.as_deref(),
+                                    )?,
+                                )
+                                .await
+                                .map_err(anyhow::Error::from)?
+                        }
+                    }
                 }
+                PaymentRail::Bitcoin => client
+                    .pickup_with_payment(
+                        &id,
+                        &fp,
+                        &sig,
+                        payment_secret_for_rail(
+                            PaymentRail::Bitcoin,
+                            None,
+                            bitcoin_secret.as_deref(),
+                        )?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?,
             };
 
             if let Some(mut c) = wallet.get_contract(&id)? {
@@ -1725,7 +2558,7 @@ async fn main() -> anyhow::Result<()> {
         // ── contract refund ───────────────────────────────────────────────────
         Cmd::Contract(ContractCmd::Refund { id }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let identity = wallet.identity()?;
+            let (_, identity) = active_pgp_identity(&wallet)?;
             let fp = identity.fingerprint();
             let contract = wallet
                 .get_contract(&id)?

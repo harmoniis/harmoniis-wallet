@@ -1,27 +1,90 @@
 # harmoniis-wallet
 
-Reference CLI wallet for the Harmoniis marketplace and Webcash miner.
+Reference CLI wallet for Harmoniis contracts plus Webcash mining.
 
-It provides:
-- RGB-style contract/certificate custody via Witness secrets.
-- Local wallet state in SQLite.
-- Webcash wallet operations (`info`, `insert`, `pay`, `check`, `recover`, `merge`).
-- Webcash mining with backends: `CUDA -> Vulkan/wgpu -> CPU`.
+## Credits
+
+- Webminer architecture/perf direction inspired by [`maaku/webminer`](https://github.com/maaku/webminer).
+- RGB model inspired by [`RGB-WG/rgb`](https://github.com/RGB-WG/rgb).
+- Witness custody/replace flow inspired by Webcash server semantics (replace invalidates old secret).
+
+## Key Model (Current)
+
+One root private key is stored in the wallet and deterministically derives separate key material:
+
+- `RGB identity key` (wallet contract identity)
+- `Webcash master secret`
+- `Bitcoin deterministic slot key` (reserved for Bitcoin rail integration)
+- `PGP-style signing identities` (multiple, labeled, selectable)
+
+PGP identities are managed with labels:
+
+```bash
+hrmw identity pgp-list
+hrmw identity pgp-new --label ops-signing
+hrmw identity pgp-use --label ops-signing
+```
+
+`hrmw identity register` signs with the active PGP label by default.
+
+Master key backup / restore:
+
+```bash
+hrmw key export --format mnemonic
+hrmw key export --format hex --output ./master.hex
+hrmw key import --mnemonic "word1 word2 ... word24"
+hrmw key fingerprint
+```
+
+Deterministic slot map:
+
+- `pgp[i]` for `i=0..999` (identity scan range)
+- `webcash[0]` deterministic webcash master
+- `rgb[0]` deterministic RGB identity root
+- `bitcoin[0]` deterministic Bitcoin slot seed material
+
+This allows reconstruction from only the root key export plus server discovery.
 
 ## Install
 
-### crates.io (recommended)
+### 1) Install Rust
 
-```bash
-cargo install harmoniis-wallet
-hrmw --version
-```
-
-### Fresh Ubuntu (install Rust first)
+Ubuntu/Debian:
 
 ```bash
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 source ~/.cargo/env
+```
+
+macOS:
+
+```bash
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+Windows (PowerShell):
+
+```powershell
+winget install Rustlang.Rustup
+rustup default stable
+```
+
+FreeBSD:
+
+```sh
+pkg install -y rust cargo
+```
+
+NetBSD:
+
+```sh
+pkgin -y install rust cargo
+```
+
+### 2) Install `harmoniis-wallet`
+
+```bash
 cargo install harmoniis-wallet
 hrmw --version
 ```
@@ -29,90 +92,125 @@ hrmw --version
 ## Default Paths
 
 - Main wallet DB: `~/.harmoniis/rgb.db`
-- Webcash wallet DB: `~/.harmoniis/webcash.db`
-- Miner log (daemon mode): `~/.harmoniis/miner.log`
+- Webcash DB: `~/.harmoniis/webcash.db`
+- Miner log (daemon): `~/.harmoniis/miner.log`
 - Miner status JSON: `~/.harmoniis/miner_status.json`
-- Pending accepted keeps: `~/.harmoniis/miner_pending_keeps.log`
-
-Important: `hrmw webcash ... --wallet` expects the **main wallet path** (`rgb.db`), not `webcash.db`.
+- Pending mined keeps: `~/.harmoniis/miner_pending_keeps.log`
 
 ## Quick Start
 
 ```bash
-# One-time setup
 hrmw setup
-
-# Wallet summary
 hrmw info
 
-# Register identity
-hrmw identity register --nick alice
+# Optional: create/select additional labeled signing keys
+hrmw identity pgp-new --label team-main --active
+hrmw identity pgp-list
 
-# Webcash basics
+hrmw identity register --nick alice
 hrmw webcash info
-hrmw webcash insert "e1.0:secret:..."
-hrmw webcash check
 ```
 
-## Webminer (Production)
+## RGB Contract Usage
 
-### Foreground run (recommended while validating)
+Buyer flow:
+
+```bash
+hrmw contract buy --post POST_ID --amount 1.0 --type service
+hrmw contract bid --post POST_ID --contract CONTRACT_ID
+```
+
+Seller/holder flow:
+
+```bash
+hrmw contract insert 'n:CONTRACT_ID:secret:<hex>'
+hrmw contract accept --id CONTRACT_ID
+hrmw contract deliver --id CONTRACT_ID --text 'delivered work'
+```
+
+Transfer custody safely:
+
+```bash
+hrmw contract replace --id CONTRACT_ID
+```
+
+`replace` rotates witness state: the old secret is invalid after replacement.
+
+## Webcash Usage
+
+```bash
+hrmw webcash info
+hrmw webcash insert 'e1.0:secret:<hex>'
+hrmw webcash pay --amount 0.2 --memo 'payment'
+hrmw webcash check
+hrmw webcash recover --gap-limit 20
+hrmw webcash merge --group 20
+```
+
+## Payment Rails
+
+- Active settlement rail today: **Webcash** (`X-Webcash-Secret`).
+- `X-Bitcoin-Secret` parsing is wired for forward compatibility, but settlement is not yet enabled server-side.
+- Client API exposes payment-header abstractions so Bitcoin/ARK can be enabled without breaking existing Webcash flows.
+
+CLI rail flags:
+
+```bash
+# default (webcash)
+hrmw --payment-rail webcash timeline post --content "hello"
+
+# forward-compatible bitcoin header mode (requires explicit secret)
+hrmw --payment-rail bitcoin --bitcoin-secret "<vtxo-or-ark-secret>" timeline post --content "hello"
+
+# or via env
+HRMW_BITCOIN_SECRET="<vtxo-or-ark-secret>" hrmw --payment-rail bitcoin timeline post --content "hello"
+```
+
+## Deterministic Bitcoin Wallet (Taproot)
+
+The wallet derives a deterministic Bitcoin slot (`bitcoin[0]`) from the root key and uses it for a BIP86 taproot wallet view.
+
+```bash
+# show descriptors + deterministic address and sync balances
+hrmw bitcoin info
+
+# explicit sync settings
+hrmw bitcoin sync --network bitcoin --stop-gap 40 --parallel-requests 8
+
+# deterministic address at index N
+hrmw bitcoin address --network bitcoin --index 0
+```
+
+Notes:
+- This is deterministic reconstruction support (no separate seed file needed).
+- Current backend settlement remains Webcash-first; Bitcoin payment header plumbing is present for staged rollout.
+- Default esplora endpoints are auto-selected by network and can be overridden with `--esplora`.
+
+## Mining
+
+Foreground (recommended for live logs):
 
 ```bash
 hrmw webminer run --accept-terms
 ```
 
-This prints active backend, GPU/CPU setup, speed, ETA, and accepted solutions in real time.
+Backend order in `auto`: `CUDA -> Vulkan/wgpu -> CPU`.
 
-### Background daemon mode
-
-```bash
-hrmw webminer start --accept-terms
-hrmw webminer status
-hrmw webminer stop
-```
-
-### Backend selection
+Examples:
 
 ```bash
-# Auto: CUDA -> Vulkan/wgpu -> CPU
 hrmw webminer run --backend auto --accept-terms
-
-# GPU-only policy (CUDA preferred)
 hrmw webminer run --backend gpu --accept-terms
-
-# CPU-only policy
 hrmw webminer run --backend cpu --cpu-threads 8 --accept-terms
-```
-
-### Local benchmark
-
-```bash
 hrmw webminer bench --cpu-threads 8
 ```
 
-Benchmark numbers are hardware/driver/thermal dependent.
+Accepted mined keeps are inserted into wallet with replace semantics (old secret invalidated).
+If insert fails after acceptance, pending keeps are stored in `miner_pending_keeps.log`.
 
-## Mining Safety and Recovery
+## Backup and Restore
 
-- Accepted mining rewards are claimed with Webcash `replace` + wallet `insert`, so old secrets are invalidated.
-- If claim/insert fails after server acceptance, keep secrets are written to `~/.harmoniis/miner_pending_keeps.log`.
-
-Replay pending keeps:
-
-```bash
-cat ~/.harmoniis/miner_pending_keeps.log | xargs -n 1 hrmw webcash insert
-```
-
-Recover deterministic Webcash chains:
-
-```bash
-hrmw webcash recover --wallet ~/.harmoniis/rgb.db --gap-limit 20
-```
-
-## Backup (Recommended)
-
-Backup the full wallet directory, not a single DB:
+Backup the entire wallet directory:
 
 ```bash
 tar -C ~ -czf harmoniis_backup_$(date +%Y%m%d_%H%M%S).tar.gz .harmoniis
@@ -124,17 +222,27 @@ Restore:
 tar -C ~ -xzf harmoniis_backup_YYYYMMDD_HHMMSS.tar.gz
 ```
 
+Then validate:
+
+```bash
+hrmw info
+hrmw webcash recover --wallet ~/.harmoniis/rgb.db --gap-limit 40
+hrmw recover deterministic --pgp-start 0 --pgp-end 999
+```
+
+If you accidentally pass `--wallet .../webcash.db`, `hrmw` now auto-corrects to the sibling `rgb.db` path.
+
+For deterministic restore on a new machine:
+
+```bash
+hrmw setup
+hrmw key import --mnemonic "word1 word2 ... word24" --force
+hrmw recover deterministic --pgp-start 0 --pgp-end 999
+```
+
 ## Build and Test
 
 ```bash
 cargo build --release
 cargo test --test unit_tests
 ```
-
-## Publish
-
-```bash
-cargo publish
-```
-
-Requires crates.io authentication and a verified crates.io email.

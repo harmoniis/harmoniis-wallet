@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{x25519, EphemeralSecret, PublicKey};
 
 use crate::{
-    client::HarmoniisClient,
+    client::{apply_payment_header, HarmoniisClient, PaymentSecret},
     crypto::sha256_bytes,
     error::{Error, Result},
     types::{WitnessProof, WitnessSecret},
@@ -250,16 +250,20 @@ where
 // ── Client methods ────────────────────────────────────────────────────────────
 
 impl HarmoniisClient {
-    /// `POST /api/v1/arbitration/contracts/buy`
-    /// Requires `X-Webcash-Secret` header.
     pub async fn buy_contract(&self, req: &BuyRequest, webcash: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(self.url("arbitration/contracts/buy"))
-            .header("X-Webcash-Secret", webcash)
-            .json(req)
-            .send()
-            .await?;
+        self.buy_contract_with_payment(req, PaymentSecret::Webcash(webcash))
+            .await
+    }
+
+    /// `POST /api/v1/arbitration/contracts/buy`
+    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
+    pub async fn buy_contract_with_payment(
+        &self,
+        req: &BuyRequest,
+        payment: PaymentSecret<'_>,
+    ) -> Result<serde_json::Value> {
+        let resp = self.http.post(self.url("arbitration/contracts/buy"));
+        let resp = apply_payment_header(resp, payment).json(req).send().await?;
         let resp = Self::check_status(resp).await?;
         Ok(resp.json().await?)
     }
@@ -337,8 +341,6 @@ impl HarmoniisClient {
         Ok(resp.json().await?)
     }
 
-    /// `POST /api/v1/arbitration/contracts/{id}/pickup`
-    /// Requires `X-Webcash-Secret` header (first pickup only: 3% fee).
     pub async fn pickup(
         &self,
         id: &str,
@@ -346,14 +348,32 @@ impl HarmoniisClient {
         signature: &str,
         webcash: &str,
     ) -> Result<serde_json::Value> {
+        self.pickup_with_payment(
+            id,
+            actor_fingerprint,
+            signature,
+            PaymentSecret::Webcash(webcash),
+        )
+        .await
+    }
+
+    /// `POST /api/v1/arbitration/contracts/{id}/pickup`
+    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`) on first pickup.
+    pub async fn pickup_with_payment(
+        &self,
+        id: &str,
+        actor_fingerprint: &str,
+        signature: &str,
+        payment: PaymentSecret<'_>,
+    ) -> Result<serde_json::Value> {
         let body = json!({
             "actor_fingerprint": actor_fingerprint,
             "signature": signature,
         });
         let resp = self
             .http
-            .post(self.url(&format!("arbitration/contracts/{id}/pickup")))
-            .header("X-Webcash-Secret", webcash)
+            .post(self.url(&format!("arbitration/contracts/{id}/pickup")));
+        let resp = apply_payment_header(resp, payment)
             .json(&body)
             .send()
             .await?;
