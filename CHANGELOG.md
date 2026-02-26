@@ -13,6 +13,16 @@ _Nothing yet._
 
 ---
 
+## [0.1.15] — 2026-02-26
+
+### Changed
+
+- Optimized CUDA mining hot path with atomic best-result reduction and persistent device result buffers.
+- Reduced CUDA kernel pressure by switching to a rolling 16-word SHA256 schedule.
+- Improved multi-CUDA dispatch path by removing unused nonce table cloning in worker tasks.
+
+---
+
 ## [0.1.14] — 2026-02-26
 
 ### Added
