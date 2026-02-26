@@ -117,6 +117,14 @@ pub trait MinerBackend: Send + Sync {
         NONCE_SPACE_SIZE
     }
 
+    /// Suggested number of independent work units to mine in parallel.
+    ///
+    /// Backends with many physical devices (e.g. Multi-CUDA) can return >1
+    /// to keep all devices busy with full nonce-space work units.
+    fn recommended_pipeline_depth(&self) -> usize {
+        1
+    }
+
     /// Mine a nonce range [start_nonce, start_nonce + nonce_count).
     ///
     /// Backends should clamp to `NONCE_SPACE_SIZE`.
@@ -129,6 +137,34 @@ pub trait MinerBackend: Send + Sync {
         nonce_count: u32,
         cancel: Option<CancelFlag>,
     ) -> anyhow::Result<MiningChunkResult>;
+
+    /// Mine multiple independent work units.
+    ///
+    /// Default behavior mines them sequentially. High-throughput backends can
+    /// override this to run them concurrently.
+    async fn mine_work_units(
+        &self,
+        midstates: &[Sha256Midstate],
+        nonce_table: &NonceTable,
+        difficulty: u32,
+        cancel: Option<CancelFlag>,
+    ) -> anyhow::Result<Vec<MiningChunkResult>> {
+        let mut out = Vec::with_capacity(midstates.len());
+        for midstate in midstates {
+            out.push(
+                self.mine_range(
+                    midstate,
+                    nonce_table,
+                    difficulty,
+                    0,
+                    NONCE_SPACE_SIZE,
+                    cancel.clone(),
+                )
+                .await?,
+            );
+        }
+        Ok(out)
+    }
 
     /// Mine a single work unit (1M nonce combinations from a midstate).
     ///

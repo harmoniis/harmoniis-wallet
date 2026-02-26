@@ -162,6 +162,48 @@ impl MinerBackend for MultiCudaMiner {
         NONCE_SPACE_SIZE
     }
 
+    fn recommended_pipeline_depth(&self) -> usize {
+        self.miners.len().max(1)
+    }
+
+    async fn mine_work_units(
+        &self,
+        midstates: &[Sha256Midstate],
+        _nonce_table: &NonceTable,
+        difficulty: u32,
+        cancel: Option<CancelFlag>,
+    ) -> anyhow::Result<Vec<MiningChunkResult>> {
+        if midstates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tasks = JoinSet::new();
+        for (idx, midstate) in midstates.iter().enumerate() {
+            let miner = self.miners[idx % self.miners.len()].clone();
+            let midstate = midstate.clone();
+            let cancel = cancel.clone();
+            tasks.spawn(async move {
+                let chunk = miner
+                    .mine_range_direct(&midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel)
+                    .await?;
+                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
+            });
+        }
+
+        let mut ordered: Vec<Option<MiningChunkResult>> =
+            (0..midstates.len()).map(|_| None).collect();
+        while let Some(joined) = tasks.join_next().await {
+            let (idx, chunk) = joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
+            ordered[idx] = Some(chunk);
+        }
+
+        let mut out = Vec::with_capacity(midstates.len());
+        for item in ordered {
+            out.push(item.ok_or_else(|| anyhow::anyhow!("missing CUDA mining chunk result"))?);
+        }
+        Ok(out)
+    }
+
     async fn mine_range(
         &self,
         midstate: &Sha256Midstate,

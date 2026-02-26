@@ -9,7 +9,7 @@ use webylib::SecretWebcash;
 use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-use super::{select_backend, BackendChoice, MinerConfig, NONCE_SPACE_SIZE};
+use super::{select_backend, BackendChoice, MinerConfig};
 
 /// PID file path: ~/.harmoniis/miner.pid
 pub fn pid_file_path() -> PathBuf {
@@ -291,10 +291,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Select backend
     let backend = select_backend(config.backend, config.cpu_threads).await?;
     let chunk_size = backend.max_batch_hint();
+    let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 64);
     println!("Mining setup:");
     println!("  backend_mode={}", config.backend.as_cli_str());
     println!("  backend_name={}", backend.name());
     println!("  nonce_chunk_size={}", chunk_size);
+    println!("  workunit_pipeline_depth={}", pipeline_depth);
     println!(
         "  cpu_system_threads={}",
         std::thread::available_parallelism()
@@ -371,30 +373,27 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             continue;
         }
 
-        // Build work unit
-        let wu = WorkUnit::new(
-            target.difficulty,
-            target.mining_amount,
-            target.subsidy_amount,
-        );
-
-        // Mine
-        work_unit_timer = std::time::Instant::now();
-        let mut attempts_this_work_unit = 0u64;
-        // Always mine a single full nonce-space range per work unit.
-        let chunk = backend
-            .mine_range(
-                &wu.midstate,
-                &nonce_table,
+        // Build independent work units for this mining cycle.
+        let mut work_units = Vec::with_capacity(pipeline_depth);
+        for _ in 0..pipeline_depth {
+            work_units.push(WorkUnit::new(
                 target.difficulty,
-                0,
-                NONCE_SPACE_SIZE,
-                None,
-            )
+                target.mining_amount,
+                target.subsidy_amount,
+            ));
+        }
+        let midstates: Vec<_> = work_units.iter().map(|wu| wu.midstate.clone()).collect();
+
+        // Mine all work units (backend may run these in parallel).
+        work_unit_timer = std::time::Instant::now();
+        let chunks = backend
+            .mine_work_units(&midstates, &nonce_table, target.difficulty, None)
             .await?;
-        attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
-        let best_result = chunk.result;
         let wu_elapsed = work_unit_timer.elapsed();
+        let mut attempts_this_work_unit = 0u64;
+        for chunk in &chunks {
+            attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
+        }
 
         tracker.add_attempts(attempts_this_work_unit);
 
@@ -427,63 +426,65 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             last_stats_print = std::time::Instant::now();
         }
 
-        if let Some(solution) = best_result {
-            tracker.record_solution();
-            let preimage =
-                wu.preimage_string(&nonce_table, solution.nonce1_idx, solution.nonce2_idx);
+        for (wu, chunk) in work_units.into_iter().zip(chunks.into_iter()) {
+            if let Some(solution) = chunk.result {
+                tracker.record_solution();
+                let preimage =
+                    wu.preimage_string(&nonce_table, solution.nonce1_idx, solution.nonce2_idx);
 
-            println!(
-                "SOLUTION FOUND! difficulty={} hash=0x{}",
-                solution.difficulty_achieved,
-                hex::encode(&solution.hash)
-            );
+                println!(
+                    "SOLUTION FOUND! difficulty={} hash=0x{}",
+                    solution.difficulty_achieved,
+                    hex::encode(&solution.hash)
+                );
 
-            // Submit to server
-            match protocol.submit_report(&preimage, &solution.hash).await {
-                Ok(resp) => {
-                    tracker.record_accepted();
-                    println!("Mining report accepted! keep={}", wu.keep_secret);
+                // Submit to server
+                match protocol.submit_report(&preimage, &solution.hash).await {
+                    Ok(resp) => {
+                        tracker.record_accepted();
+                        println!("Mining report accepted! keep={}", wu.keep_secret);
 
-                    // Update difficulty if server says so
-                    if let Some(new_diff) = resp.difficulty_target {
-                        if new_diff != target.difficulty {
-                            println!(
-                                "Difficulty adjustment: {} → {}",
-                                target.difficulty, new_diff
-                            );
-                            target.difficulty = new_diff;
-                            tracker.set_difficulty(new_diff);
+                        // Update difficulty if server says so
+                        if let Some(new_diff) = resp.difficulty_target {
+                            if new_diff != target.difficulty {
+                                println!(
+                                    "Difficulty adjustment: {} → {}",
+                                    target.difficulty, new_diff
+                                );
+                                target.difficulty = new_diff;
+                                tracker.set_difficulty(new_diff);
+                            }
                         }
+
+                        // Claim and rotate mined keep secret through wallet insert/replace.
+                        claim_accepted_keep_secret(
+                            &webcash_wallet,
+                            &config.webcash_wallet_path,
+                            &pending_keep_path,
+                            &wu.keep_secret,
+                        )
+                        .await;
                     }
+                    Err(e) => {
+                        eprintln!("Mining report rejected: {}", e);
 
-                    // Claim and rotate mined keep secret through wallet insert/replace.
-                    claim_accepted_keep_secret(
-                        &webcash_wallet,
-                        &config.webcash_wallet_path,
-                        &pending_keep_path,
-                        &wu.keep_secret,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    eprintln!("Mining report rejected: {}", e);
-
-                    // Save orphaned solution
-                    let orphan_line = format!(
-                        "{} 0x{} {} difficulty={}\n",
-                        preimage,
-                        hex::encode(&solution.hash),
-                        wu.keep_secret,
-                        solution.difficulty_achieved
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(orphan_log_path())
-                        .and_then(|mut f| {
-                            use std::io::Write;
-                            f.write_all(orphan_line.as_bytes())
-                        });
+                        // Save orphaned solution
+                        let orphan_line = format!(
+                            "{} 0x{} {} difficulty={}\n",
+                            preimage,
+                            hex::encode(&solution.hash),
+                            wu.keep_secret,
+                            solution.difficulty_achieved
+                        );
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(orphan_log_path())
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(orphan_line.as_bytes())
+                            });
+                    }
                 }
             }
         }
