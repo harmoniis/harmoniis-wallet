@@ -13,6 +13,16 @@ _Nothing yet._
 
 ---
 
+## [0.1.16] — 2026-02-26
+
+### Changed
+
+- Added backend-level multi-workunit mining interface with pipeline depth hints.
+- Multi-CUDA backend now mines independent full work units concurrently across GPUs.
+- Daemon mining loop now supports pipelined multi-workunit cycles and per-workunit submission handling.
+
+---
+
 ## [0.1.15] — 2026-02-26
 
 ### Changed
