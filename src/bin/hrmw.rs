@@ -16,7 +16,7 @@ use anyhow::Context;
 use bdk_wallet::bitcoin::Network;
 use clap::{Parser, Subcommand, ValueEnum};
 use harmoniis_wallet::{
-    bitcoin::DeterministicBitcoinWallet,
+    bitcoin::{BitcoinAddressKind, DeterministicBitcoinWallet},
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
         recovery::{RecoveryProbe, RecoveryScanRequest},
@@ -228,9 +228,24 @@ impl From<BitcoinNetworkArg> for Network {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BitcoinAddressKindArg {
+    Taproot,
+    Segwit,
+}
+
+impl From<BitcoinAddressKindArg> for BitcoinAddressKind {
+    fn from(value: BitcoinAddressKindArg) -> Self {
+        match value {
+            BitcoinAddressKindArg::Taproot => BitcoinAddressKind::Taproot,
+            BitcoinAddressKindArg::Segwit => BitcoinAddressKind::Segwit,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum BitcoinCmd {
-    /// Show deterministic taproot wallet summary and optionally sync via Esplora
+    /// Show deterministic taproot/segwit wallet summary and optionally sync via Esplora
     Info {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
@@ -248,11 +263,14 @@ enum BitcoinCmd {
         #[arg(long, default_value_t = 4)]
         parallel_requests: usize,
     },
-    /// Show receive address at a deterministic index
+    /// Show receive address at a deterministic index (`taproot` or `segwit`)
     Address {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
+        /// Address kind (`taproot` preferred, `segwit` fallback)
+        #[arg(long, value_enum, default_value_t = BitcoinAddressKindArg::Taproot)]
+        kind: BitcoinAddressKindArg,
         /// Address index (external keychain)
         #[arg(long, default_value_t = 0)]
         index: u32,
@@ -1195,16 +1213,28 @@ async fn main() -> anyhow::Result<()> {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let (external, internal) = btc.descriptor_strings()?;
+            let (taproot_external, taproot_internal) =
+                btc.descriptor_strings_for(BitcoinAddressKind::Taproot)?;
+            let (segwit_external, segwit_internal) =
+                btc.descriptor_strings_for(BitcoinAddressKind::Segwit)?;
             println!("Bitcoin deterministic wallet");
             println!("Network:     {}", network);
             println!(
                 "Esplora:     {}",
                 resolved_esplora_url(network, esplora.clone())
             );
-            println!("Descriptor ext: {external}");
-            println!("Descriptor int: {internal}");
-            println!("Address[0]:  {}", btc.receive_address_at(0)?);
+            println!("Taproot descriptor ext: {taproot_external}");
+            println!("Taproot descriptor int: {taproot_internal}");
+            println!(
+                "Taproot address[0]: {}",
+                btc.receive_address_at_kind(0, BitcoinAddressKind::Taproot)?
+            );
+            println!("SegWit descriptor ext:  {segwit_external}");
+            println!("SegWit descriptor int:  {segwit_internal}");
+            println!(
+                "SegWit address[0]:  {}",
+                btc.receive_address_at_kind(0, BitcoinAddressKind::Segwit)?
+            );
             if !no_sync {
                 let snapshot = btc.sync(
                     &resolved_esplora_url(network, esplora),
@@ -1232,18 +1262,26 @@ async fn main() -> anyhow::Result<()> {
                     format_btc_from_sats(snapshot.total_sats)
                 );
                 println!(
-                    "Next receive: {} (index {})",
-                    snapshot.receive_address, snapshot.receive_index
+                    "Next receive (taproot): {} (index {})",
+                    snapshot.taproot_receive_address, snapshot.taproot_receive_index
                 );
-                println!("UTXOs:       {}", snapshot.unspent_count);
+                println!(
+                    "Next receive (segwit):  {} (index {})",
+                    snapshot.segwit_receive_address, snapshot.segwit_receive_index
+                );
+                println!("UTXOs(total): {}", snapshot.unspent_count);
             }
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Address { network, index }) => {
+        Cmd::Bitcoin(BitcoinCmd::Address {
+            network,
+            kind,
+            index,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let addr = btc.receive_address_at(index)?;
+            let addr = btc.receive_address_at_kind(index, kind.into())?;
             println!("{addr}");
         }
 
@@ -1281,10 +1319,14 @@ async fn main() -> anyhow::Result<()> {
                 format_btc_from_sats(snapshot.total_sats)
             );
             println!(
-                "Next receive:  {} (index {})",
-                snapshot.receive_address, snapshot.receive_index
+                "Next taproot:  {} (index {})",
+                snapshot.taproot_receive_address, snapshot.taproot_receive_index
             );
-            println!("UTXOs:         {}", snapshot.unspent_count);
+            println!(
+                "Next segwit:   {} (index {})",
+                snapshot.segwit_receive_address, snapshot.segwit_receive_index
+            );
+            println!("UTXOs(total):  {}", snapshot.unspent_count);
         }
 
         // ── key management ───────────────────────────────────────────────────

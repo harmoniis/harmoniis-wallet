@@ -166,9 +166,11 @@ hrmw --payment-rail bitcoin --bitcoin-secret "<vtxo-or-ark-secret>" timeline pos
 HRMW_BITCOIN_SECRET="<vtxo-or-ark-secret>" hrmw --payment-rail bitcoin timeline post --content "hello"
 ```
 
-## Deterministic Bitcoin Wallet (Taproot)
+## Deterministic Bitcoin Wallet (Taproot + SegWit Fallback)
 
-The wallet derives a deterministic Bitcoin slot (`bitcoin[0]`) from the root key and uses it for a BIP86 taproot wallet view.
+The wallet derives a deterministic Bitcoin slot (`bitcoin[0]`) from the root key and exposes:
+- Taproot (`BIP86`) as the primary receive path.
+- SegWit (`BIP84`) as compatibility fallback for payers without Taproot support.
 
 ```bash
 # show descriptors + deterministic address and sync balances
@@ -177,12 +179,16 @@ hrmw bitcoin info
 # explicit sync settings
 hrmw bitcoin sync --network bitcoin --stop-gap 40 --parallel-requests 8
 
-# deterministic address at index N
-hrmw bitcoin address --network bitcoin --index 0
+# deterministic taproot address at index N
+hrmw bitcoin address --network bitcoin --kind taproot --index 0
+
+# deterministic segwit fallback address at index N
+hrmw bitcoin address --network bitcoin --kind segwit --index 0
 ```
 
 Notes:
 - This is deterministic reconstruction support (no separate seed file needed).
+- `hrmw bitcoin info` and `hrmw bitcoin sync` report both Taproot and SegWit next receive addresses.
 - Current backend settlement remains Webcash-first; Bitcoin payment header plumbing is present for staged rollout.
 - Default esplora endpoints are auto-selected by network and can be overridden with `--esplora`.
 
