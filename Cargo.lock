@@ -172,8 +172,9 @@ dependencies = [
 
 [[package]]
 name = "ark-bdk-wallet"
-version = "0.7.0"
-source = "git+https://github.com/arkade-os/rust-sdk?tag=v0.8.0#593b5439669e140cf48dbe5ce7c1348253e5e2e9"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "623f382d15c96253fa16f24a8ab36a0ba91b57bd3c2ba18895d7b56b9e5a0a28"
 dependencies = [
  "anyhow",
  "ark-client",
@@ -191,8 +192,9 @@ dependencies = [
 
 [[package]]
 name = "ark-client"
-version = "0.7.0"
-source = "git+https://github.com/arkade-os/rust-sdk?tag=v0.8.0#593b5439669e140cf48dbe5ce7c1348253e5e2e9"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b89ca2091bb4c3d20aa85be8741345f6169cad0571783b5a69833b12c110f37b"
 dependencies = [
  "ark-core",
  "ark-fees",
@@ -228,8 +230,9 @@ dependencies = [
 
 [[package]]
 name = "ark-core"
-version = "0.7.0"
-source = "git+https://github.com/arkade-os/rust-sdk?tag=v0.8.0#593b5439669e140cf48dbe5ce7c1348253e5e2e9"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74118ec876f08150b4a34150d312450ab4ba8e88d26656965598da7eb91a423e"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -249,16 +252,18 @@ dependencies = [
 
 [[package]]
 name = "ark-fees"
-version = "0.7.0"
-source = "git+https://github.com/arkade-os/rust-sdk?tag=v0.8.0#593b5439669e140cf48dbe5ce7c1348253e5e2e9"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "398af296ec2e8ced7b903afea9aafc2d8d5f63ed71094d817fb20c26dc2f3302"
 dependencies = [
  "cel",
 ]
 
 [[package]]
 name = "ark-grpc"
-version = "0.7.0"
-source = "git+https://github.com/arkade-os/rust-sdk?tag=v0.8.0#593b5439669e140cf48dbe5ce7c1348253e5e2e9"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8ce1299686793b70a37878a5ff8cc6ee39d050e4b17cb90399121075c66b5c4"
 dependencies = [
  "ark-core",
  "async-stream",
@@ -1609,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "ark-bdk-wallet",
@@ -1947,7 +1952,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -2200,7 +2205,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

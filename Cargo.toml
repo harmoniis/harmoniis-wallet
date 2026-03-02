@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.17"
+version     = "0.1.18"
 edition     = "2021"
 rust-version = "1.85"
 description = "RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace (Witness-backed bearer state + Webcash fees)"
@@ -82,10 +82,10 @@ bdk_wallet  = "1.2"
 bdk_esplora = "0.20"
 
 # ARK protocol (Arkade ASP — offchain Bitcoin via VTXOs)
-ark-client    = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
-ark-bdk-wallet = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
-ark-core      = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
-ark-grpc      = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
+ark-client    = "0.8.0"
+ark-bdk-wallet = "0.8.0"
+ark-core      = "0.8.0"
+ark-grpc      = "0.8.0"
 rustls        = { version = "0.23", features = ["ring"] }
 
 # Mining
