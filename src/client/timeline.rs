@@ -19,6 +19,12 @@ pub struct RegisterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteIdentityRequest {
+    pub fingerprint: String,
+    pub signature: String, // sign("delete_identity:{fingerprint}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DonationClaimRequest {
     pub pgp_public_key: String,
     pub signature: String,
@@ -217,6 +223,19 @@ impl HarmoniisClient {
             .ok_or_else(|| Error::InvalidFormat("missing fingerprint in register response".into()))?
             .to_string();
         Ok(fp)
+    }
+
+    /// `POST /api/v1/identity/delete`
+    /// Requires author signature for `delete_identity:{fingerprint}`.
+    pub async fn delete_identity(&self, req: &DeleteIdentityRequest) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.url("identity/delete"))
+            .json(req)
+            .send()
+            .await?;
+        Self::check_status(resp).await?;
+        Ok(())
     }
 
     pub async fn publish_post(&self, req: &PublishPostRequest, webcash: &str) -> Result<String> {

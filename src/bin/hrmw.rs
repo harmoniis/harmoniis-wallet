@@ -21,8 +21,9 @@ use harmoniis_wallet::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
         recovery::{RecoveryProbe, RecoveryScanRequest},
         timeline::{
-            DeletePostRequest, DonationClaimRequest, PostAttachment, PublishPostRequest,
-            RatePostRequest, RegisterRequest, StoragePresignRequest, UpdatePostRequest,
+            DeleteIdentityRequest, DeletePostRequest, DonationClaimRequest, PostAttachment,
+            PublishPostRequest, RatePostRequest, RegisterRequest, StoragePresignRequest,
+            UpdatePostRequest,
         },
         PaymentSecret,
     },
@@ -300,6 +301,12 @@ enum IdentityCmd {
         nick: String,
         #[arg(long)]
         about: Option<String>,
+        /// Use a specific labeled PGP identity (defaults to active label)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Delete an identity and all authored content (requires matching private key)
+    Delete {
         /// Use a specific labeled PGP identity (defaults to active label)
         #[arg(long)]
         label: Option<String>,
@@ -1550,6 +1557,21 @@ async fn main() -> anyhow::Result<()> {
             };
             wallet.set_nickname(&nick)?;
             println!("Registered as '{nick}'. Fingerprint: {fp} (pgp label: {selected_label})");
+        }
+
+        Cmd::Identity(IdentityCmd::Delete { label }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let (selected_label, id) = pick_pgp_identity(&wallet, label.as_deref())?;
+            let fingerprint = id.fingerprint();
+            let req = DeleteIdentityRequest {
+                signature: id.sign(&format!("delete_identity:{fingerprint}")),
+                fingerprint,
+            };
+            make_client(api, direct)
+                .delete_identity(&req)
+                .await
+                .map_err(anyhow::Error::from)?;
+            println!("Deleted identity {} (pgp label: {selected_label})", req.fingerprint);
         }
 
         Cmd::Identity(IdentityCmd::PgpNew { label, active }) => {
