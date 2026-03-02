@@ -81,6 +81,13 @@ image       = { version = "0.25", default-features = false, features = ["jpeg", 
 bdk_wallet  = "1.2"
 bdk_esplora = "0.20"
 
+# ARK protocol (Arkade ASP — offchain Bitcoin via VTXOs)
+ark-client    = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
+ark-bdk-wallet = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
+ark-core      = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
+ark-grpc      = { git = "https://github.com/arkade-os/rust-sdk", tag = "v0.8.0" }
+rustls        = { version = "0.23", features = ["ring"] }
+
 # Mining
 wgpu        = { version = "24", optional = true }
 rayon       = "1.10"

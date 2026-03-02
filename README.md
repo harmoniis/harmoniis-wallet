@@ -151,6 +151,7 @@ hrmw webcash merge --group 20
 
 - Active settlement rail today: **Webcash** (`X-Webcash-Secret`).
 - `X-Bitcoin-Secret` is supported when backend enables Bitcoin mode (`HARMONIIS_BITCOIN_PAYMENT_MODE`).
+- In ARK mode, `X-Bitcoin-Secret` must be `ark:<vtxo_txid>:<amount_sats>`.
 - Client API exposes payment-header abstractions so Bitcoin/ARK can be enabled without breaking existing Webcash flows.
 
 CLI rail flags:
@@ -164,6 +165,16 @@ hrmw --payment-rail bitcoin --bitcoin-secret "<vtxo-or-ark-secret>" timeline pos
 
 # or via env
 HRMW_BITCOIN_SECRET="<vtxo-or-ark-secret>" hrmw --payment-rail bitcoin timeline post --content "hello"
+```
+
+ARK helper commands (Arkade ASP):
+
+```bash
+hrmw bitcoin ark info
+hrmw bitcoin ark board
+hrmw bitcoin ark settle
+hrmw bitcoin ark balance
+hrmw bitcoin ark send <ark_address> <amount_sats>
 ```
 
 ## Deterministic Bitcoin Wallet (Taproot + SegWit Fallback)
@@ -189,7 +200,7 @@ hrmw bitcoin address --network bitcoin --kind segwit --index 0
 Notes:
 - This is deterministic reconstruction support (no separate seed file needed).
 - `hrmw bitcoin info` and `hrmw bitcoin sync` report both Taproot and SegWit next receive addresses.
-- Current backend settlement remains Webcash-first; Bitcoin payment header plumbing is present for staged rollout.
+- On-chain addresses are funding rails; ARK payments are submitted as bearer proofs in `X-Bitcoin-Secret`.
 - Default esplora endpoints are auto-selected by network and can be overridden with `--esplora`.
 
 ## Mining

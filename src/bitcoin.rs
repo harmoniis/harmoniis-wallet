@@ -91,6 +91,10 @@ impl DeterministicBitcoinWallet {
         self.network
     }
 
+    pub fn slot_seed(&self) -> &[u8; 32] {
+        &self.slot_seed
+    }
+
     pub fn default_esplora_url(network: Network) -> &'static str {
         match network {
             Network::Bitcoin => "https://blockstream.info/api",

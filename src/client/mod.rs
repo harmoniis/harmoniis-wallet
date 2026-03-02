@@ -4,6 +4,8 @@ pub mod recovery;
 pub mod timeline;
 pub mod witness;
 
+use std::net::{IpAddr, SocketAddr};
+
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy)]
@@ -83,11 +85,32 @@ impl HarmoniisClient {
     }
 
     fn with_base(api_base: String) -> Self {
-        let http = reqwest::Client::builder()
+        let default_port = if api_base.starts_with("https://") {
+            443
+        } else {
+            80
+        };
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .no_proxy()
-            .build()
-            .expect("failed to build HTTP client");
+            .no_proxy();
+        if let Ok(overrides) = std::env::var("HRMW_RESOLVE") {
+            // Format: host=ip[,host=ip...]
+            for entry in overrides.split(',') {
+                let e = entry.trim();
+                if e.is_empty() {
+                    continue;
+                }
+                let Some((host, ip_raw)) = e.split_once('=') else {
+                    continue;
+                };
+                let host = host.trim();
+                let Ok(ip) = ip_raw.trim().parse::<IpAddr>() else {
+                    continue;
+                };
+                builder = builder.resolve(host, SocketAddr::new(ip, default_port));
+            }
+        }
+        let http = builder.build().expect("failed to build HTTP client");
         Self { api_base, http }
     }
 

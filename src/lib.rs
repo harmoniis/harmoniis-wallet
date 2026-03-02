@@ -1,4 +1,5 @@
 pub mod arbiter;
+pub mod ark;
 pub mod bitcoin;
 pub mod client;
 pub mod crypto;
