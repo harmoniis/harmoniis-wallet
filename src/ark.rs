@@ -28,7 +28,7 @@ use crate::bitcoin::DeterministicBitcoinWallet;
 use crate::error::{Error, Result};
 
 /// Default Arkade ASP URL (mainnet).
-pub const DEFAULT_ASP_URL: &str = "https://api.arkadeos.com";
+pub const DEFAULT_ASP_URL: &str = "https://arkade.computer";
 
 /// Default Boltz swap API (unused for basic payments, but required by the client).
 const DEFAULT_BOLTZ_URL: &str = "https://api.boltz.exchange/v2";
