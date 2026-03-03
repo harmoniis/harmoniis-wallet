@@ -4,8 +4,9 @@
 //! that settle in batches on-chain. The `ArkPaymentWallet` wraps the
 //! `ark-client` + `ark-bdk-wallet` crates, connecting to an Arkade ASP.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::io::Write;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Once, RwLock};
 use std::time::Duration;
@@ -23,6 +24,7 @@ use bdk_wallet::bitcoin::{
     Address, Amount, FeeRate, Network, OutPoint, Psbt, Transaction, Txid,
 };
 use bdk_wallet::{KeychainKind, SignOptions, TxOrdering, Wallet as BdkWallet};
+use rusqlite::params;
 
 use crate::bitcoin::DeterministicBitcoinWallet;
 use crate::error::{Error, Result};
@@ -48,45 +50,151 @@ fn ensure_rustls_provider() {
     });
 }
 
-// ── In-memory persistence for boarding outputs ───────────────────────────────
+// ── SQLite persistence for boarding outputs (bitcoin.db) ─────────────────────
 
-#[derive(Default)]
-struct InMemoryDb {
-    boarding_outputs: RwLock<HashMap<ark_core::BoardingOutput, SecretKey>>,
+/// SQLite-backed persistence for ARK boarding outputs.
+///
+/// Stores boarding output metadata and secret keys in `bitcoin.db`,
+/// surviving across CLI invocations. Use `open_memory()` for stateless
+/// contexts (e.g. Lambda backend).
+pub struct SqliteArkDb {
+    conn: std::sync::Mutex<rusqlite::Connection>,
 }
 
-impl Persistence for InMemoryDb {
+impl SqliteArkDb {
+    /// Open (or create) a persistent database at the given path.
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Other(anyhow::anyhow!("cannot create bitcoin.db dir: {e}")))?;
+        }
+        let conn = rusqlite::Connection::open(path)
+            .map_err(|e| Error::Other(anyhow::anyhow!("open bitcoin.db: {e}")))?;
+        Self::init(conn)
+    }
+
+    /// Open an in-memory database (no persistence). Suitable for Lambda/backend.
+    pub fn open_memory() -> Result<Self> {
+        let conn = rusqlite::Connection::open_in_memory()
+            .map_err(|e| Error::Other(anyhow::anyhow!("open in-memory bitcoin db: {e}")))?;
+        Self::init(conn)
+    }
+
+    fn init(conn: rusqlite::Connection) -> Result<Self> {
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode=WAL;
+
+            CREATE TABLE IF NOT EXISTS ark_boarding_outputs (
+                boarding_address TEXT PRIMARY KEY,
+                owner_pk_hex     TEXT NOT NULL,
+                server_pk_hex    TEXT NOT NULL,
+                exit_delay_u32   INTEGER NOT NULL,
+                secret_key_hex   TEXT NOT NULL,
+                network          TEXT NOT NULL,
+                created_at       TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bitcoin_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            ",
+        )
+        .map_err(|e| Error::Other(anyhow::anyhow!("init bitcoin.db schema: {e}")))?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+}
+
+impl Persistence for SqliteArkDb {
     fn save_boarding_output(
         &self,
         sk: SecretKey,
         boarding_output: ark_core::BoardingOutput,
     ) -> std::result::Result<(), ark_client::Error> {
-        self.boarding_outputs
-            .write()
-            .map_err(|e| ark_client::Error::consumer(format!("write lock: {e}")))?
-            .insert(boarding_output, sk);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ark_client::Error::consumer(format!("db lock: {e}")))?;
+        let secp = Secp256k1::new();
+        let (owner_pk, _) = sk.public_key(&secp).x_only_public_key();
+        let address = boarding_output.address().to_string();
+        let owner_pk_hex = owner_pk.to_string();
+        let exit_delay = boarding_output.exit_delay().to_consensus_u32();
+        let secret_key_hex = hex::encode(sk.secret_bytes());
+        let now = chrono::Utc::now().to_rfc3339();
+        // server_pk and network are filled by new_boarding_output (UPDATE after INSERT).
+        // On first save they're empty; the BoardingWallet impl fills them immediately after.
+        conn.execute(
+            "INSERT OR REPLACE INTO ark_boarding_outputs
+             (boarding_address, owner_pk_hex, server_pk_hex, exit_delay_u32, secret_key_hex, network, created_at)
+             VALUES (?1, ?2, COALESCE((SELECT server_pk_hex FROM ark_boarding_outputs WHERE boarding_address = ?1), ''), ?3, ?4, COALESCE((SELECT network FROM ark_boarding_outputs WHERE boarding_address = ?1), ''), ?5)",
+            params![address, owner_pk_hex, exit_delay, secret_key_hex, now],
+        )
+        .map_err(|e| ark_client::Error::consumer(format!("save boarding output: {e}")))?;
         Ok(())
     }
 
     fn load_boarding_outputs(
         &self,
     ) -> std::result::Result<Vec<ark_core::BoardingOutput>, ark_client::Error> {
-        Ok(self
-            .boarding_outputs
-            .read()
-            .map_err(|e| ark_client::Error::consumer(format!("read lock: {e}")))?
-            .keys()
-            .cloned()
-            .collect())
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ark_client::Error::consumer(format!("db lock: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT owner_pk_hex, server_pk_hex, exit_delay_u32, network FROM ark_boarding_outputs")
+            .map_err(|e| ark_client::Error::consumer(format!("prepare: {e}")))?;
+        let secp = Secp256k1::new();
+        let rows = stmt
+            .query_map([], |row| {
+                let owner_pk_hex: String = row.get(0)?;
+                let server_pk_hex: String = row.get(1)?;
+                let exit_delay: u32 = row.get(2)?;
+                let network_str: String = row.get(3)?;
+                Ok((owner_pk_hex, server_pk_hex, exit_delay, network_str))
+            })
+            .map_err(|e| ark_client::Error::consumer(format!("query: {e}")))?;
+
+        let mut outputs = Vec::new();
+        for row in rows {
+            let (owner_pk_hex, server_pk_hex, exit_delay, network_str) =
+                row.map_err(|e| ark_client::Error::consumer(format!("row: {e}")))?;
+            let owner_pk = XOnlyPublicKey::from_str(&owner_pk_hex)
+                .map_err(|e| ark_client::Error::consumer(format!("owner pk: {e}")))?;
+            let server_pk = XOnlyPublicKey::from_str(&server_pk_hex)
+                .map_err(|e| ark_client::Error::consumer(format!("server pk: {e}")))?;
+            let network = Network::from_str(&network_str).unwrap_or(Network::Bitcoin);
+            let exit_delay_seq = bdk_wallet::bitcoin::Sequence::from_consensus(exit_delay);
+            let bo =
+                ark_core::BoardingOutput::new(&secp, server_pk, owner_pk, exit_delay_seq, network)
+                    .map_err(|e| {
+                        ark_client::Error::consumer(format!("reconstruct boarding output: {e}"))
+                    })?;
+            outputs.push(bo);
+        }
+        Ok(outputs)
     }
 
     fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> std::result::Result<SecretKey, ark_client::Error> {
-        self.boarding_outputs
-            .read()
-            .map_err(|e| ark_client::Error::consumer(format!("read lock: {e}")))?
-            .iter()
-            .find_map(|(b, sk)| if b.owner_pk() == *pk { Some(*sk) } else { None })
-            .ok_or_else(|| ark_client::Error::consumer(format!("no SK for PK {pk}")))
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| ark_client::Error::consumer(format!("db lock: {e}")))?;
+        let pk_hex = pk.to_string();
+        let secret_hex: String = conn
+            .query_row(
+                "SELECT secret_key_hex FROM ark_boarding_outputs WHERE owner_pk_hex = ?1 LIMIT 1",
+                params![pk_hex],
+                |row| row.get(0),
+            )
+            .map_err(|e| ark_client::Error::consumer(format!("no SK for PK {pk}: {e}")))?;
+        let bytes = hex::decode(&secret_hex)
+            .map_err(|e| ark_client::Error::consumer(format!("decode SK hex: {e}")))?;
+        SecretKey::from_slice(&bytes)
+            .map_err(|e| ark_client::Error::consumer(format!("parse SK: {e}")))
     }
 }
 
@@ -265,10 +373,7 @@ where
     }
 }
 
-impl<DB> BoardingWallet for ArkOnchainWallet<DB>
-where
-    DB: Persistence,
-{
+impl BoardingWallet for ArkOnchainWallet<SqliteArkDb> {
     fn new_boarding_output(
         &self,
         server_pubkey: XOnlyPublicKey,
@@ -284,7 +389,22 @@ where
             exit_delay,
             network,
         )?;
+        // Save the boarding output (sk + address + owner_pk + exit_delay).
         self.db.save_boarding_output(sk, boarding_output.clone())?;
+        // Also store server_pk and network so load_boarding_outputs can reconstruct.
+        // The Persistence trait doesn't carry this context, so we write it directly.
+        {
+            let conn = self
+                .db
+                .conn
+                .lock()
+                .map_err(|e| ark_client::Error::consumer(format!("db lock: {e}")))?;
+            let addr = boarding_output.address().to_string();
+            conn.execute(
+                "UPDATE ark_boarding_outputs SET server_pk_hex = ?1, network = ?2 WHERE boarding_address = ?3",
+                params![server_pubkey.to_string(), network.to_string(), addr],
+            ).map_err(|e| ark_client::Error::consumer(format!("update boarding context: {e}")))?;
+        }
         Ok(boarding_output)
     }
 
@@ -436,7 +556,7 @@ impl Blockchain for EsploraBlockchain {
 
 // ── Type aliases ─────────────────────────────────────────────────────────────
 
-type ArkWallet = ArkOnchainWallet<InMemoryDb>;
+type ArkWallet = ArkOnchainWallet<SqliteArkDb>;
 type ArkClient = Client<EsploraBlockchain, ArkWallet, InMemorySwapStorage, Bip32KeyProvider>;
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -464,6 +584,15 @@ pub struct ArkPaymentResult {
     pub amount_sats: u64,
 }
 
+/// Verified incoming VTXO metadata.
+#[derive(Debug, Clone)]
+pub struct VerifiedVtxo {
+    pub txid: String,
+    pub amount_sats: u64,
+    pub expires_at: i64,
+    pub is_preconfirmed: bool,
+}
+
 impl ArkPaymentResult {
     /// Format as payment proof string for `X-Bitcoin-Secret` header.
     pub fn to_proof_string(&self) -> String {
@@ -489,7 +618,13 @@ impl ArkPaymentWallet {
     /// Create and connect an ARK wallet from a deterministic Bitcoin wallet.
     ///
     /// Derives the ARK key from the same slot seed used for on-chain BIP86/84.
-    pub async fn connect(btc_wallet: &DeterministicBitcoinWallet, asp_url: &str) -> Result<Self> {
+    /// Pass `SqliteArkDb::open(path)` for persistent boarding outputs (CLI) or
+    /// `SqliteArkDb::open_memory()` for stateless contexts (Lambda).
+    pub async fn connect(
+        btc_wallet: &DeterministicBitcoinWallet,
+        asp_url: &str,
+        db: SqliteArkDb,
+    ) -> Result<Self> {
         ensure_rustls_provider();
 
         let network = btc_wallet.network();
@@ -502,7 +637,6 @@ impl ArkPaymentWallet {
         let blockchain = Arc::new(EsploraBlockchain::new(esplora_url).map_err(Error::Other)?);
 
         let secp = Secp256k1::new();
-        let db = InMemoryDb::default();
         let wallet = Arc::new(
             ArkOnchainWallet::new_from_xpriv(xpriv, secp, network, esplora_url, db)
                 .map_err(|e| Error::Other(anyhow::anyhow!("ARK BDK wallet: {e}")))?,
@@ -571,6 +705,52 @@ impl ArkPaymentWallet {
             pre_confirmed_sats: pre_confirmed,
             total_sats: confirmed.saturating_add(pre_confirmed),
         })
+    }
+
+    /// Verify that a VTXO with the given txid was received by this wallet,
+    /// is unspent, and carries at least `min_amount_sats`.
+    pub async fn verify_incoming_vtxo(
+        &self,
+        vtxo_txid: &str,
+        min_amount_sats: u64,
+    ) -> Result<VerifiedVtxo> {
+        let target_txid = Txid::from_str(vtxo_txid)
+            .map_err(|e| Error::InvalidFormat(format!("invalid VTXO txid: {e}")))?;
+
+        let (vtxo_list, _) = self
+            .client
+            .list_vtxos()
+            .await
+            .map_err(|e| Error::Other(anyhow::anyhow!("list_vtxos: {e}")))?;
+
+        if let Some(vtxo) = vtxo_list
+            .all_unspent()
+            .find(|v| v.outpoint.txid == target_txid)
+        {
+            if vtxo.is_spent {
+                return Err(Error::Other(anyhow::anyhow!("VTXO already spent")));
+            }
+
+            let amount_sats = vtxo.amount.to_sat();
+            if amount_sats < min_amount_sats {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "VTXO amount insufficient: have {amount_sats}, need at least {min_amount_sats}"
+                )));
+            }
+
+            return Ok(VerifiedVtxo {
+                txid: vtxo.outpoint.txid.to_string(),
+                amount_sats,
+                expires_at: vtxo.expires_at,
+                is_preconfirmed: vtxo.is_preconfirmed,
+            });
+        }
+
+        if vtxo_list.spent().any(|v| v.outpoint.txid == target_txid) {
+            return Err(Error::Other(anyhow::anyhow!("VTXO already spent")));
+        }
+
+        Err(Error::NotFound("VTXO not found in wallet".to_string()))
     }
 
     /// Send a VTXO payment to another ARK address.

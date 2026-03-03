@@ -67,9 +67,13 @@ struct WalletScanSnapshot {
 }
 
 impl DeterministicBitcoinWallet {
-    pub fn from_rgb_wallet(wallet: &RgbWallet, network: Network) -> Result<Self> {
+    pub fn from_master_wallet(wallet: &RgbWallet, network: Network) -> Result<Self> {
         let slot_hex = wallet.derive_bitcoin_master_key_hex()?;
         Self::from_slot_seed_hex(&slot_hex, network)
+    }
+
+    pub fn from_rgb_wallet(wallet: &RgbWallet, network: Network) -> Result<Self> {
+        Self::from_master_wallet(wallet, network)
     }
 
     pub fn from_slot_seed_hex(slot_seed_hex: &str, network: Network) -> Result<Self> {

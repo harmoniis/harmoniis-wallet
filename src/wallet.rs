@@ -1,34 +1,45 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use bip39::Mnemonic;
-use hkdf::Hkdf;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 use crate::{
     error::{Error, Result},
     identity::Identity,
+    keychain::{HdKeychain, KEY_MODEL_VERSION_V3},
     types::{Certificate, Contract, ContractStatus, ContractType, Role},
 };
 
-const META_PRIVATE_KEY_HEX: &str = "private_key_hex";
 const META_RGB_PRIVATE_KEY_HEX: &str = "rgb_private_key_hex";
 const META_ROOT_PRIVATE_KEY_HEX: &str = "root_private_key_hex";
+const META_ROOT_MNEMONIC: &str = "root_mnemonic";
 const META_NICKNAME: &str = "nickname";
 const META_WALLET_LABEL: &str = "wallet_label";
 const META_KEY_MODEL_VERSION: &str = "key_model_version";
 
-const HKDF_RGB_IDENTITY_V1: &[u8] = b"harmoniis/hrmw/rgb/identity/v1";
-const HKDF_WEBCASH_MASTER_V1: &[u8] = b"harmoniis/hrmw/webcash/master/v1|chain:3";
-const HKDF_BITCOIN_MASTER_V1: &[u8] = b"harmoniis/hrmw/bitcoin/master/v1";
-const KEY_MODEL_VERSION_V2: &str = "v2";
-const MAX_PGP_KEYS: u32 = 1_000;
+pub const MAX_PGP_KEYS: u32 = 1_000;
+const MASTER_DB_FILENAME: &str = "master.db";
+const RGB_DB_COMPAT_FILENAME: &str = "rgb.db";
+const WALLET_DB_COMPAT_FILENAME: &str = "wallet.db";
+const IDENTITY_DB_DIR: &str = "identities";
 
-/// SQLite-backed RGB wallet.
+/// SQLite-backed Harmoniis wallet.
 pub struct RgbWallet {
-    conn: Connection,
+    master_conn: Connection,
+    identity_state: IdentityState,
+}
+
+enum IdentityState {
+    Disk { base_dir: PathBuf },
+    Memory { conn: Connection },
+}
+
+struct WalletDiskPaths {
+    base_dir: PathBuf,
+    master_path: PathBuf,
+    rgb_compat_path: PathBuf,
+    wallet_compat_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +65,8 @@ pub struct WalletSnapshot {
     #[serde(default)]
     pub root_private_key_hex: Option<String>,
     #[serde(default)]
+    pub root_mnemonic: Option<String>,
+    #[serde(default)]
     pub wallet_label: Option<String>,
     #[serde(default)]
     pub pgp_identities: Vec<PgpIdentitySnapshot>,
@@ -63,7 +76,62 @@ pub struct WalletSnapshot {
 }
 
 impl RgbWallet {
-    fn init(conn: Connection) -> Result<Self> {
+    fn resolve_disk_paths(path: &Path) -> Result<WalletDiskPaths> {
+        let normalized = if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .is_empty()
+        {
+            PathBuf::from(MASTER_DB_FILENAME)
+        } else {
+            path.to_path_buf()
+        };
+        let file_name = normalized
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(MASTER_DB_FILENAME);
+        let base_dir = normalized
+            .parent()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let master_path = if file_name.eq_ignore_ascii_case(MASTER_DB_FILENAME) {
+            normalized.clone()
+        } else if file_name.eq_ignore_ascii_case(RGB_DB_COMPAT_FILENAME)
+            || file_name.eq_ignore_ascii_case(WALLET_DB_COMPAT_FILENAME)
+        {
+            base_dir.join(MASTER_DB_FILENAME)
+        } else {
+            normalized.clone()
+        };
+        Ok(WalletDiskPaths {
+            base_dir: base_dir.clone(),
+            master_path,
+            rgb_compat_path: base_dir.join(RGB_DB_COMPAT_FILENAME),
+            wallet_compat_path: base_dir.join(WALLET_DB_COMPAT_FILENAME),
+        })
+    }
+
+    fn derive_wallet_label(path: &Path) -> String {
+        let stem = path
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or("wallet");
+        if stem.eq_ignore_ascii_case("master")
+            || stem.eq_ignore_ascii_case("rgb")
+            || stem.eq_ignore_ascii_case("wallet")
+        {
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|x| x.to_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "wallet".to_string())
+        } else {
+            stem.to_string()
+        }
+    }
+
+    fn init_master_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             PRAGMA journal_mode=WAL;
@@ -74,13 +142,45 @@ impl RgbWallet {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS pgp_identities (
+                label           TEXT PRIMARY KEY,
+                key_index       INTEGER NOT NULL UNIQUE,
+                private_key_hex TEXT NOT NULL,
+                public_key_hex  TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                is_active       INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS wallet_slots (
+                family      TEXT NOT NULL,
+                slot_index  INTEGER NOT NULL,
+                descriptor  TEXT NOT NULL,
+                db_rel_path TEXT,
+                label       TEXT,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (family, slot_index)
+            );
+            ",
+        )?;
+        ensure_root_and_identity_materialized(conn)?;
+        ensure_default_pgp_identity(conn)?;
+        Ok(())
+    }
+
+    fn init_identity_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode=WAL;
+            PRAGMA foreign_keys=ON;
+
             CREATE TABLE IF NOT EXISTS contracts (
                 contract_id        TEXT PRIMARY KEY,
                 contract_type      TEXT NOT NULL DEFAULT 'service',
                 status             TEXT NOT NULL DEFAULT 'issued',
-                witness_secret      TEXT,
-                witness_proof       TEXT,
-                amount_units        INTEGER NOT NULL DEFAULT 0,
+                witness_secret     TEXT,
+                witness_proof      TEXT,
+                amount_units       INTEGER NOT NULL DEFAULT 0,
                 work_spec          TEXT NOT NULL DEFAULT '',
                 buyer_fingerprint  TEXT NOT NULL DEFAULT '',
                 seller_fingerprint TEXT,
@@ -94,83 +194,417 @@ impl RgbWallet {
             );
 
             CREATE TABLE IF NOT EXISTS certificates (
-                certificate_id TEXT PRIMARY KEY,
-                contract_id    TEXT,
+                certificate_id  TEXT PRIMARY KEY,
+                contract_id     TEXT,
                 witness_secret  TEXT,
                 witness_proof   TEXT,
-                created_at     TEXT NOT NULL
+                created_at      TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS pgp_identities (
-                label           TEXT PRIMARY KEY,
-                key_index       INTEGER NOT NULL UNIQUE,
-                private_key_hex TEXT NOT NULL,
-                public_key_hex  TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                is_active       INTEGER NOT NULL DEFAULT 0
+            CREATE TABLE IF NOT EXISTS timeline_posts (
+                post_id      TEXT PRIMARY KEY,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS timeline_comments (
+                comment_id    TEXT PRIMARY KEY,
+                post_id       TEXT NOT NULL DEFAULT '',
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS timeline_bids (
+                bid_post_id    TEXT PRIMARY KEY,
+                contract_id    TEXT NOT NULL DEFAULT '',
+                service_post_id TEXT NOT NULL DEFAULT '',
+                created_at     TEXT NOT NULL,
+                metadata_json  TEXT NOT NULL DEFAULT '{}'
             );
             ",
         )?;
-        migrate_legacy_schema(&conn)?;
-        ensure_root_and_identity_materialized(&conn)?;
-        ensure_default_pgp_identity(&conn)?;
-        Ok(Self { conn })
+        migrate_identity_schema(conn)?;
+        Ok(())
+    }
+
+    fn identity_db_path(base_dir: &Path, key_index: u32) -> PathBuf {
+        base_dir
+            .join(IDENTITY_DB_DIR)
+            .join(format!("identity-{key_index}.db"))
+    }
+
+    fn active_pgp_key_index_from_conn(conn: &Connection) -> Result<u32> {
+        let mut stmt = conn.prepare(
+            "SELECT key_index
+             FROM pgp_identities
+             WHERE is_active = 1
+             ORDER BY key_index ASC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| Error::Other(anyhow::anyhow!("no active PGP identity")))?;
+        let key_index_i: i64 = row.get(0)?;
+        u32::try_from(key_index_i)
+            .map_err(|_| Error::Other(anyhow::anyhow!("invalid active PGP key index")))
+    }
+
+    fn active_pgp_key_index(&self) -> Result<u32> {
+        Self::active_pgp_key_index_from_conn(&self.master_conn)
+    }
+
+    fn with_identity_conn<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        match &self.identity_state {
+            IdentityState::Memory { conn } => f(conn),
+            IdentityState::Disk { base_dir } => {
+                std::fs::create_dir_all(base_dir.join(IDENTITY_DB_DIR)).map_err(|e| {
+                    Error::Other(anyhow::anyhow!("cannot create identity db directory: {e}"))
+                })?;
+                let key_index = self.active_pgp_key_index()?;
+                let identity_path = Self::identity_db_path(base_dir, key_index);
+                let conn = Connection::open(identity_path)?;
+                Self::init_identity_schema(&conn)?;
+                f(&conn)
+            }
+        }
+    }
+
+    fn refresh_slot_registry(&self) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let root_hex = self.derive_slot_hex("root", 0)?;
+        let rgb_hex = self.derive_slot_hex("rgb", 0)?;
+        let webcash_hex = self.derive_slot_hex("webcash", 0)?;
+        let bitcoin_hex = self.derive_slot_hex("bitcoin", 0)?;
+
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES ('rgb', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='rgb' AND slot_index=0), ?2), ?2)",
+            params![rgb_hex, now],
+        )?;
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES ('webcash', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='webcash' AND slot_index=0), ?2), ?2)",
+            params![webcash_hex, now],
+        )?;
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES ('bitcoin', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), ?2), ?2)",
+            params![bitcoin_hex, now],
+        )?;
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES ('root', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='root' AND slot_index=0), ?2), ?2)",
+            params![root_hex, now],
+        )?;
+
+        let mut stmt = self.master_conn.prepare(
+            "SELECT key_index, public_key_hex, label FROM pgp_identities ORDER BY key_index ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let key_index_i: i64 = row.get(0)?;
+            let key_index = u32::try_from(key_index_i)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, key_index_i))?;
+            let public_key_hex: String = row.get(1)?;
+            let label: String = row.get(2)?;
+            Ok((key_index, public_key_hex, label))
+        })?;
+        let base_dir = match &self.identity_state {
+            IdentityState::Disk { base_dir } => Some(base_dir.clone()),
+            IdentityState::Memory { .. } => None,
+        };
+        for row in rows {
+            let (key_index, public_key_hex, label) = row?;
+            let rel_db = base_dir
+                .as_ref()
+                .map(|_| format!("{}/identity-{}.db", IDENTITY_DB_DIR, key_index));
+            self.master_conn.execute(
+                "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+                 VALUES ('pgp', ?1, ?2, ?3, ?4, COALESCE((SELECT created_at FROM wallet_slots WHERE family='pgp' AND slot_index=?1), ?5), ?5)",
+                params![i64::from(key_index), public_key_hex, rel_db, label, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn import_compat_data(paths: &WalletDiskPaths) -> Result<()> {
+        let source_path = if paths.rgb_compat_path.exists() {
+            paths.rgb_compat_path.clone()
+        } else if paths.wallet_compat_path.exists() {
+            paths.wallet_compat_path.clone()
+        } else {
+            return Err(Error::NotFound("no wallet data source found".to_string()));
+        };
+
+        let source_conn = Connection::open(&source_path)?;
+        migrate_identity_schema_if_present(&source_conn)?;
+
+        let master_conn = Connection::open(&paths.master_path)?;
+        Self::init_master_schema(&master_conn)?;
+
+        if table_exists(&source_conn, "wallet_metadata")? {
+            let mut stmt = source_conn.prepare("SELECT key, value FROM wallet_metadata")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (key, value) = row?;
+                master_conn.execute(
+                    "INSERT OR REPLACE INTO wallet_metadata (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )?;
+            }
+        }
+
+        if table_exists(&source_conn, "pgp_identities")? {
+            let mut stmt = source_conn.prepare(
+                "SELECT label, key_index, private_key_hex, public_key_hex, created_at, is_active
+                 FROM pgp_identities",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?;
+            master_conn.execute("DELETE FROM pgp_identities", [])?;
+            for row in rows {
+                let (label, key_index, private_key_hex, public_key_hex, created_at, is_active) =
+                    row?;
+                master_conn.execute(
+                    "INSERT OR REPLACE INTO pgp_identities
+                     (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        label,
+                        key_index,
+                        private_key_hex,
+                        public_key_hex,
+                        created_at,
+                        is_active
+                    ],
+                )?;
+            }
+        }
+        ensure_root_and_identity_materialized(&master_conn)?;
+        ensure_default_pgp_identity(&master_conn)?;
+        let key_index = Self::active_pgp_key_index_from_conn(&master_conn)?;
+        drop(master_conn);
+
+        std::fs::create_dir_all(paths.base_dir.join(IDENTITY_DB_DIR)).map_err(|e| {
+            Error::Other(anyhow::anyhow!("cannot create identity db directory: {e}"))
+        })?;
+        let identity_path = Self::identity_db_path(&paths.base_dir, key_index);
+        let identity_conn = Connection::open(identity_path)?;
+        Self::init_identity_schema(&identity_conn)?;
+        if table_exists(&source_conn, "contracts")? {
+            let mut stmt = source_conn.prepare(
+                "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
+                        amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
+                        reference_post, delivery_deadline, role, delivered_text,
+                        certificate_id, created_at, updated_at
+                 FROM contracts",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Contract {
+                    contract_id: row.get(0)?,
+                    contract_type: ContractType::parse(&row.get::<_, String>(1)?)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    status: ContractStatus::parse(&row.get::<_, String>(2)?)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    witness_secret: row.get(3)?,
+                    witness_proof: row.get(4)?,
+                    amount_units: row.get::<_, i64>(5)? as u64,
+                    work_spec: row.get(6)?,
+                    buyer_fingerprint: row.get(7)?,
+                    seller_fingerprint: row.get(8)?,
+                    reference_post: row.get(9)?,
+                    delivery_deadline: row.get(10)?,
+                    role: Role::parse(&row.get::<_, String>(11)?)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    delivered_text: row.get(12)?,
+                    certificate_id: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
+                })
+            })?;
+            for row in rows {
+                let c = row?;
+                identity_conn.execute(
+                    "INSERT OR REPLACE INTO contracts (
+                        contract_id, contract_type, status, witness_secret, witness_proof,
+                        amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
+                        reference_post, delivery_deadline, role, delivered_text,
+                        certificate_id, created_at, updated_at
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                    params![
+                        c.contract_id,
+                        c.contract_type.as_str(),
+                        c.status.as_str(),
+                        c.witness_secret,
+                        c.witness_proof,
+                        c.amount_units as i64,
+                        c.work_spec,
+                        c.buyer_fingerprint,
+                        c.seller_fingerprint,
+                        c.reference_post,
+                        c.delivery_deadline,
+                        c.role.as_str(),
+                        c.delivered_text,
+                        c.certificate_id,
+                        c.created_at,
+                        c.updated_at,
+                    ],
+                )?;
+            }
+        }
+        if table_exists(&source_conn, "certificates")? {
+            let mut stmt = source_conn.prepare(
+                "SELECT certificate_id, contract_id, witness_secret, witness_proof, created_at
+                 FROM certificates",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Certificate {
+                    certificate_id: row.get(0)?,
+                    contract_id: row.get(1)?,
+                    witness_secret: row.get(2)?,
+                    witness_proof: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?;
+            for row in rows {
+                let cert = row?;
+                identity_conn.execute(
+                    "INSERT OR REPLACE INTO certificates (
+                        certificate_id, contract_id, witness_secret, witness_proof, created_at
+                    ) VALUES (?1,?2,?3,?4,?5)",
+                    params![
+                        cert.certificate_id,
+                        cert.contract_id,
+                        cert.witness_secret,
+                        cert.witness_proof,
+                        cert.created_at,
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_from_disk(path: &Path, allow_create: bool) -> Result<Self> {
+        let paths = Self::resolve_disk_paths(path)?;
+        std::fs::create_dir_all(&paths.base_dir)
+            .map_err(|e| Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}")))?;
+        std::fs::create_dir_all(paths.base_dir.join(IDENTITY_DB_DIR))
+            .map_err(|e| Error::Other(anyhow::anyhow!("cannot create identity dir: {e}")))?;
+
+        if !paths.master_path.exists() {
+            if paths.rgb_compat_path.exists() || paths.wallet_compat_path.exists() {
+                Self::import_compat_data(&paths)?;
+            } else if !allow_create {
+                return Err(Error::NotFound(format!(
+                    "master wallet database not found at {}",
+                    paths.master_path.display()
+                )));
+            }
+        }
+
+        let master_conn = Connection::open(&paths.master_path)?;
+        Self::init_master_schema(&master_conn)?;
+        let wallet = Self {
+            master_conn,
+            identity_state: IdentityState::Disk {
+                base_dir: paths.base_dir.clone(),
+            },
+        };
+        wallet.with_identity_conn(|_| Ok(()))?;
+        wallet.refresh_slot_registry()?;
+
+        if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
+            let derived = Self::derive_wallet_label(path);
+            wallet.set_wallet_label(&derived)?;
+            let _ = wallet.rename_pgp_label("default", &derived);
+            wallet.refresh_slot_registry()?;
+        }
+        Ok(wallet)
     }
 
     /// Create a new wallet at the given path, generating a fresh root key.
     pub fn create(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}")))?;
-        }
-        let conn = Connection::open(path)?;
-        let w = Self::init(conn)?;
-
-        if w.wallet_label()?.as_deref().unwrap_or("default") == "default" {
-            let derived = path
-                .file_stem()
-                .and_then(|x| x.to_str())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "wallet".to_string());
-            w.set_wallet_label(&derived)?;
-            // Keep default label in sync for fresh wallet.
-            let _ = w.rename_pgp_label("default", &derived);
-        }
-
-        Ok(w)
+        Self::open_from_disk(path, true)
     }
 
     /// Open an existing wallet at the given path.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        let w = Self::init(conn)?;
-        if w.wallet_label()?.as_deref().unwrap_or("default") == "default" {
-            let derived = path
-                .file_stem()
-                .and_then(|x| x.to_str())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "wallet".to_string());
-            w.set_wallet_label(&derived)?;
-        }
-        Ok(w)
+        Self::open_from_disk(path, false)
     }
 
     /// Open an in-memory wallet (for tests).
     pub fn open_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let w = Self::init(conn)?;
-        if w.wallet_label()?.as_deref().unwrap_or("default") == "default" {
-            w.set_wallet_label("memory-wallet")?;
-            let _ = w.rename_pgp_label("default", "memory-wallet");
+        let master_conn = Connection::open_in_memory()?;
+        Self::init_master_schema(&master_conn)?;
+        let identity_conn = Connection::open_in_memory()?;
+        Self::init_identity_schema(&identity_conn)?;
+        let wallet = Self {
+            master_conn,
+            identity_state: IdentityState::Memory {
+                conn: identity_conn,
+            },
+        };
+        if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
+            wallet.set_wallet_label("memory-wallet")?;
+            let _ = wallet.rename_pgp_label("default", "memory-wallet");
         }
-        Ok(w)
+        wallet.refresh_slot_registry()?;
+        Ok(wallet)
     }
 
     // ── Identity material ────────────────────────────────────────────────────
 
     pub fn root_private_key_hex(&self) -> Result<String> {
-        metadata_value(&self.conn, META_ROOT_PRIVATE_KEY_HEX)?
-            .ok_or_else(|| Error::Other(anyhow::anyhow!("missing root private key")))
+        metadata_value(&self.master_conn, META_ROOT_PRIVATE_KEY_HEX)?
+            .ok_or_else(|| Error::Other(anyhow::anyhow!("missing master entropy hex")))
+    }
+
+    fn keychain(&self) -> Result<HdKeychain> {
+        if let Some(words) = metadata_value(&self.master_conn, META_ROOT_MNEMONIC)? {
+            return HdKeychain::from_mnemonic_words(&words);
+        }
+        let entropy_hex = self.root_private_key_hex()?;
+        HdKeychain::from_entropy_hex(&entropy_hex)
+    }
+
+    fn set_master_keychain_material(&self, keychain: &HdKeychain) -> Result<()> {
+        set_metadata_value(
+            &self.master_conn,
+            META_ROOT_PRIVATE_KEY_HEX,
+            &keychain.entropy_hex(),
+        )?;
+        set_metadata_value(
+            &self.master_conn,
+            META_ROOT_MNEMONIC,
+            &keychain.mnemonic_words(),
+        )?;
+        set_metadata_value(
+            &self.master_conn,
+            META_RGB_PRIVATE_KEY_HEX,
+            &keychain.derive_slot_hex("rgb", 0)?,
+        )?;
+        set_metadata_value(
+            &self.master_conn,
+            META_KEY_MODEL_VERSION,
+            KEY_MODEL_VERSION_V3,
+        )?;
+        Ok(())
     }
 
     pub fn identity(&self) -> Result<Identity> {
@@ -178,56 +612,20 @@ impl RgbWallet {
     }
 
     pub fn rgb_identity(&self) -> Result<Identity> {
-        let hex = metadata_value(&self.conn, META_RGB_PRIVATE_KEY_HEX)?
-            .ok_or_else(|| Error::Other(anyhow::anyhow!("missing RGB private key")))?;
+        let hex = self.derive_slot_hex("rgb", 0)?;
         Identity::from_hex(&hex)
     }
 
     pub fn derive_webcash_master_secret_hex(&self) -> Result<String> {
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        derive_child_key_hex(&root_key, HKDF_WEBCASH_MASTER_V1)
+        self.derive_slot_hex("webcash", 0)
     }
 
     pub fn derive_bitcoin_master_key_hex(&self) -> Result<String> {
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        derive_child_key_hex(&root_key, HKDF_BITCOIN_MASTER_V1)
+        self.derive_slot_hex("bitcoin", 0)
     }
 
     pub fn derive_slot_hex(&self, family: &str, index: u32) -> Result<String> {
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        match family {
-            "rgb" => {
-                if index != 0 {
-                    return Err(Error::Other(anyhow::anyhow!(
-                        "rgb family only supports index 0"
-                    )));
-                }
-                derive_child_key_hex(&root_key, HKDF_RGB_IDENTITY_V1)
-            }
-            "webcash" => {
-                if index != 0 {
-                    return Err(Error::Other(anyhow::anyhow!(
-                        "webcash family only supports index 0"
-                    )));
-                }
-                derive_child_key_hex(&root_key, HKDF_WEBCASH_MASTER_V1)
-            }
-            "bitcoin" => {
-                if index != 0 {
-                    return Err(Error::Other(anyhow::anyhow!(
-                        "bitcoin family only supports index 0"
-                    )));
-                }
-                derive_child_key_hex(&root_key, HKDF_BITCOIN_MASTER_V1)
-            }
-            "pgp" => derive_pgp_private_key_hex(&root_key, index),
-            _ => Err(Error::Other(anyhow::anyhow!(
-                "unknown key family '{family}'"
-            ))),
-        }
+        self.keychain()?.derive_slot_hex(family, index)
     }
 
     pub fn export_master_key_hex(&self) -> Result<String> {
@@ -235,29 +633,31 @@ impl RgbWallet {
     }
 
     pub fn export_master_key_mnemonic(&self) -> Result<String> {
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        // 256-bit entropy => 24 words. This is reversible and preserves full root key.
-        let mnemonic = Mnemonic::from_entropy(&root_key)
-            .map_err(|e| Error::Other(anyhow::anyhow!("failed to encode mnemonic: {e}")))?;
-        Ok(mnemonic.to_string())
+        self.keychain().map(|k| k.mnemonic_words())
+    }
+
+    /// Export the canonical recovery phrase stored in wallet metadata.
+    ///
+    /// New wallets store a 12-word BIP39 phrase at creation time. Existing wallets
+    /// may fall back to the reversible 24-word representation of the root key.
+    pub fn export_recovery_mnemonic(&self) -> Result<String> {
+        if let Some(mnemonic) = metadata_value(&self.master_conn, META_ROOT_MNEMONIC)? {
+            return Ok(mnemonic);
+        }
+        self.export_master_key_mnemonic()
     }
 
     pub fn apply_master_key_hex(&self, root_private_key_hex: &str) -> Result<()> {
-        let root_key = decode_fixed_32_hex(root_private_key_hex, "root private key")?;
-        let rgb_hex = derive_child_key_hex(&root_key, HKDF_RGB_IDENTITY_V1)?;
-        set_metadata_value(&self.conn, META_ROOT_PRIVATE_KEY_HEX, root_private_key_hex)?;
-        set_metadata_value(&self.conn, META_RGB_PRIVATE_KEY_HEX, &rgb_hex)?;
-        set_metadata_value(&self.conn, META_PRIVATE_KEY_HEX, &rgb_hex)?;
-        set_metadata_value(&self.conn, META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V2)?;
+        let keychain = HdKeychain::from_entropy_hex(root_private_key_hex)?;
+        self.set_master_keychain_material(&keychain)?;
 
         let wallet_label = self
             .wallet_label()?
             .unwrap_or_else(|| "default".to_string());
         let label = canonical_label(&wallet_label)?;
-        let pgp0_hex = derive_pgp_private_key_hex(&root_key, 0)?;
+        let pgp0_hex = keychain.derive_slot_hex("pgp", 0)?;
         let pgp0 = Identity::from_hex(&pgp0_hex)?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.master_conn.unchecked_transaction()?;
         tx.execute("DELETE FROM pgp_identities", [])?;
         tx.execute(
             "INSERT INTO pgp_identities (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
@@ -270,45 +670,30 @@ impl RgbWallet {
             ],
         )?;
         tx.commit()?;
+        self.refresh_slot_registry()?;
         Ok(())
     }
 
     pub fn apply_master_key_mnemonic(&self, mnemonic: &str) -> Result<()> {
-        let parsed = Mnemonic::parse(mnemonic.trim())
-            .map_err(|e| Error::Other(anyhow::anyhow!("invalid BIP39 mnemonic: {e}")))?;
-        let entropy = parsed.to_entropy();
-        let root = match entropy.len() {
-            32 => entropy,
-            16 | 20 | 24 | 28 => {
-                let hk = Hkdf::<Sha256>::new(None, &entropy);
-                let mut out = [0u8; 32];
-                hk.expand(b"harmoniis/hrmw/root/from-bip39/v1", &mut out)
-                    .map_err(|_| {
-                        Error::Other(anyhow::anyhow!("failed to derive root from mnemonic"))
-                    })?;
-                out.to_vec()
-            }
-            n => {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "unsupported mnemonic entropy length: {n}"
-                )))
-            }
-        };
-        self.apply_master_key_hex(&hex::encode(root))
+        let keychain = HdKeychain::from_mnemonic_words(mnemonic)?;
+        self.apply_master_key_hex(&keychain.entropy_hex())
     }
 
     pub fn has_local_state(&self) -> Result<bool> {
-        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM contracts")?;
-        let contracts: i64 = stmt.query_row([], |row| row.get(0))?;
-        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM certificates")?;
-        let certs: i64 = stmt.query_row([], |row| row.get(0))?;
+        let (contracts, certs) = self.with_identity_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT COUNT(*) FROM contracts")?;
+            let contracts: i64 = stmt.query_row([], |row| row.get(0))?;
+            let mut stmt = conn.prepare("SELECT COUNT(*) FROM certificates")?;
+            let certs: i64 = stmt.query_row([], |row| row.get(0))?;
+            Ok((contracts, certs))
+        })?;
         Ok(contracts > 0 || certs > 0)
     }
 
     // ── PGP identities (labeled, multi-key) ─────────────────────────────────
 
     pub fn active_pgp_identity(&self) -> Result<(PgpIdentityRecord, Identity)> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.master_conn.prepare(
             "SELECT label, key_index, private_key_hex, public_key_hex, is_active
              FROM pgp_identities
              WHERE is_active = 1
@@ -342,7 +727,7 @@ impl RgbWallet {
 
     pub fn pgp_identity_by_label(&self, label: &str) -> Result<(PgpIdentityRecord, Identity)> {
         let canonical = canonical_label(label)?;
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.master_conn.prepare(
             "SELECT label, key_index, private_key_hex, public_key_hex, is_active
              FROM pgp_identities WHERE label = ?1 LIMIT 1",
         )?;
@@ -372,7 +757,7 @@ impl RgbWallet {
     }
 
     pub fn list_pgp_identities(&self) -> Result<Vec<PgpIdentityRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.master_conn.prepare(
             "SELECT label, key_index, public_key_hex, is_active
              FROM pgp_identities
              ORDER BY key_index ASC",
@@ -393,7 +778,7 @@ impl RgbWallet {
     pub fn create_pgp_identity(&self, label: &str) -> Result<PgpIdentityRecord> {
         let canonical = canonical_label(label)?;
         let mut exists_stmt = self
-            .conn
+            .master_conn
             .prepare("SELECT COUNT(*) FROM pgp_identities WHERE label = ?1")?;
         let exists: i64 = exists_stmt.query_row(params![canonical.clone()], |row| row.get(0))?;
         if exists > 0 {
@@ -403,13 +788,11 @@ impl RgbWallet {
         }
 
         let key_index = self.next_pgp_key_index()?;
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        let private_key_hex = derive_pgp_private_key_hex(&root_key, key_index)?;
+        let private_key_hex = self.derive_slot_hex("pgp", key_index)?;
         let identity = Identity::from_hex(&private_key_hex)?;
         let public_key_hex = identity.public_key_hex();
 
-        self.conn.execute(
+        self.master_conn.execute(
             "INSERT INTO pgp_identities (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",
             params![
@@ -421,13 +804,12 @@ impl RgbWallet {
             ],
         )?;
 
+        self.refresh_slot_registry()?;
         self.pgp_identity_by_label(label).map(|(meta, _)| meta)
     }
 
     pub fn derive_pgp_identity_for_index(&self, key_index: u32) -> Result<Identity> {
-        let root_hex = self.root_private_key_hex()?;
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        let private_key_hex = derive_pgp_private_key_hex(&root_key, key_index)?;
+        let private_key_hex = self.derive_slot_hex("pgp", key_index)?;
         Identity::from_hex(&private_key_hex)
     }
 
@@ -451,7 +833,7 @@ impl RgbWallet {
         let identity = self.derive_pgp_identity_for_index(key_index)?;
         let public_key_hex = identity.public_key_hex();
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.master_conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM pgp_identities WHERE key_index = ?1",
             params![i64::from(key_index)],
@@ -476,6 +858,7 @@ impl RgbWallet {
             ],
         )?;
         tx.commit()?;
+        self.refresh_slot_registry()?;
         Ok(PgpIdentityRecord {
             label,
             key_index,
@@ -487,7 +870,7 @@ impl RgbWallet {
     pub fn set_active_pgp_identity(&self, label: &str) -> Result<()> {
         let canonical = canonical_label(label)?;
         let mut exists_stmt = self
-            .conn
+            .master_conn
             .prepare("SELECT COUNT(*) FROM pgp_identities WHERE label = ?1")?;
         let exists: i64 = exists_stmt.query_row(params![canonical.clone()], |row| row.get(0))?;
         if exists == 0 {
@@ -495,13 +878,15 @@ impl RgbWallet {
                 "PGP identity label '{canonical}' not found"
             )));
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.master_conn.unchecked_transaction()?;
         tx.execute("UPDATE pgp_identities SET is_active = 0", [])?;
         tx.execute(
             "UPDATE pgp_identities SET is_active = 1 WHERE label = ?1",
             params![canonical],
         )?;
         tx.commit()?;
+        self.with_identity_conn(|_| Ok(()))?;
+        self.refresh_slot_registry()?;
         Ok(())
     }
 
@@ -511,16 +896,17 @@ impl RgbWallet {
         if from_c == to_c {
             return Ok(());
         }
-        self.conn.execute(
+        self.master_conn.execute(
             "UPDATE pgp_identities SET label = ?1 WHERE label = ?2",
             params![to_c, from_c],
         )?;
+        self.refresh_slot_registry()?;
         Ok(())
     }
 
     fn next_pgp_key_index(&self) -> Result<u32> {
         let mut stmt = self
-            .conn
+            .master_conn
             .prepare("SELECT COALESCE(MAX(key_index), -1) FROM pgp_identities")?;
         let max_idx: i64 = stmt.query_row([], |row| row.get(0))?;
         let next = max_idx.saturating_add(1);
@@ -540,7 +926,7 @@ impl RgbWallet {
         let mut suffix = 1u32;
         loop {
             let mut stmt = self
-                .conn
+                .master_conn
                 .prepare("SELECT key_index FROM pgp_identities WHERE label = ?1 LIMIT 1")?;
             let mut rows = stmt.query(params![candidate.clone()])?;
             let Some(row) = rows.next()? else {
@@ -562,52 +948,58 @@ impl RgbWallet {
     }
 
     pub fn nickname(&self) -> Result<Option<String>> {
-        metadata_value(&self.conn, META_NICKNAME)
+        metadata_value(&self.master_conn, META_NICKNAME)
     }
 
     pub fn set_nickname(&self, nick: &str) -> Result<()> {
-        set_metadata_value(&self.conn, META_NICKNAME, nick)
+        set_metadata_value(&self.master_conn, META_NICKNAME, nick)
     }
 
     pub fn wallet_label(&self) -> Result<Option<String>> {
-        metadata_value(&self.conn, META_WALLET_LABEL)
+        metadata_value(&self.master_conn, META_WALLET_LABEL)
     }
 
     pub fn set_wallet_label(&self, label: &str) -> Result<()> {
         let canonical = canonical_label(label)?;
-        set_metadata_value(&self.conn, META_WALLET_LABEL, &canonical)
+        let out = set_metadata_value(&self.master_conn, META_WALLET_LABEL, &canonical);
+        if out.is_ok() {
+            let _ = self.refresh_slot_registry();
+        }
+        out
     }
 
     // ── Contracts ─────────────────────────────────────────────────────────────
 
     pub fn store_contract(&self, c: &Contract) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO contracts (
+        self.with_identity_conn(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO contracts (
                 contract_id, contract_type, status, witness_secret, witness_proof,
                 amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
                 reference_post, delivery_deadline, role, delivered_text,
                 certificate_id, created_at, updated_at
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-            params![
-                c.contract_id,
-                c.contract_type.as_str(),
-                c.status.as_str(),
-                c.witness_secret,
-                c.witness_proof,
-                c.amount_units as i64,
-                c.work_spec,
-                c.buyer_fingerprint,
-                c.seller_fingerprint,
-                c.reference_post,
-                c.delivery_deadline,
-                c.role.as_str(),
-                c.delivered_text,
-                c.certificate_id,
-                c.created_at,
-                c.updated_at,
-            ],
-        )?;
-        Ok(())
+                params![
+                    c.contract_id,
+                    c.contract_type.as_str(),
+                    c.status.as_str(),
+                    c.witness_secret,
+                    c.witness_proof,
+                    c.amount_units as i64,
+                    c.work_spec,
+                    c.buyer_fingerprint,
+                    c.seller_fingerprint,
+                    c.reference_post,
+                    c.delivery_deadline,
+                    c.role.as_str(),
+                    c.delivered_text,
+                    c.certificate_id,
+                    c.created_at,
+                    c.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn update_contract(&self, c: &Contract) -> Result<()> {
@@ -615,70 +1007,79 @@ impl RgbWallet {
     }
 
     pub fn get_contract(&self, id: &str) -> Result<Option<Contract>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
+        self.with_identity_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
                     amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
                     reference_post, delivery_deadline, role, delivered_text,
                     certificate_id, created_at, updated_at
-             FROM contracts WHERE contract_id = ?1",
-        )?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(row_to_contract(row)?))
-        } else {
-            Ok(None)
-        }
+                 FROM contracts WHERE contract_id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(row_to_contract(row)?))
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     pub fn list_contracts(&self) -> Result<Vec<Contract>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
+        self.with_identity_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
                     amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
                     reference_post, delivery_deadline, role, delivered_text,
                     certificate_id, created_at, updated_at
-             FROM contracts ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            row_to_contract(row).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::Storage)
+                 FROM contracts ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                row_to_contract(row)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::Storage)
+        })
     }
 
     // ── Certificates ──────────────────────────────────────────────────────────
 
     pub fn store_certificate(&self, cert: &Certificate) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO certificates (
+        self.with_identity_conn(|conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO certificates (
                 certificate_id, contract_id, witness_secret, witness_proof, created_at
             ) VALUES (?1,?2,?3,?4,?5)",
-            params![
-                cert.certificate_id,
-                cert.contract_id,
-                cert.witness_secret,
-                cert.witness_proof,
-                cert.created_at,
-            ],
-        )?;
-        Ok(())
+                params![
+                    cert.certificate_id,
+                    cert.contract_id,
+                    cert.witness_secret,
+                    cert.witness_proof,
+                    cert.created_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn list_certificates(&self) -> Result<Vec<Certificate>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT certificate_id, contract_id, witness_secret, witness_proof, created_at
+        self.with_identity_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT certificate_id, contract_id, witness_secret, witness_proof, created_at
              FROM certificates ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Certificate {
-                certificate_id: row.get(0)?,
-                contract_id: row.get(1)?,
-                witness_secret: row.get(2)?,
-                witness_proof: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::Storage)
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Certificate {
+                    certificate_id: row.get(0)?,
+                    contract_id: row.get(1)?,
+                    witness_secret: row.get(2)?,
+                    witness_proof: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::Storage)
+        })
     }
 
     // ── Snapshot ──────────────────────────────────────────────────────────────
@@ -686,7 +1087,7 @@ impl RgbWallet {
     pub fn export_snapshot(&self) -> Result<WalletSnapshot> {
         let rgb_id = self.rgb_identity()?;
         let root = self.root_private_key_hex()?;
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.master_conn.prepare(
             "SELECT label, key_index, private_key_hex, is_active
              FROM pgp_identities
              ORDER BY key_index ASC",
@@ -708,6 +1109,7 @@ impl RgbWallet {
         Ok(WalletSnapshot {
             private_key_hex: rgb_id.private_key_hex(),
             root_private_key_hex: Some(root),
+            root_mnemonic: Some(self.export_recovery_mnemonic()?),
             wallet_label: self.wallet_label()?,
             pgp_identities,
             nickname: self.nickname()?,
@@ -717,14 +1119,40 @@ impl RgbWallet {
     }
 
     pub fn import_snapshot(&self, snap: &WalletSnapshot) -> Result<()> {
-        let root = snap
-            .root_private_key_hex
-            .clone()
-            .unwrap_or_else(|| snap.private_key_hex.clone());
+        let keychain = if let Some(words) = snap
+            .root_mnemonic
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            HdKeychain::from_mnemonic_words(words)?
+        } else {
+            let root = snap.root_private_key_hex.clone().ok_or_else(|| {
+                Error::Other(anyhow::anyhow!(
+                    "snapshot missing root mnemonic/entropy; master key is mandatory"
+                ))
+            })?;
+            HdKeychain::from_entropy_hex(&root)?
+        };
+        if let Some(root_hex) = &snap.root_private_key_hex {
+            if !root_hex.trim().is_empty()
+                && !root_hex.eq_ignore_ascii_case(&keychain.entropy_hex())
+            {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "snapshot root entropy does not match mnemonic entropy"
+                )));
+            }
+        }
+        let derived_rgb = keychain.derive_slot_hex("rgb", 0)?;
+        if !snap.private_key_hex.trim().is_empty()
+            && !snap.private_key_hex.eq_ignore_ascii_case(&derived_rgb)
+        {
+            return Err(Error::Other(anyhow::anyhow!(
+                "snapshot RGB key does not match the derived RGB slot from root key"
+            )));
+        }
 
-        set_metadata_value(&self.conn, META_ROOT_PRIVATE_KEY_HEX, &root)?;
-        set_metadata_value(&self.conn, META_RGB_PRIVATE_KEY_HEX, &snap.private_key_hex)?;
-        set_metadata_value(&self.conn, META_PRIVATE_KEY_HEX, &snap.private_key_hex)?;
+        self.set_master_keychain_material(&keychain)?;
 
         if let Some(label) = &snap.wallet_label {
             self.set_wallet_label(label)?;
@@ -734,14 +1162,13 @@ impl RgbWallet {
             self.set_nickname(nick)?;
         }
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.master_conn.unchecked_transaction()?;
         tx.execute("DELETE FROM pgp_identities", [])?;
         if snap.pgp_identities.is_empty() {
             let wallet_label = self
                 .wallet_label()?
                 .unwrap_or_else(|| "default".to_string());
-            let root_bytes = decode_fixed_32_hex(&root, "root private key")?;
-            let private_key_hex = derive_pgp_private_key_hex(&root_bytes, 0)?;
+            let private_key_hex = keychain.derive_slot_hex("pgp", 0)?;
             let id = Identity::from_hex(&private_key_hex)?;
             tx.execute(
                 "INSERT INTO pgp_identities (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
@@ -788,17 +1215,60 @@ impl RgbWallet {
         }
         tx.commit()?;
 
-        for c in &snap.contracts {
-            self.store_contract(c)?;
-        }
-        for cert in &snap.certificates {
-            self.store_certificate(cert)?;
-        }
+        self.with_identity_conn(|conn| {
+            conn.execute("DELETE FROM contracts", [])?;
+            conn.execute("DELETE FROM certificates", [])?;
+            for c in &snap.contracts {
+                conn.execute(
+                    "INSERT OR REPLACE INTO contracts (
+                        contract_id, contract_type, status, witness_secret, witness_proof,
+                        amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
+                        reference_post, delivery_deadline, role, delivered_text,
+                        certificate_id, created_at, updated_at
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                    params![
+                        c.contract_id,
+                        c.contract_type.as_str(),
+                        c.status.as_str(),
+                        c.witness_secret,
+                        c.witness_proof,
+                        c.amount_units as i64,
+                        c.work_spec,
+                        c.buyer_fingerprint,
+                        c.seller_fingerprint,
+                        c.reference_post,
+                        c.delivery_deadline,
+                        c.role.as_str(),
+                        c.delivered_text,
+                        c.certificate_id,
+                        c.created_at,
+                        c.updated_at,
+                    ],
+                )?;
+            }
+            for cert in &snap.certificates {
+                conn.execute(
+                    "INSERT OR REPLACE INTO certificates (
+                        certificate_id, contract_id, witness_secret, witness_proof, created_at
+                    ) VALUES (?1,?2,?3,?4,?5)",
+                    params![
+                        cert.certificate_id,
+                        cert.contract_id,
+                        cert.witness_secret,
+                        cert.witness_proof,
+                        cert.created_at,
+                    ],
+                )?;
+            }
+            Ok(())
+        })?;
+
+        self.refresh_slot_registry()?;
         Ok(())
     }
 }
 
-fn migrate_legacy_schema(conn: &Connection) -> Result<()> {
+fn migrate_identity_schema(conn: &Connection) -> Result<()> {
     ensure_columns(
         conn,
         "contracts",
@@ -833,39 +1303,68 @@ fn migrate_legacy_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
-    let legacy = metadata_value(conn, META_PRIVATE_KEY_HEX)?;
-    let root = metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX)?;
-    let rgb = metadata_value(conn, META_RGB_PRIVATE_KEY_HEX)?;
-
-    let root_hex = if let Some(value) = root {
-        value
-    } else if let Some(value) = legacy.clone() {
-        set_metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX, &value)?;
-        value
-    } else {
-        let generated = Identity::generate().private_key_hex();
-        set_metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX, &generated)?;
-        generated
-    };
-
-    let rgb_hex = if let Some(value) = rgb {
-        value
-    } else if let Some(value) = legacy {
-        set_metadata_value(conn, META_RGB_PRIVATE_KEY_HEX, &value)?;
-        value
-    } else {
-        let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-        let derived = derive_child_key_hex(&root_key, HKDF_RGB_IDENTITY_V1)?;
-        set_metadata_value(conn, META_RGB_PRIVATE_KEY_HEX, &derived)?;
-        derived
-    };
-
-    // Keep legacy metadata key populated for backward compatibility.
-    set_metadata_value(conn, META_PRIVATE_KEY_HEX, &rgb_hex)?;
-    if metadata_value(conn, META_KEY_MODEL_VERSION)?.is_none() {
-        set_metadata_value(conn, META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V2)?;
+fn migrate_identity_schema_if_present(conn: &Connection) -> Result<()> {
+    if table_exists(conn, "contracts")? {
+        ensure_columns(
+            conn,
+            "contracts",
+            &[
+                ("contract_type", "TEXT NOT NULL DEFAULT 'service'"),
+                ("status", "TEXT NOT NULL DEFAULT 'issued'"),
+                ("witness_secret", "TEXT"),
+                ("witness_proof", "TEXT"),
+                ("amount_units", "INTEGER NOT NULL DEFAULT 0"),
+                ("work_spec", "TEXT NOT NULL DEFAULT ''"),
+                ("buyer_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+                ("seller_fingerprint", "TEXT"),
+                ("reference_post", "TEXT"),
+                ("delivery_deadline", "TEXT"),
+                ("role", "TEXT NOT NULL DEFAULT 'buyer'"),
+                ("delivered_text", "TEXT"),
+                ("certificate_id", "TEXT"),
+                ("created_at", "TEXT NOT NULL DEFAULT ''"),
+                ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ],
+        )?;
     }
+    if table_exists(conn, "certificates")? {
+        ensure_columns(
+            conn,
+            "certificates",
+            &[
+                ("contract_id", "TEXT"),
+                ("witness_secret", "TEXT"),
+                ("witness_proof", "TEXT"),
+                ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
+    let mnemonic = metadata_value(conn, META_ROOT_MNEMONIC)?
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let entropy_hex = metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX)?
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let keychain = if let Some(words) = mnemonic.as_deref() {
+        HdKeychain::from_mnemonic_words(words)?
+    } else if let Some(root_hex) = entropy_hex.as_deref() {
+        HdKeychain::from_entropy_hex(root_hex)?
+    } else {
+        HdKeychain::generate_new()?
+    };
+
+    set_metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;
+    set_metadata_value(conn, META_ROOT_MNEMONIC, &keychain.mnemonic_words())?;
+    set_metadata_value(
+        conn,
+        META_RGB_PRIVATE_KEY_HEX,
+        &keychain.derive_slot_hex("rgb", 0)?,
+    )?;
+    set_metadata_value(conn, META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V3)?;
 
     if metadata_value(conn, META_WALLET_LABEL)?.is_none() {
         set_metadata_value(conn, META_WALLET_LABEL, "default")?;
@@ -875,39 +1374,76 @@ fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_default_pgp_identity(conn: &Connection) -> Result<()> {
+    let keychain = keychain_from_metadata(conn)?;
     let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM pgp_identities")?;
     let count: i64 = count_stmt.query_row([], |row| row.get(0))?;
     if count > 0 {
-        // Ensure at least one active identity exists.
-        let mut active_stmt =
-            conn.prepare("SELECT COUNT(*) FROM pgp_identities WHERE is_active = 1")?;
-        let active: i64 = active_stmt.query_row([], |row| row.get(0))?;
-        if active == 0 {
-            conn.execute(
+        // Canonicalize all PGP private/public keys from deterministic BIP32 slots.
+        let mut stmt = conn.prepare(
+            "SELECT label, key_index, created_at, is_active
+             FROM pgp_identities
+             ORDER BY key_index ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (label, key_index, created_at, is_active) = row?;
+            let private_key_hex = keychain.derive_slot_hex("pgp", key_index)?;
+            let identity = Identity::from_hex(&private_key_hex)?;
+            entries.push((
+                canonical_label(&label)?,
+                key_index,
+                private_key_hex,
+                identity.public_key_hex(),
+                created_at,
+                is_active,
+            ));
+        }
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM pgp_identities", [])?;
+        let mut saw_active = false;
+        for (label, key_index, private_key_hex, public_key_hex, created_at, was_active) in entries {
+            let is_active = if was_active == 1 && !saw_active {
+                saw_active = true;
+                1
+            } else {
+                0
+            };
+            tx.execute(
+                "INSERT INTO pgp_identities (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    label,
+                    i64::from(key_index),
+                    private_key_hex,
+                    public_key_hex,
+                    created_at,
+                    is_active,
+                ],
+            )?;
+        }
+        if !saw_active {
+            tx.execute(
                 "UPDATE pgp_identities SET is_active = 1 WHERE key_index = (
                     SELECT MIN(key_index) FROM pgp_identities
                 )",
                 [],
             )?;
         }
+        tx.commit()?;
         return Ok(());
     }
 
     let wallet_label =
         metadata_value(conn, META_WALLET_LABEL)?.unwrap_or_else(|| "default".to_string());
-    let root_hex = metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX)?
-        .ok_or_else(|| Error::Other(anyhow::anyhow!("missing root private key")))?;
-
-    let root_key = decode_fixed_32_hex(&root_hex, "root private key")?;
-    let legacy = metadata_value(conn, META_PRIVATE_KEY_HEX)?;
-    let rgb = metadata_value(conn, META_RGB_PRIVATE_KEY_HEX)?;
-    let private_key_hex = match (legacy, rgb) {
-        (Some(legacy), Some(rgb)) if legacy == rgb && legacy == root_hex => {
-            // Legacy wallet where root==RGB identity. Preserve server-visible identity.
-            legacy
-        }
-        _ => derive_pgp_private_key_hex(&root_key, 0)?,
-    };
+    let private_key_hex = keychain.derive_slot_hex("pgp", 0)?;
 
     let identity = Identity::from_hex(&private_key_hex)?;
     conn.execute(
@@ -921,6 +1457,16 @@ fn ensure_default_pgp_identity(conn: &Connection) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+fn keychain_from_metadata(conn: &Connection) -> Result<HdKeychain> {
+    if let Some(words) = metadata_value(conn, META_ROOT_MNEMONIC)? {
+        return HdKeychain::from_mnemonic_words(&words);
+    }
+    let entropy_hex = metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX)?.ok_or_else(|| {
+        Error::Other(anyhow::anyhow!("missing master entropy in wallet metadata"))
+    })?;
+    HdKeychain::from_entropy_hex(&entropy_hex)
 }
 
 fn set_metadata_value(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -940,36 +1486,11 @@ fn metadata_value(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(Some(row.get(0)?))
 }
 
-fn derive_child_key_hex(root: &[u8; 32], info: &[u8]) -> Result<String> {
-    let hk = Hkdf::<Sha256>::new(None, root);
-    let mut output = [0u8; 32];
-    hk.expand(info, &mut output)
-        .map_err(|_| Error::Other(anyhow::anyhow!("HKDF expansion failed")))?;
-    Ok(hex::encode(output))
-}
-
-fn derive_pgp_private_key_hex(root: &[u8; 32], key_index: u32) -> Result<String> {
-    if key_index >= MAX_PGP_KEYS {
-        return Err(Error::Other(anyhow::anyhow!(
-            "PGP key index out of range (max {})",
-            MAX_PGP_KEYS - 1
-        )));
-    }
-    let info = format!("harmoniis/hrmw/pgp/{key_index}/v1");
-    derive_child_key_hex(root, info.as_bytes())
-}
-
-fn decode_fixed_32_hex(hex_value: &str, what: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(hex_value)
-        .map_err(|e| Error::Other(anyhow::anyhow!("invalid {what} hex: {e}")))?;
-    let len = bytes.len();
-    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-        Error::Other(anyhow::anyhow!(
-            "invalid {what}: expected 32 bytes, got {}",
-            len
-        ))
-    })?;
-    Ok(arr)
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1 LIMIT 1")?;
+    let count: i64 = stmt.query_row(params![table], |row| row.get(0))?;
+    Ok(count > 0)
 }
 
 fn canonical_label(label: &str) -> Result<String> {

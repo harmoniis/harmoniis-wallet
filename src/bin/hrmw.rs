@@ -1,4 +1,4 @@
-//! `hrmw` — Harmoniis RGB wallet CLI.
+//! `hrmw` — Harmoniis wallet CLI.
 //!
 //! Manages RGB21 bearer contracts and certificates via the Harmoniis Witness.
 //!
@@ -16,7 +16,7 @@ use anyhow::Context;
 use bdk_wallet::bitcoin::Network;
 use clap::{Parser, Subcommand, ValueEnum};
 use harmoniis_wallet::{
-    ark::ArkPaymentWallet,
+    ark::{ArkPaymentWallet, SqliteArkDb},
     bitcoin::{BitcoinAddressKind, DeterministicBitcoinWallet},
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
@@ -35,24 +35,37 @@ use harmoniis_wallet::{
 use rand::Rng;
 use webylib::{Amount as WebcashAmount, SecretWebcash};
 
-#[path = "hrmw/hrmw_support.rs"]
-mod hrmw_support;
+#[path = "hrmw/cli_support.rs"]
+mod cli_support;
 #[path = "hrmw/media.rs"]
 mod media;
-use hrmw_support::{
+use cli_support::{
     build_activity_metadata, build_post_attachments, default_webcash_wallet_path,
     extract_webcash_token, format_units_to_amount, make_client, next_contract_id, now_utc,
     open_or_create_wallet, open_webcash_wallet, parse_amount_to_units, parse_keywords_csv,
     pay_from_wallet, required_amount_for_payment_retry, resolve_wallet_path,
+    store_master_in_password_manager, write_recovery_sidecar,
 };
 use media::{prepare_avatar_image, prepare_post_image};
 
 const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
+/// Derive the `bitcoin.db` path from the wallet path (sibling to `master.db`).
+fn bitcoin_db_path(wallet_path: &std::path::Path) -> std::path::PathBuf {
+    wallet_path.with_file_name("bitcoin.db")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PaymentRail {
     Webcash,
     Bitcoin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PasswordManagerMode {
+    Required,
+    BestEffort,
+    Off,
 }
 
 // ── CLI structure ─────────────────────────────────────────────────────────────
@@ -76,7 +89,7 @@ Bearer model — like Webcash but for contracts:\n\
 By default connects to https://harmoniis.com/api via the Cloudflare edge proxy.\n\
 Use --api for non-production targets. Use --direct to speak to a backend URL directly (local dev or Lambda URL).\n\
 \n\
-Wallet database: ~/.harmoniis/rgb.db (override with --wallet)\n\
+Wallet database: ~/.harmoniis/master.db (override with --wallet)\n\
 \n\
 Examples:\n\
   hrmw setup\n\
@@ -114,11 +127,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Initialise or import a wallet (creates ~/.harmoniis/rgb.db)
+    /// Initialise or import a wallet (creates ~/.harmoniis/master.db)
     Setup {
-        /// Import an existing 64-char Ed25519 private key hex
+        /// Import existing BIP39 entropy hex (16/20/24/28/32 bytes)
         #[arg(long)]
         secret: Option<String>,
+        /// Password manager storage policy for master material
+        #[arg(long, value_enum, default_value_t = PasswordManagerMode::Required)]
+        password_manager: PasswordManagerMode,
     },
 
     /// Show wallet summary (fingerprint, nickname, counts)
@@ -443,7 +459,7 @@ enum KeyCmd {
     },
     /// Import root master key into this wallet
     Import {
-        /// 64-char root key hex
+        /// BIP39 entropy hex (16/20/24/28/32 bytes)
         #[arg(long)]
         hex: Option<String>,
         /// BIP39 mnemonic phrase
@@ -808,7 +824,7 @@ enum WebminerCmd {
         cpu_threads: Option<usize>,
         #[arg(long)]
         accept_terms: bool,
-        /// RGB wallet path (defaults to global --wallet / ~/.harmoniis/rgb.db)
+        /// Master wallet path (defaults to global --wallet / ~/.harmoniis/master.db)
         #[arg(long)]
         wallet: Option<PathBuf>,
         /// Webcash wallet path (defaults to sibling webcash wallet path)
@@ -1117,25 +1133,21 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         // ── setup ─────────────────────────────────────────────────────────────
-        Cmd::Setup { secret } => {
+        Cmd::Setup {
+            secret,
+            password_manager,
+        } => {
             if wallet_path.exists() {
                 println!("Wallet already exists at {}", wallet_path.display());
                 return Ok(());
             }
             let wallet = RgbWallet::create(&wallet_path).context("failed to create wallet")?;
             if let Some(hex) = secret {
-                let id = Identity::from_hex(&hex).context("invalid private key hex")?;
-                wallet.import_snapshot(&harmoniis_wallet::wallet::WalletSnapshot {
-                    private_key_hex: id.private_key_hex(),
-                    root_private_key_hex: Some(id.private_key_hex()),
-                    wallet_label: wallet.wallet_label()?,
-                    pgp_identities: vec![],
-                    nickname: None,
-                    contracts: vec![],
-                    certificates: vec![],
-                })?;
-                println!("Wallet imported from key.");
-                println!("Fingerprint: {}", id.fingerprint());
+                wallet
+                    .apply_master_key_hex(&hex)
+                    .context("invalid BIP39 entropy hex")?;
+                println!("Wallet imported from master key.");
+                println!("Fingerprint: {}", wallet.fingerprint()?);
             } else {
                 println!("Wallet created at {}", wallet_path.display());
                 println!("Fingerprint: {}", wallet.fingerprint()?);
@@ -1145,6 +1157,28 @@ async fn main() -> anyhow::Result<()> {
             }
             let pgp = wallet.list_pgp_identities()?;
             println!("PGP identities: {}", pgp.len());
+            write_recovery_sidecar(&wallet_path, &wallet, true)?;
+            match password_manager {
+                PasswordManagerMode::Required => {
+                    let backend = store_master_in_password_manager(&wallet_path, &wallet)?;
+                    println!(
+                        "Saved master material to password manager: {}.",
+                        backend.label()
+                    );
+                }
+                PasswordManagerMode::BestEffort => {
+                    match store_master_in_password_manager(&wallet_path, &wallet) {
+                        Ok(backend) => println!(
+                            "Saved master material to password manager: {}.",
+                            backend.label()
+                        ),
+                        Err(e) => eprintln!(
+                            "Warning: could not store master material in password manager: {e}"
+                        ),
+                    }
+                }
+                PasswordManagerMode::Off => {}
+            }
         }
 
         // ── info ──────────────────────────────────────────────────────────────
@@ -1321,7 +1355,7 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
             let (taproot_external, taproot_internal) =
                 btc.descriptor_strings_for(BitcoinAddressKind::Taproot)?;
             let (segwit_external, segwit_internal) =
@@ -1389,7 +1423,7 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
             let addr = btc.receive_address_at_kind(index, kind.into())?;
             println!("{addr}");
         }
@@ -1402,7 +1436,7 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
             let esplora_url = resolved_esplora_url(network, esplora);
             let snapshot = btc.sync(&esplora_url, stop_gap, parallel_requests)?;
             println!("Network:       {}", snapshot.network);
@@ -1442,9 +1476,14 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Info { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
             println!("Connecting to ARK ASP at {asp_url} ...");
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let boarding = ark.get_boarding_address()?;
             let offchain = ark.get_offchain_address()?;
             let balance = ark.offchain_balance().await?;
@@ -1470,8 +1509,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Board { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let boarding = ark.get_boarding_address()?;
             println!("{boarding}");
         }
@@ -1479,8 +1523,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Offchain { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let offchain = ark.get_offchain_address()?;
             println!("{offchain}");
         }
@@ -1488,8 +1537,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Onchain { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let onchain = ark.get_onchain_address()?;
             println!("{onchain}");
         }
@@ -1497,8 +1551,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Balance { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let balance = ark.offchain_balance().await?;
             println!(
                 "Confirmed:      {} BTC",
@@ -1517,8 +1576,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Settle { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             println!("Settling pending VTXOs...");
             match ark.settle().await? {
                 Some(txid) => println!("Settlement txid: {txid}"),
@@ -1534,8 +1598,13 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let result = ark.send_payment(&address, amount).await?;
             println!("Sent {} sats via ARK", result.amount_sats);
             println!("VTXO txid: {}", result.vtxo_txid);
@@ -1550,8 +1619,13 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let txid = ark.send_onchain(&address, amount).await?;
             println!("ARK send-onchain: {} sats", amount);
             println!("Destination: {address}");
@@ -1566,9 +1640,14 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_rgb_wallet(&wallet, network)?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
             let destination = btc.receive_address_at_kind(index, BitcoinAddressKind::Taproot)?;
-            let ark = ArkPaymentWallet::connect(&btc, &asp_url).await?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
             let txid = ark.send_onchain(&destination, amount).await?;
             println!("ARK send-onchain-self: {} sats", amount);
             println!("Taproot destination(index={}): {destination}", index);
@@ -1580,7 +1659,7 @@ async fn main() -> anyhow::Result<()> {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let payload = match format {
                 KeyExportFormat::Hex => wallet.export_master_key_hex()?,
-                KeyExportFormat::Mnemonic => wallet.export_master_key_mnemonic()?,
+                KeyExportFormat::Mnemonic => wallet.export_recovery_mnemonic()?,
             };
             if let Some(path) = output {
                 if let Some(parent) = path.parent() {

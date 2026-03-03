@@ -10,11 +10,11 @@ Reference CLI wallet for Harmoniis contracts plus Webcash mining.
 
 ## Key Model (Current)
 
-One root private key is stored in the wallet and deterministically derives separate key material:
+The wallet stores one BIP39 master mnemonic/entropy pair and derives every slot using hardened BIP32 paths:
 
 - `RGB identity key` (wallet contract identity)
 - `Webcash master secret`
-- `Bitcoin deterministic slot key` (reserved for Bitcoin rail integration)
+- `Bitcoin deterministic slot key`
 - `PGP-style signing identities` (multiple, labeled, selectable)
 
 PGP identities are managed with labels:
@@ -32,9 +32,23 @@ Master key backup / restore:
 ```bash
 hrmw key export --format mnemonic
 hrmw key export --format hex --output ./master.hex
-hrmw key import --mnemonic "word1 word2 ... word24"
+hrmw key import --mnemonic "word1 word2 ... word12"
 hrmw key fingerprint
 ```
+
+Password manager storage at setup time:
+
+```bash
+hrmw setup --password-manager required
+```
+
+Modes:
+
+- `required` (default): setup fails if no supported password manager is available.
+- `best-effort`: continue setup if password-manager storage fails.
+- `off`: skip password-manager storage.
+
+On macOS, this stores in Keychain under a `harmoniis` service label. If iCloud Keychain sync is enabled in macOS settings, those entries sync; `hrmw` cannot force iCloud sync from CLI.
 
 Deterministic slot map:
 
@@ -43,7 +57,13 @@ Deterministic slot map:
 - `rgb[0]` deterministic RGB identity root
 - `bitcoin[0]` deterministic Bitcoin slot seed material
 
-This allows reconstruction from only the root key export plus server discovery.
+This allows reconstruction from only the master mnemonic (or entropy hex) plus server discovery.
+
+Database model:
+
+- `master.db` stores root material metadata, slot registry, identities, and contract records.
+- `webcash.db` stores Webcash balance state.
+- `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
 
 ## Install
 
@@ -91,8 +111,9 @@ hrmw --version
 
 ## Default Paths
 
-- Main wallet DB: `~/.harmoniis/rgb.db`
+- Master wallet DB: `~/.harmoniis/master.db`
 - Webcash DB: `~/.harmoniis/webcash.db`
+- Bitcoin DB: `~/.harmoniis/bitcoin.db`
 - Miner log (daemon): `~/.harmoniis/miner.log`
 - Miner status JSON: `~/.harmoniis/miner_status.json`
 - Pending mined keeps: `~/.harmoniis/miner_pending_keeps.log`
@@ -111,7 +132,7 @@ hrmw identity register --nick alice
 hrmw webcash info
 ```
 
-## RGB Contract Usage
+## Contract Usage
 
 Buyer flow:
 
@@ -149,10 +170,12 @@ hrmw webcash merge --group 20
 
 ## Payment Rails
 
-- Active settlement rail today: **Webcash** (`X-Webcash-Secret`).
-- `X-Bitcoin-Secret` is supported when backend enables Bitcoin mode (`HARMONIIS_BITCOIN_PAYMENT_MODE`).
+- Both rails are supported; backend config controls which rails are enabled.
+- Webcash rail uses `X-Webcash-Secret` with `wats`.
+- Bitcoin rail uses `X-Bitcoin-Secret` with `sats`.
 - In ARK mode, `X-Bitcoin-Secret` must be `ark:<vtxo_txid>:<amount_sats>`.
-- Client API exposes payment-header abstractions so Bitcoin/ARK can be enabled without breaking existing Webcash flows.
+- Backend ARK mode verifies incoming VTXOs via ASP/wallet state before settlement.
+- Client API exposes payment-header abstractions so either rail can be used cleanly.
 
 CLI rail flags:
 
@@ -200,7 +223,7 @@ hrmw bitcoin address --network bitcoin --kind segwit --index 0
 Notes:
 - This is deterministic reconstruction support (no separate seed file needed).
 - `hrmw bitcoin info` and `hrmw bitcoin sync` report both Taproot and SegWit next receive addresses.
-- On-chain addresses are funding rails; ARK payments are submitted as bearer proofs in `X-Bitcoin-Secret`.
+- On-chain addresses are funding rails; ARK tokens are settlement inputs and must be backend-verified.
 - Default esplora endpoints are auto-selected by network and can be overridden with `--esplora`.
 
 ## Mining
@@ -243,19 +266,37 @@ Then validate:
 
 ```bash
 hrmw info
-hrmw webcash recover --wallet ~/.harmoniis/rgb.db --gap-limit 40
+hrmw webcash recover --wallet ~/.harmoniis/master.db --gap-limit 40
 hrmw recover deterministic --pgp-start 0 --pgp-end 999
 ```
 
-If you accidentally pass `--wallet .../webcash.db`, `hrmw` now auto-corrects to the sibling `rgb.db` path.
+If you accidentally pass `--wallet .../webcash.db`, `hrmw` now auto-corrects to the sibling `master.db` path.
 
 For deterministic restore on a new machine:
 
 ```bash
 hrmw setup
-hrmw key import --mnemonic "word1 word2 ... word24" --force
+hrmw key import --mnemonic "word1 word2 ... word12" --force
 hrmw recover deterministic --pgp-start 0 --pgp-end 999
 ```
+
+Project test wallets (Alice/Bob with recovery verification):
+
+```bash
+cd harmoniis-wallet
+./scripts/prepare_project_test_wallets.sh
+```
+
+This creates `wallets/mainnet-test/{alice,bob}` and recovered verification wallets under the project root.
+
+Full mnemonic rebuild proof (root + RGB + Webcash + Bitcoin + ARK + PGP identities):
+
+```bash
+cd harmoniis-wallet
+./scripts/prove_mnemonic_rebuild.sh
+```
+
+This writes `wallets/rebuild-proof/RESULT.txt` plus source/restored snapshots for parity checks.
 
 ## Build and Test
 

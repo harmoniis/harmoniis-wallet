@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use anyhow::Context;
@@ -15,10 +17,10 @@ use webylib::{Amount as WebcashAmount, Wallet as WebcashWallet};
 
 pub fn default_wallet_path() -> PathBuf {
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("rgb.db")
+    home.join(".harmoniis").join("master.db")
 }
 
-fn legacy_wallet_path() -> PathBuf {
+fn compat_wallet_path() -> PathBuf {
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".harmoniis").join("wallet.db")
 }
@@ -31,16 +33,16 @@ pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
             .map(|n| n.eq_ignore_ascii_case("webcash.db"))
             .unwrap_or(false)
         {
-            let rgb_path = path
+            let master_path = path
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("rgb.db");
+                .join("master.db");
             eprintln!(
-                "Note: --wallet points to webcash.db; using RGB wallet {}",
-                rgb_path.display()
+                "Note: --wallet points to webcash.db; using master wallet {}",
+                master_path.display()
             );
-            return rgb_path;
+            return master_path;
         }
         return path;
     }
@@ -48,23 +50,332 @@ pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
     if preferred.exists() {
         return preferred;
     }
-    let legacy = legacy_wallet_path();
-    if legacy.exists() {
-        return legacy;
+    let compat = compat_wallet_path();
+    if compat.exists() {
+        return compat;
     }
     preferred
 }
 
 pub fn open_or_create_wallet(path: &Path) -> anyhow::Result<RgbWallet> {
-    if path.exists() {
-        RgbWallet::open(path).context("failed to open wallet")
+    let wallet = if path.exists() {
+        RgbWallet::open(path).context("failed to open wallet")?
     } else {
-        RgbWallet::create(path).context("failed to create wallet")
+        RgbWallet::create(path).context("failed to create wallet")?
+    };
+    write_recovery_sidecar(path, &wallet, false)?;
+    Ok(wallet)
+}
+
+fn recovery_sidecar_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("master.db");
+    path.with_file_name(format!("{file_name}.recovery.txt"))
+}
+
+pub fn write_recovery_sidecar(
+    path: &Path,
+    wallet: &RgbWallet,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    let sidecar = recovery_sidecar_path(path);
+    if sidecar.exists() && !overwrite {
+        return Ok(());
+    }
+
+    let root_hex = wallet
+        .export_master_key_hex()
+        .context("failed to export root private key for recovery sidecar")?;
+    let mnemonic = wallet
+        .export_recovery_mnemonic()
+        .context("failed to export mnemonic for recovery sidecar")?;
+    let fingerprint = wallet
+        .fingerprint()
+        .context("failed to derive wallet fingerprint for recovery sidecar")?;
+
+    let mut file = fs::File::create(&sidecar)
+        .with_context(|| format!("failed to create recovery sidecar {}", sidecar.display()))?;
+    writeln!(
+        file,
+        "Harmoniis Wallet Recovery (KEEP OFFLINE)\nwallet_path={}\nfingerprint={}\nroot_private_key_hex={}\nmnemonic_words={}\n",
+        path.display(),
+        fingerprint,
+        root_hex,
+        mnemonic
+    )?;
+    file.flush()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&sidecar, perms).with_context(|| {
+            format!(
+                "failed to set permissions on recovery sidecar {}",
+                sidecar.display()
+            )
+        })?;
+    }
+
+    eprintln!(
+        "Recovery sidecar created at {} (permissions 600). Move it to offline storage.",
+        sidecar.display()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PasswordManagerBackend {
+    #[cfg(target_os = "macos")]
+    MacOsKeychain,
+    #[cfg(target_os = "linux")]
+    LinuxSecretService,
+    #[cfg(target_os = "windows")]
+    WindowsCredentialManager,
+}
+
+impl PasswordManagerBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::MacOsKeychain => "macOS Keychain",
+            #[cfg(target_os = "linux")]
+            Self::LinuxSecretService => "Linux Secret Service",
+            #[cfg(target_os = "windows")]
+            Self::WindowsCredentialManager => "Windows Credential Manager",
+        }
     }
 }
 
-pub fn default_webcash_wallet_path(rgb_wallet_path: &Path) -> PathBuf {
-    let base_dir = rgb_wallet_path
+pub fn store_master_in_password_manager(
+    path: &Path,
+    wallet: &RgbWallet,
+) -> anyhow::Result<PasswordManagerBackend> {
+    #[cfg(target_os = "macos")]
+    {
+        if command_exists("security") {
+            store_master_macos_keychain(path, wallet)?;
+            return Ok(PasswordManagerBackend::MacOsKeychain);
+        }
+        anyhow::bail!("`security` command not found; macOS Keychain unavailable");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if command_exists("secret-tool") {
+            store_master_linux_secret_service(path, wallet)?;
+            return Ok(PasswordManagerBackend::LinuxSecretService);
+        }
+        anyhow::bail!(
+            "no supported password manager backend found (expected `secret-tool` for Secret Service)"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if command_exists("cmdkey") {
+            store_master_windows_credential_manager(path, wallet)?;
+            return Ok(PasswordManagerBackend::WindowsCredentialManager);
+        }
+        anyhow::bail!("`cmdkey` not found; Windows Credential Manager unavailable");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        let _ = wallet;
+        anyhow::bail!("no supported password manager backend for this OS");
+    }
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn wallet_password_labels(
+    path: &Path,
+    wallet: &RgbWallet,
+) -> anyhow::Result<(String, String, String)> {
+    let wallet_id = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string();
+    let fingerprint = wallet
+        .fingerprint()
+        .context("failed to derive fingerprint for password manager storage")?;
+    Ok((wallet_id, fingerprint, "harmoniis".to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn store_master_macos_keychain(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let master_mnemonic = wallet
+        .export_recovery_mnemonic()
+        .context("failed to export mnemonic for keychain storage")?;
+    let master_entropy_hex = wallet
+        .export_master_key_hex()
+        .context("failed to export entropy hex for keychain storage")?;
+
+    store_macos_keychain_secret(
+        &format!("{service_prefix}.wallet:{wallet_id}:mnemonic"),
+        "harmoniis mnemonic",
+        &fingerprint,
+        &master_mnemonic,
+    )?;
+    store_macos_keychain_secret(
+        &format!("{service_prefix}.wallet:{wallet_id}:entropy-hex"),
+        "harmoniis entropy hex",
+        &fingerprint,
+        &master_entropy_hex,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn store_macos_keychain_secret(
+    service: &str,
+    label: &str,
+    account: &str,
+    secret: &str,
+) -> anyhow::Result<()> {
+    // Note: `security` accepts `-w` via argv, which can be visible to local process
+    // inspection briefly. This still avoids plaintext-at-rest copies in project files.
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-a",
+            account,
+            "-s",
+            service,
+            "-l",
+            label,
+            "-w",
+            secret,
+        ])
+        .status()
+        .with_context(|| format!("failed to execute `security` for service {service}"))?;
+    if !status.success() {
+        anyhow::bail!("`security add-generic-password` failed for service {service}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn store_master_linux_secret_service(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let master_mnemonic = wallet
+        .export_recovery_mnemonic()
+        .context("failed to export mnemonic for secret-service storage")?;
+    let master_entropy_hex = wallet
+        .export_master_key_hex()
+        .context("failed to export entropy hex for secret-service storage")?;
+
+    store_secret_tool_value(
+        &format!("harmoniis:{wallet_id}:mnemonic"),
+        &service_prefix,
+        &wallet_id,
+        "mnemonic",
+        &fingerprint,
+        &master_mnemonic,
+    )?;
+    store_secret_tool_value(
+        &format!("harmoniis:{wallet_id}:entropy-hex"),
+        &service_prefix,
+        &wallet_id,
+        "entropy-hex",
+        &fingerprint,
+        &master_entropy_hex,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn store_secret_tool_value(
+    label: &str,
+    service: &str,
+    wallet_id: &str,
+    kind: &str,
+    account: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let mut child = Command::new("secret-tool")
+        .args([
+            "store", "--label", label, "service", service, "wallet", wallet_id, "kind", kind,
+            "account", account,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to run secret-tool for {kind}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("failed to open secret-tool stdin for {kind}"))?;
+        stdin
+            .write_all(value.as_bytes())
+            .with_context(|| format!("failed writing secret-tool payload for {kind}"))?;
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("failed waiting secret-tool for {kind}"))?;
+    if !status.success() {
+        anyhow::bail!("secret-tool failed storing {kind}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn store_master_windows_credential_manager(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let master_mnemonic = wallet
+        .export_recovery_mnemonic()
+        .context("failed to export mnemonic for credential-manager storage")?;
+    let master_entropy_hex = wallet
+        .export_master_key_hex()
+        .context("failed to export entropy hex for credential-manager storage")?;
+
+    store_cmdkey_value(
+        &format!("{service_prefix}.wallet:{wallet_id}:mnemonic"),
+        &fingerprint,
+        &master_mnemonic,
+    )?;
+    store_cmdkey_value(
+        &format!("{service_prefix}.wallet:{wallet_id}:entropy-hex"),
+        &fingerprint,
+        &master_entropy_hex,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn store_cmdkey_value(target: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+    let status = Command::new("cmdkey")
+        .args([
+            &format!("/generic:{target}"),
+            &format!("/user:{account}"),
+            &format!("/pass:{secret}"),
+        ])
+        .status()
+        .with_context(|| format!("failed to execute cmdkey for target {target}"))?;
+    if !status.success() {
+        anyhow::bail!("cmdkey failed storing target {target}");
+    }
+    Ok(())
+}
+
+pub fn default_webcash_wallet_path(master_wallet_path: &Path) -> PathBuf {
+    let base_dir = master_wallet_path
         .parent()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -72,10 +383,10 @@ pub fn default_webcash_wallet_path(rgb_wallet_path: &Path) -> PathBuf {
 }
 
 pub async fn open_webcash_wallet(
-    rgb_wallet_path: &Path,
+    master_wallet_path: &Path,
     wallet: &RgbWallet,
 ) -> anyhow::Result<WebcashWallet> {
-    let webcash_path = default_webcash_wallet_path(rgb_wallet_path);
+    let webcash_path = default_webcash_wallet_path(master_wallet_path);
     let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
         format!(
             "failed to open webcash wallet at {}",
