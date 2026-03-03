@@ -61,7 +61,8 @@ This allows reconstruction from only the master mnemonic (or entropy hex) plus s
 
 Database model:
 
-- `master.db` stores root material metadata, slot registry, identities, and contract records.
+- `master.db` stores root material metadata, slot registry, and PGP identity registry.
+- `rgb.db` stores contract/certificate/local timeline state.
 - `webcash.db` stores Webcash balance state.
 - `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
 
@@ -112,6 +113,7 @@ hrmw --version
 ## Default Paths
 
 - Master wallet DB: `~/.harmoniis/master.db`
+- RGB DB: `~/.harmoniis/rgb.db`
 - Webcash DB: `~/.harmoniis/webcash.db`
 - Bitcoin DB: `~/.harmoniis/bitcoin.db`
 - Miner log (daemon): `~/.harmoniis/miner.log`

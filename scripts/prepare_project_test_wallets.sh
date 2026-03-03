@@ -44,6 +44,7 @@ create_wallet() {
 
   local fp taproot board offchain
   fp="$(wallet_field "${wallet_db}" "RGB fingerprint")"
+  local rgb_db="${wallet_dir}/rgb.db"
   taproot="$(HRMW --wallet "${wallet_db}" bitcoin address --network "${NETWORK}" --kind taproot --index 0)"
   board="$(HRMW --wallet "${wallet_db}" bitcoin ark board --network "${NETWORK}")"
   offchain="$(HRMW --wallet "${wallet_db}" bitcoin ark offchain --network "${NETWORK}")"
@@ -52,12 +53,14 @@ create_wallet() {
 name=${name}
 wallet_db=${wallet_db}
 fingerprint=${fp}
+rgb_identity_db=${rgb_db}
 taproot_index0=${taproot}
 ark_boarding_address=${board}
 ark_offchain_address=${offchain}
 EOF
 
   echo "[${name}] fingerprint: ${fp}"
+  echo "[${name}] rgb identity db: ${rgb_db}"
   echo "[${name}] taproot[0]: ${taproot}"
   echo "[${name}] ARK board: ${board}"
 }

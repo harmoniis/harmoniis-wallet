@@ -20,26 +20,21 @@ const META_KEY_MODEL_VERSION: &str = "key_model_version";
 
 pub const MAX_PGP_KEYS: u32 = 1_000;
 const MASTER_DB_FILENAME: &str = "master.db";
-const RGB_DB_COMPAT_FILENAME: &str = "rgb.db";
-const WALLET_DB_COMPAT_FILENAME: &str = "wallet.db";
-const IDENTITY_DB_DIR: &str = "identities";
+const RGB_DB_FILENAME: &str = "rgb.db";
+const WALLET_DB_FILENAME: &str = "wallet.db";
+const RGB_SHARD_DIR: &str = "identities";
 
 /// SQLite-backed Harmoniis wallet.
 pub struct RgbWallet {
     master_conn: Connection,
-    identity_state: IdentityState,
-}
-
-enum IdentityState {
-    Disk { base_dir: PathBuf },
-    Memory { conn: Connection },
+    rgb_conn: Connection,
 }
 
 struct WalletDiskPaths {
     base_dir: PathBuf,
     master_path: PathBuf,
-    rgb_compat_path: PathBuf,
-    wallet_compat_path: PathBuf,
+    rgb_path: PathBuf,
+    wallet_migration_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,8 +92,8 @@ impl RgbWallet {
             .unwrap_or_else(|| PathBuf::from("."));
         let master_path = if file_name.eq_ignore_ascii_case(MASTER_DB_FILENAME) {
             normalized.clone()
-        } else if file_name.eq_ignore_ascii_case(RGB_DB_COMPAT_FILENAME)
-            || file_name.eq_ignore_ascii_case(WALLET_DB_COMPAT_FILENAME)
+        } else if file_name.eq_ignore_ascii_case(RGB_DB_FILENAME)
+            || file_name.eq_ignore_ascii_case(WALLET_DB_FILENAME)
         {
             base_dir.join(MASTER_DB_FILENAME)
         } else {
@@ -107,8 +102,8 @@ impl RgbWallet {
         Ok(WalletDiskPaths {
             base_dir: base_dir.clone(),
             master_path,
-            rgb_compat_path: base_dir.join(RGB_DB_COMPAT_FILENAME),
-            wallet_compat_path: base_dir.join(WALLET_DB_COMPAT_FILENAME),
+            rgb_path: base_dir.join(RGB_DB_FILENAME),
+            wallet_migration_path: base_dir.join(WALLET_DB_FILENAME),
         })
     }
 
@@ -229,50 +224,11 @@ impl RgbWallet {
         Ok(())
     }
 
-    fn identity_db_path(base_dir: &Path, key_index: u32) -> PathBuf {
-        base_dir
-            .join(IDENTITY_DB_DIR)
-            .join(format!("identity-{key_index}.db"))
-    }
-
-    fn active_pgp_key_index_from_conn(conn: &Connection) -> Result<u32> {
-        let mut stmt = conn.prepare(
-            "SELECT key_index
-             FROM pgp_identities
-             WHERE is_active = 1
-             ORDER BY key_index ASC
-             LIMIT 1",
-        )?;
-        let mut rows = stmt.query([])?;
-        let row = rows
-            .next()?
-            .ok_or_else(|| Error::Other(anyhow::anyhow!("no active PGP identity")))?;
-        let key_index_i: i64 = row.get(0)?;
-        u32::try_from(key_index_i)
-            .map_err(|_| Error::Other(anyhow::anyhow!("invalid active PGP key index")))
-    }
-
-    fn active_pgp_key_index(&self) -> Result<u32> {
-        Self::active_pgp_key_index_from_conn(&self.master_conn)
-    }
-
     fn with_identity_conn<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
-        match &self.identity_state {
-            IdentityState::Memory { conn } => f(conn),
-            IdentityState::Disk { base_dir } => {
-                std::fs::create_dir_all(base_dir.join(IDENTITY_DB_DIR)).map_err(|e| {
-                    Error::Other(anyhow::anyhow!("cannot create identity db directory: {e}"))
-                })?;
-                let key_index = self.active_pgp_key_index()?;
-                let identity_path = Self::identity_db_path(base_dir, key_index);
-                let conn = Connection::open(identity_path)?;
-                Self::init_identity_schema(&conn)?;
-                f(&conn)
-            }
-        }
+        f(&self.rgb_conn)
     }
 
     fn refresh_slot_registry(&self) -> Result<()> {
@@ -314,29 +270,28 @@ impl RgbWallet {
             let label: String = row.get(2)?;
             Ok((key_index, public_key_hex, label))
         })?;
-        let base_dir = match &self.identity_state {
-            IdentityState::Disk { base_dir } => Some(base_dir.clone()),
-            IdentityState::Memory { .. } => None,
-        };
         for row in rows {
             let (key_index, public_key_hex, label) = row?;
-            let rel_db = base_dir
-                .as_ref()
-                .map(|_| format!("{}/identity-{}.db", IDENTITY_DB_DIR, key_index));
             self.master_conn.execute(
                 "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
                  VALUES ('pgp', ?1, ?2, ?3, ?4, COALESCE((SELECT created_at FROM wallet_slots WHERE family='pgp' AND slot_index=?1), ?5), ?5)",
-                params![i64::from(key_index), public_key_hex, rel_db, label, now],
+                params![
+                    i64::from(key_index),
+                    public_key_hex,
+                    Some(RGB_DB_FILENAME.to_string()),
+                    label,
+                    now
+                ],
             )?;
         }
         Ok(())
     }
 
-    fn import_compat_data(paths: &WalletDiskPaths) -> Result<()> {
-        let source_path = if paths.rgb_compat_path.exists() {
-            paths.rgb_compat_path.clone()
-        } else if paths.wallet_compat_path.exists() {
-            paths.wallet_compat_path.clone()
+    fn import_previous_layout(paths: &WalletDiskPaths) -> Result<()> {
+        let source_path = if paths.rgb_path.exists() {
+            paths.rgb_path.clone()
+        } else if paths.wallet_migration_path.exists() {
+            paths.wallet_migration_path.clone()
         } else {
             return Err(Error::NotFound("no wallet data source found".to_string()));
         };
@@ -397,105 +352,37 @@ impl RgbWallet {
         }
         ensure_root_and_identity_materialized(&master_conn)?;
         ensure_default_pgp_identity(&master_conn)?;
-        let key_index = Self::active_pgp_key_index_from_conn(&master_conn)?;
         drop(master_conn);
 
-        std::fs::create_dir_all(paths.base_dir.join(IDENTITY_DB_DIR)).map_err(|e| {
-            Error::Other(anyhow::anyhow!("cannot create identity db directory: {e}"))
-        })?;
-        let identity_path = Self::identity_db_path(&paths.base_dir, key_index);
-        let identity_conn = Connection::open(identity_path)?;
-        Self::init_identity_schema(&identity_conn)?;
-        if table_exists(&source_conn, "contracts")? {
-            let mut stmt = source_conn.prepare(
-                "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
-                        amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
-                        reference_post, delivery_deadline, role, delivered_text,
-                        certificate_id, created_at, updated_at
-                 FROM contracts",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(Contract {
-                    contract_id: row.get(0)?,
-                    contract_type: ContractType::parse(&row.get::<_, String>(1)?)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                    status: ContractStatus::parse(&row.get::<_, String>(2)?)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                    witness_secret: row.get(3)?,
-                    witness_proof: row.get(4)?,
-                    amount_units: row.get::<_, i64>(5)? as u64,
-                    work_spec: row.get(6)?,
-                    buyer_fingerprint: row.get(7)?,
-                    seller_fingerprint: row.get(8)?,
-                    reference_post: row.get(9)?,
-                    delivery_deadline: row.get(10)?,
-                    role: Role::parse(&row.get::<_, String>(11)?)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                    delivered_text: row.get(12)?,
-                    certificate_id: row.get(13)?,
-                    created_at: row.get(14)?,
-                    updated_at: row.get(15)?,
-                })
-            })?;
-            for row in rows {
-                let c = row?;
-                identity_conn.execute(
-                    "INSERT OR REPLACE INTO contracts (
-                        contract_id, contract_type, status, witness_secret, witness_proof,
-                        amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
-                        reference_post, delivery_deadline, role, delivered_text,
-                        certificate_id, created_at, updated_at
-                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-                    params![
-                        c.contract_id,
-                        c.contract_type.as_str(),
-                        c.status.as_str(),
-                        c.witness_secret,
-                        c.witness_proof,
-                        c.amount_units as i64,
-                        c.work_spec,
-                        c.buyer_fingerprint,
-                        c.seller_fingerprint,
-                        c.reference_post,
-                        c.delivery_deadline,
-                        c.role.as_str(),
-                        c.delivered_text,
-                        c.certificate_id,
-                        c.created_at,
-                        c.updated_at,
-                    ],
-                )?;
-            }
+        let rgb_conn = Connection::open(&paths.rgb_path)?;
+        Self::init_identity_schema(&rgb_conn)?;
+        if !same_path(&source_path, &paths.rgb_path) {
+            migrate_rgb_state(&source_conn, &rgb_conn)?;
         }
-        if table_exists(&source_conn, "certificates")? {
-            let mut stmt = source_conn.prepare(
-                "SELECT certificate_id, contract_id, witness_secret, witness_proof, created_at
-                 FROM certificates",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(Certificate {
-                    certificate_id: row.get(0)?,
-                    contract_id: row.get(1)?,
-                    witness_secret: row.get(2)?,
-                    witness_proof: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })?;
-            for row in rows {
-                let cert = row?;
-                identity_conn.execute(
-                    "INSERT OR REPLACE INTO certificates (
-                        certificate_id, contract_id, witness_secret, witness_proof, created_at
-                    ) VALUES (?1,?2,?3,?4,?5)",
-                    params![
-                        cert.certificate_id,
-                        cert.contract_id,
-                        cert.witness_secret,
-                        cert.witness_proof,
-                        cert.created_at,
-                    ],
-                )?;
+        Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
+        Ok(())
+    }
+
+    fn merge_sharded_rgb_data(base_dir: &Path, rgb_conn: &Connection) -> Result<()> {
+        let shard_dir = base_dir.join(RGB_SHARD_DIR);
+        if !shard_dir.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(&shard_dir)
+            .map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard dir: {e}")))?
+        {
+            let entry =
+                entry.map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard entry: {e}")))?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("identity-") || !name.ends_with(".db") {
+                continue;
             }
+            let shard_conn = Connection::open(&path)?;
+            migrate_identity_schema_if_present(&shard_conn)?;
+            migrate_rgb_state(&shard_conn, rgb_conn)?;
         }
         Ok(())
     }
@@ -504,12 +391,10 @@ impl RgbWallet {
         let paths = Self::resolve_disk_paths(path)?;
         std::fs::create_dir_all(&paths.base_dir)
             .map_err(|e| Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}")))?;
-        std::fs::create_dir_all(paths.base_dir.join(IDENTITY_DB_DIR))
-            .map_err(|e| Error::Other(anyhow::anyhow!("cannot create identity dir: {e}")))?;
 
         if !paths.master_path.exists() {
-            if paths.rgb_compat_path.exists() || paths.wallet_compat_path.exists() {
-                Self::import_compat_data(&paths)?;
+            if paths.rgb_path.exists() || paths.wallet_migration_path.exists() {
+                Self::import_previous_layout(&paths)?;
             } else if !allow_create {
                 return Err(Error::NotFound(format!(
                     "master wallet database not found at {}",
@@ -520,13 +405,13 @@ impl RgbWallet {
 
         let master_conn = Connection::open(&paths.master_path)?;
         Self::init_master_schema(&master_conn)?;
+        let rgb_conn = Connection::open(&paths.rgb_path)?;
+        Self::init_identity_schema(&rgb_conn)?;
+        Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
         let wallet = Self {
             master_conn,
-            identity_state: IdentityState::Disk {
-                base_dir: paths.base_dir.clone(),
-            },
+            rgb_conn,
         };
-        wallet.with_identity_conn(|_| Ok(()))?;
         wallet.refresh_slot_registry()?;
 
         if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
@@ -552,13 +437,11 @@ impl RgbWallet {
     pub fn open_memory() -> Result<Self> {
         let master_conn = Connection::open_in_memory()?;
         Self::init_master_schema(&master_conn)?;
-        let identity_conn = Connection::open_in_memory()?;
-        Self::init_identity_schema(&identity_conn)?;
+        let rgb_conn = Connection::open_in_memory()?;
+        Self::init_identity_schema(&rgb_conn)?;
         let wallet = Self {
             master_conn,
-            identity_state: IdentityState::Memory {
-                conn: identity_conn,
-            },
+            rgb_conn,
         };
         if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
             wallet.set_wallet_label("memory-wallet")?;
@@ -885,7 +768,6 @@ impl RgbWallet {
             params![canonical],
         )?;
         tx.commit()?;
-        self.with_identity_conn(|_| Ok(()))?;
         self.refresh_slot_registry()?;
         Ok(())
     }
@@ -1266,6 +1148,183 @@ impl RgbWallet {
         self.refresh_slot_registry()?;
         Ok(())
     }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => a == b,
+    }
+}
+
+fn migrate_rgb_state(source_conn: &Connection, target_conn: &Connection) -> Result<()> {
+    if table_exists(source_conn, "contracts")? {
+        let mut stmt = source_conn.prepare(
+            "SELECT contract_id, contract_type, status, witness_secret, witness_proof,
+                    amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
+                    reference_post, delivery_deadline, role, delivered_text,
+                    certificate_id, created_at, updated_at
+             FROM contracts",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Contract {
+                contract_id: row.get(0)?,
+                contract_type: ContractType::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                status: ContractStatus::parse(&row.get::<_, String>(2)?)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                witness_secret: row.get(3)?,
+                witness_proof: row.get(4)?,
+                amount_units: row.get::<_, i64>(5)? as u64,
+                work_spec: row.get(6)?,
+                buyer_fingerprint: row.get(7)?,
+                seller_fingerprint: row.get(8)?,
+                reference_post: row.get(9)?,
+                delivery_deadline: row.get(10)?,
+                role: Role::parse(&row.get::<_, String>(11)?)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                delivered_text: row.get(12)?,
+                certificate_id: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+            })
+        })?;
+        for row in rows {
+            let c = row?;
+            target_conn.execute(
+                "INSERT OR REPLACE INTO contracts (
+                    contract_id, contract_type, status, witness_secret, witness_proof,
+                    amount_units, work_spec, buyer_fingerprint, seller_fingerprint,
+                    reference_post, delivery_deadline, role, delivered_text,
+                    certificate_id, created_at, updated_at
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                params![
+                    c.contract_id,
+                    c.contract_type.as_str(),
+                    c.status.as_str(),
+                    c.witness_secret,
+                    c.witness_proof,
+                    c.amount_units as i64,
+                    c.work_spec,
+                    c.buyer_fingerprint,
+                    c.seller_fingerprint,
+                    c.reference_post,
+                    c.delivery_deadline,
+                    c.role.as_str(),
+                    c.delivered_text,
+                    c.certificate_id,
+                    c.created_at,
+                    c.updated_at,
+                ],
+            )?;
+        }
+    }
+
+    if table_exists(source_conn, "certificates")? {
+        let mut stmt = source_conn.prepare(
+            "SELECT certificate_id, contract_id, witness_secret, witness_proof, created_at
+             FROM certificates",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Certificate {
+                certificate_id: row.get(0)?,
+                contract_id: row.get(1)?,
+                witness_secret: row.get(2)?,
+                witness_proof: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        for row in rows {
+            let cert = row?;
+            target_conn.execute(
+                "INSERT OR REPLACE INTO certificates (
+                    certificate_id, contract_id, witness_secret, witness_proof, created_at
+                ) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    cert.certificate_id,
+                    cert.contract_id,
+                    cert.witness_secret,
+                    cert.witness_proof,
+                    cert.created_at,
+                ],
+            )?;
+        }
+    }
+
+    if table_exists(source_conn, "timeline_posts")? {
+        let mut stmt = source_conn.prepare(
+            "SELECT post_id, created_at, updated_at, metadata_json FROM timeline_posts",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (post_id, created_at, updated_at, metadata_json) = row?;
+            target_conn.execute(
+                "INSERT OR REPLACE INTO timeline_posts (post_id, created_at, updated_at, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![post_id, created_at, updated_at, metadata_json],
+            )?;
+        }
+    }
+
+    if table_exists(source_conn, "timeline_comments")? {
+        let mut stmt = source_conn.prepare(
+            "SELECT comment_id, post_id, created_at, updated_at, metadata_json FROM timeline_comments",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (comment_id, post_id, created_at, updated_at, metadata_json) = row?;
+            target_conn.execute(
+                "INSERT OR REPLACE INTO timeline_comments (comment_id, post_id, created_at, updated_at, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![comment_id, post_id, created_at, updated_at, metadata_json],
+            )?;
+        }
+    }
+
+    if table_exists(source_conn, "timeline_bids")? {
+        let mut stmt = source_conn.prepare(
+            "SELECT bid_post_id, contract_id, service_post_id, created_at, metadata_json FROM timeline_bids",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (bid_post_id, contract_id, service_post_id, created_at, metadata_json) = row?;
+            target_conn.execute(
+                "INSERT OR REPLACE INTO timeline_bids (bid_post_id, contract_id, service_post_id, created_at, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    bid_post_id,
+                    contract_id,
+                    service_post_id,
+                    created_at,
+                    metadata_json
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn migrate_identity_schema(conn: &Connection) -> Result<()> {

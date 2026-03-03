@@ -239,6 +239,26 @@ fn list_contracts_returns_all() {
 }
 
 #[test]
+fn rgb_state_is_not_partitioned_by_active_pgp_identity() {
+    let wallet = RgbWallet::open_memory().unwrap();
+    wallet.store_contract(&make_contract("CTR_shared_1")).unwrap();
+
+    wallet.create_pgp_identity("ops-signing").unwrap();
+    wallet.set_active_pgp_identity("ops-signing").unwrap();
+    assert!(
+        wallet.get_contract("CTR_shared_1").unwrap().is_some(),
+        "contract state must remain visible after switching active PGP key"
+    );
+
+    wallet.store_contract(&make_contract("CTR_shared_2")).unwrap();
+    wallet.set_active_pgp_identity("memory-wallet").unwrap();
+    let contracts = wallet.list_contracts().unwrap();
+    assert_eq!(contracts.len(), 2);
+    assert!(contracts.iter().any(|c| c.contract_id == "CTR_shared_1"));
+    assert!(contracts.iter().any(|c| c.contract_id == "CTR_shared_2"));
+}
+
+#[test]
 fn get_nonexistent_contract_returns_none() {
     let wallet = RgbWallet::open_memory().unwrap();
     let result = wallet.get_contract("CTR_does_not_exist").unwrap();

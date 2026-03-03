@@ -87,8 +87,8 @@ if [[ ! -f "${OUT_DIR}/source/bitcoin.db" || ! -f "${OUT_DIR}/restored/bitcoin.d
   exit 1
 fi
 
-if [[ ! -d "${OUT_DIR}/source/identities" || ! -d "${OUT_DIR}/restored/identities" ]]; then
-  echo "Identity DB directory missing after snapshot generation" >&2
+if [[ ! -f "${OUT_DIR}/source/rgb.db" || ! -f "${OUT_DIR}/restored/rgb.db" ]]; then
+  echo "RGB DB missing after snapshot generation" >&2
   exit 1
 fi
 
@@ -96,7 +96,7 @@ cat > "${OUT_DIR}/RESULT.txt" <<EOF
 status=ok
 network=${NETWORK}
 verified=mnemonic_restore_full_parity
-checks=key_fingerprint,pgp_keys,taproot0,segwit0,ark_boarding,ark_offchain,webcash_db,bitcoin_db,identity_db_dir
+checks=key_fingerprint,pgp_keys,taproot0,segwit0,ark_boarding,ark_offchain,webcash_db,bitcoin_db,rgb_db
 source_wallet=${SOURCE_DB}
 restored_wallet=${RESTORED_DB}
 EOF
