@@ -24,6 +24,7 @@ use bdk_wallet::bitcoin::{
     Address, Amount, FeeRate, Network, OutPoint, Psbt, Transaction, Txid,
 };
 use bdk_wallet::{KeychainKind, SignOptions, TxOrdering, Wallet as BdkWallet};
+use rand::SeedableRng;
 use rusqlite::params;
 
 use crate::bitcoin::DeterministicBitcoinWallet;
@@ -830,7 +831,7 @@ impl ArkPaymentWallet {
 
     /// Settle pending VTXOs (confirm boarding deposits on-chain).
     pub async fn settle(&self) -> Result<Option<String>> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::StdRng::from_entropy();
         let maybe_tx = self
             .client
             .settle(&mut rng)
