@@ -62,9 +62,14 @@ This allows reconstruction from only the master mnemonic (or entropy hex) plus s
 Database model:
 
 - `master.db` stores root material metadata, slot registry, and PGP identity registry.
-- `rgb.db` stores contract/certificate/local timeline state.
+- `rgb.db` stores wallet-level contract/certificate/local timeline state.
 - `webcash.db` stores Webcash balance state.
 - `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
+
+Important:
+
+- RGB contract state is wallet-scoped (`rgb.db`), not partitioned by active PGP key label.
+- PGP identities are signing keys derived from master key slots; switching active PGP label does not switch to a different RGB state database.
 
 ## Install
 
