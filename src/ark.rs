@@ -693,17 +693,50 @@ impl ArkPaymentWallet {
 
     /// Query offchain balance from the ASP.
     pub async fn offchain_balance(&self) -> Result<ArkBalance> {
-        let bal = self
+        // Source of truth is the wallet VTXO set visible via ASP.
+        // Some deployments can report stale aggregate balances while list_vtxos
+        // is fresh; use list_vtxos first and only fall back to aggregate API.
+        match self.vtxo_balance_from_list().await {
+            Ok(bal) => Ok(bal),
+            Err(_list_err) => {
+                let bal = self
+                    .client
+                    .offchain_balance()
+                    .await
+                    .map_err(|e| Error::Other(anyhow::anyhow!("balance: {e}")))?;
+                let confirmed = bal.confirmed().to_sat();
+                let pre_confirmed = bal.pre_confirmed().to_sat();
+                Ok(ArkBalance {
+                    confirmed_sats: confirmed,
+                    pre_confirmed_sats: pre_confirmed,
+                    total_sats: confirmed.saturating_add(pre_confirmed),
+                })
+            }
+        }
+    }
+
+    async fn vtxo_balance_from_list(&self) -> Result<ArkBalance> {
+        let (vtxo_list, _) = self
             .client
-            .offchain_balance()
+            .list_vtxos()
             .await
-            .map_err(|e| Error::Other(anyhow::anyhow!("balance: {e}")))?;
-        let confirmed = bal.confirmed().to_sat();
-        let pre_confirmed = bal.pre_confirmed().to_sat();
+            .map_err(|e| Error::Other(anyhow::anyhow!("list_vtxos: {e}")))?;
+
+        let mut confirmed_sats = 0u64;
+        let mut pre_confirmed_sats = 0u64;
+        for vtxo in vtxo_list.all_unspent() {
+            let sats = vtxo.amount.to_sat();
+            if vtxo.is_preconfirmed {
+                pre_confirmed_sats = pre_confirmed_sats.saturating_add(sats);
+            } else {
+                confirmed_sats = confirmed_sats.saturating_add(sats);
+            }
+        }
+
         Ok(ArkBalance {
-            confirmed_sats: confirmed,
-            pre_confirmed_sats: pre_confirmed,
-            total_sats: confirmed.saturating_add(pre_confirmed),
+            confirmed_sats,
+            pre_confirmed_sats,
+            total_sats: confirmed_sats.saturating_add(pre_confirmed_sats),
         })
     }
 

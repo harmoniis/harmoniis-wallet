@@ -1527,6 +1527,7 @@ async fn main() -> anyhow::Result<()> {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let esplora_url = DeterministicBitcoinWallet::default_esplora_url(network);
             println!("Connecting to ARK ASP at {asp_url} ...");
             let ark = ArkPaymentWallet::connect(
                 &btc,
@@ -1536,22 +1537,42 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             let boarding = ark.get_boarding_address()?;
             let offchain = ark.get_offchain_address()?;
+            let onchain = ark.get_onchain_address()?;
+            let onchain_sync = btc.sync(esplora_url, 20, 4);
             let balance = ark.offchain_balance().await?;
-            println!("ARK offchain wallet");
+            println!("ARK wallet");
             println!("Network:        {network}");
             println!("ASP:            {asp_url}");
             println!("Boarding addr:  {boarding}");
             println!("Offchain addr:  {offchain}");
+            println!("Onchain addr:   {onchain}");
+            match onchain_sync {
+                Ok(sync) => {
+                    println!("Onchain confirmed:    {} sats", sync.confirmed_sats);
+                    println!(
+                        "Onchain trusted pend: {} sats",
+                        sync.trusted_pending_sats
+                    );
+                    println!(
+                        "Onchain untrusted:    {} sats",
+                        sync.untrusted_pending_sats
+                    );
+                    println!("Onchain total:        {} sats", sync.total_sats);
+                }
+                Err(e) => {
+                    println!("Onchain balance error: {e}");
+                }
+            }
             println!(
-                "Confirmed:      {} BTC",
+                "Offchain confirmed:   {} BTC",
                 format_btc_from_sats(balance.confirmed_sats)
             );
             println!(
-                "Pre-confirmed:  {} BTC",
+                "Offchain pre-conf:    {} BTC",
                 format_btc_from_sats(balance.pre_confirmed_sats)
             );
             println!(
-                "Total:          {} BTC",
+                "Offchain total:       {} BTC",
                 format_btc_from_sats(balance.total_sats)
             );
         }
@@ -1602,23 +1623,42 @@ async fn main() -> anyhow::Result<()> {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let esplora_url = DeterministicBitcoinWallet::default_esplora_url(network);
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
                 SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
             )
             .await?;
+            let onchain_sync = btc.sync(esplora_url, 20, 4);
             let balance = ark.offchain_balance().await?;
+            match onchain_sync {
+                Ok(sync) => {
+                    println!("Onchain confirmed:    {} sats", sync.confirmed_sats);
+                    println!(
+                        "Onchain trusted pend: {} sats",
+                        sync.trusted_pending_sats
+                    );
+                    println!(
+                        "Onchain untrusted:    {} sats",
+                        sync.untrusted_pending_sats
+                    );
+                    println!("Onchain total:        {} sats", sync.total_sats);
+                }
+                Err(e) => {
+                    println!("Onchain balance error: {e}");
+                }
+            }
             println!(
-                "Confirmed:      {} BTC",
+                "Offchain confirmed:   {} BTC",
                 format_btc_from_sats(balance.confirmed_sats)
             );
             println!(
-                "Pre-confirmed:  {} BTC",
+                "Offchain pre-conf:    {} BTC",
                 format_btc_from_sats(balance.pre_confirmed_sats)
             );
             println!(
-                "Total:          {} BTC",
+                "Offchain total:       {} BTC",
                 format_btc_from_sats(balance.total_sats)
             );
         }
