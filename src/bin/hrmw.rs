@@ -346,9 +346,9 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// Start boarding: show ARK boarding address (send on-chain BTC here)
-    #[command(visible_alias = "board", visible_alias = "boarding")]
-    BoardingStart {
+    /// Deposit: show ARK boarding address (send on-chain BTC here)
+    #[command(visible_alias = "board", visible_alias = "boarding-start")]
+    Deposit {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
@@ -383,9 +383,9 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// End boarding: finalize boarded on-chain BTC into ARK offchain VTXOs
-    #[command(visible_alias = "settle-boarding", visible_alias = "boarding-settle")]
-    BoardingEnd {
+    /// Boarding: finalize deposited on-chain BTC into ARK offchain VTXOs
+    #[command(visible_alias = "settle-boarding", visible_alias = "boarding-settle", visible_alias = "boarding-end")]
+    Boarding {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
@@ -1599,7 +1599,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::BoardingStart { network, asp_url })) => {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Deposit { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
@@ -1685,7 +1685,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::BoardingEnd { network, asp_url })) => {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Boarding { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
@@ -1695,10 +1695,10 @@ async fn main() -> anyhow::Result<()> {
                 SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
             )
             .await?;
-            println!("Boarding end: confirming boarded deposits into ARK offchain...");
+            println!("Boarding: confirming deposited on-chain funds into ARK offchain...");
             match ark.settle().await? {
                 Some(txid) => println!("Settlement txid: {txid}"),
-                None => println!("Nothing to boarding-end."),
+                None => println!("Nothing to board."),
             }
         }
 

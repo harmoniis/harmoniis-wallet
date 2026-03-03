@@ -201,8 +201,8 @@ ARK helper commands (Arkade ASP):
 
 ```bash
 hrmw bitcoin ark info
-hrmw bitcoin ark boarding-start
-hrmw bitcoin ark boarding-end
+hrmw bitcoin ark deposit
+hrmw bitcoin ark boarding
 hrmw bitcoin ark balance
 hrmw bitcoin ark send <ark_address> <amount_sats>
 hrmw bitcoin ark settle <amount_sats> [--index 0]
