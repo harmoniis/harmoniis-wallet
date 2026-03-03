@@ -1,10 +1,11 @@
 use anyhow::Context;
 use bdk_esplora::{esplora_client, EsploraExt};
 use bdk_wallet::{
-    bitcoin::{bip32::Xpriv, Network},
+    bitcoin::{Address, Amount, FeeRate, Network, Txid, bip32::Xpriv},
     template::{Bip84, Bip86},
-    KeychainKind, Wallet,
+    KeychainKind, SignOptions, TxOrdering, Wallet,
 };
+use std::str::FromStr;
 
 use crate::{
     error::{Error, Result},
@@ -170,6 +171,84 @@ impl DeterministicBitcoinWallet {
             immature_sats: taproot.immature_sats.saturating_add(segwit.immature_sats),
             total_sats: taproot.total_sats.saturating_add(segwit.total_sats),
         })
+    }
+
+    /// Send sats from this deterministic taproot wallet to an on-chain address.
+    ///
+    /// This is used to move funds from the deterministic on-chain balance into
+    /// an ARK boarding address before settling into offchain VTXOs.
+    pub fn send_taproot_onchain(
+        &self,
+        esplora_url: &str,
+        destination: &str,
+        amount_sats: u64,
+        fee_rate_sat_vb: u64,
+        stop_gap: usize,
+        parallel_requests: usize,
+    ) -> Result<Txid> {
+        if amount_sats == 0 {
+            return Err(Error::Other(anyhow::anyhow!("amount_sats must be > 0")));
+        }
+
+        let destination = Address::from_str(destination)
+            .context("invalid destination address")
+            .map_err(Error::Other)?
+            .require_network(self.network)
+            .map_err(|e| {
+                Error::Other(anyhow::anyhow!(
+                    "destination address does not match {}: {e}",
+                    self.network
+                ))
+            })?;
+
+        let fee_rate = FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or_else(|| {
+            Error::Other(anyhow::anyhow!(
+                "invalid fee rate (sat/vB={fee_rate_sat_vb})"
+            ))
+        })?;
+
+        let mut wallet = self.build_wallet(BitcoinAddressKind::Taproot)?;
+        let client = esplora_client::Builder::new(esplora_url).build_blocking();
+
+        let request = wallet.start_full_scan().build();
+        let response = client
+            .full_scan(request, stop_gap.max(1), parallel_requests.max(1))
+            .map_err(|e| Error::Other(anyhow::anyhow!("esplora full scan failed: {e}")))?;
+        wallet
+            .apply_update(response)
+            .map_err(|e| Error::Other(anyhow::anyhow!("failed to apply wallet update: {e}")))?;
+
+        let mut tx = wallet.build_tx();
+        tx.ordering(TxOrdering::Untouched);
+        tx.add_recipient(destination.script_pubkey(), Amount::from_sat(amount_sats));
+        tx.fee_rate(fee_rate);
+        let mut psbt = tx
+            .finish()
+            .map_err(|e| Error::Other(anyhow::anyhow!("build tx failed: {e}")))?;
+
+        let finalized = wallet
+            .sign(
+                &mut psbt,
+                SignOptions {
+                    trust_witness_utxo: true,
+                    ..SignOptions::default()
+                },
+            )
+            .map_err(|e| Error::Other(anyhow::anyhow!("sign tx failed: {e}")))?;
+        if !finalized {
+            return Err(Error::Other(anyhow::anyhow!(
+                "transaction did not finalize"
+            )));
+        }
+
+        let tx = psbt
+            .extract_tx()
+            .map_err(|e| Error::Other(anyhow::anyhow!("extract tx failed: {e}")))?;
+        let txid = tx.compute_txid();
+        client
+            .broadcast(&tx)
+            .map_err(|e| Error::Other(anyhow::anyhow!("broadcast failed: {e}")))?;
+        Ok(txid)
     }
 
     fn scan_wallet(

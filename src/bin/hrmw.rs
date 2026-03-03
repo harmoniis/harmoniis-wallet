@@ -308,6 +308,28 @@ enum BitcoinCmd {
         #[arg(long, default_value_t = 4)]
         parallel_requests: usize,
     },
+    /// Send sats on-chain from deterministic taproot wallet
+    Send {
+        /// Destination on-chain Bitcoin address
+        address: String,
+        /// Amount in satoshis
+        amount: u64,
+        /// Bitcoin network
+        #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
+        network: BitcoinNetworkArg,
+        /// Esplora base URL (defaults per network)
+        #[arg(long)]
+        esplora: Option<String>,
+        /// Target fee rate in sat/vB
+        #[arg(long, default_value_t = 2)]
+        fee_rate_sat_vb: u64,
+        /// Gap limit used for full scan
+        #[arg(long, default_value_t = 20)]
+        stop_gap: usize,
+        /// Max parallel HTTP requests used during scan
+        #[arg(long, default_value_t = 4)]
+        parallel_requests: usize,
+    },
     /// ARK protocol offchain Bitcoin operations (via Arkade ASP)
     #[command(subcommand)]
     Ark(BitcoinArkCmd),
@@ -1470,6 +1492,34 @@ async fn main() -> anyhow::Result<()> {
                 snapshot.segwit_receive_address, snapshot.segwit_receive_index
             );
             println!("UTXOs(total):  {}", snapshot.unspent_count);
+        }
+
+        Cmd::Bitcoin(BitcoinCmd::Send {
+            address,
+            amount,
+            network,
+            esplora,
+            fee_rate_sat_vb,
+            stop_gap,
+            parallel_requests,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let network = Network::from(network);
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let esplora_url = resolved_esplora_url(network, esplora);
+            let txid = btc.send_taproot_onchain(
+                &esplora_url,
+                &address,
+                amount,
+                fee_rate_sat_vb,
+                stop_gap,
+                parallel_requests,
+            )?;
+            println!("Sent {} sats on-chain", amount);
+            println!("Destination: {address}");
+            println!("Network:     {network}");
+            println!("Esplora:     {esplora_url}");
+            println!("TXID:        {txid}");
         }
 
         // ── ark ───────────────────────────────────────────────────────────────
