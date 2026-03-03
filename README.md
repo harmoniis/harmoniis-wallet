@@ -201,10 +201,13 @@ ARK helper commands (Arkade ASP):
 
 ```bash
 hrmw bitcoin ark info
-hrmw bitcoin ark board
-hrmw bitcoin ark settle
+hrmw bitcoin ark boarding
+hrmw bitcoin ark boarding-settle
 hrmw bitcoin ark balance
 hrmw bitcoin ark send <ark_address> <amount_sats>
+hrmw bitcoin ark settle <amount_sats> [--index 0]
+hrmw bitcoin ark settle-address <btc_address> <amount_sats>
+hrmw bitcoin ark verify-proof 'ark:<vtxo_txid>:<amount_sats>'
 ```
 
 ## Deterministic Bitcoin Wallet (Taproot + SegWit Fallback)

@@ -16,7 +16,7 @@ use anyhow::Context;
 use bdk_wallet::bitcoin::Network;
 use clap::{Parser, Subcommand, ValueEnum};
 use harmoniis_wallet::{
-    ark::{ArkPaymentWallet, SqliteArkDb},
+    ark::{parse_ark_proof, ArkPaymentWallet, SqliteArkDb},
     bitcoin::{BitcoinAddressKind, DeterministicBitcoinWallet},
     client::{
         arbitration::{build_witness_commitment, decrypt_witness_secret_envelope, BuyRequest},
@@ -337,7 +337,7 @@ enum BitcoinCmd {
 
 #[derive(Subcommand)]
 enum BitcoinArkCmd {
-    /// Show ARK offchain balance, boarding address, and offchain address
+    /// Show full ARK + on-chain wallet status (addresses and balances)
     Info {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
@@ -346,8 +346,9 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// Show boarding address (on-chain deposit into ARK)
-    Board {
+    /// Show ARK boarding address (send on-chain BTC here before boarding-settle)
+    #[command(visible_alias = "board")]
+    Boarding {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
@@ -382,8 +383,9 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// Settle pending VTXOs (confirm boarding deposits on-chain)
-    Settle {
+    /// Boarding settle: finalize boarded on-chain BTC into ARK offchain VTXOs
+    #[command(visible_alias = "settle-boarding")]
+    BoardingSettle {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
@@ -404,8 +406,9 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// ARK send-onchain: move ARK funds to an on-chain Bitcoin address
-    SendOnchain {
+    /// ARK settle-address: move ARK funds to an on-chain Bitcoin address
+    #[command(visible_alias = "send-onchain")]
+    SettleAddress {
         /// Destination on-chain Bitcoin address (must match selected network)
         address: String,
         /// Amount in satoshis
@@ -417,13 +420,28 @@ enum BitcoinArkCmd {
         #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
         asp_url: String,
     },
-    /// ARK send-onchain to this wallet's deterministic taproot receive address
-    SendOnchainSelf {
+    /// Settle ARK offchain to this wallet's deterministic taproot on-chain address
+    #[command(visible_alias = "send-onchain-self")]
+    Settle {
         /// Amount in satoshis
         amount: u64,
         /// Taproot external address index
         #[arg(long, default_value_t = 0)]
         index: u32,
+        /// Bitcoin network
+        #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
+        network: BitcoinNetworkArg,
+        /// Arkade ASP URL
+        #[arg(long, default_value = harmoniis_wallet::ark::DEFAULT_ASP_URL)]
+        asp_url: String,
+    },
+    /// Verify an ARK proof string against this wallet's offchain VTXO set
+    VerifyProof {
+        /// ARK proof: ark:<vtxo_txid>:<amount_sats>
+        proof: String,
+        /// Optional minimum sats required for verification
+        #[arg(long)]
+        min_amount_sats: Option<u64>,
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
         network: BitcoinNetworkArg,
@@ -1541,6 +1559,7 @@ async fn main() -> anyhow::Result<()> {
             let onchain_sync = btc.sync(esplora_url, 20, 4);
             let balance = ark.offchain_balance().await?;
             println!("ARK wallet");
+            println!("Status:         ok");
             println!("Network:        {network}");
             println!("ASP:            {asp_url}");
             println!("Boarding addr:  {boarding}");
@@ -1564,20 +1583,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             println!(
-                "Offchain confirmed:   {} BTC",
+                "Offchain confirmed:   {} sats ({})",
+                balance.confirmed_sats,
                 format_btc_from_sats(balance.confirmed_sats)
             );
             println!(
-                "Offchain pre-conf:    {} BTC",
+                "Offchain pre-conf:    {} sats ({})",
+                balance.pre_confirmed_sats,
                 format_btc_from_sats(balance.pre_confirmed_sats)
             );
             println!(
-                "Offchain total:       {} BTC",
+                "Offchain total:       {} sats ({})",
+                balance.total_sats,
                 format_btc_from_sats(balance.total_sats)
             );
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Board { network, asp_url })) => {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Boarding { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
@@ -1663,7 +1685,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Settle { network, asp_url })) => {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::BoardingSettle { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
             let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
@@ -1673,10 +1695,10 @@ async fn main() -> anyhow::Result<()> {
                 SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
             )
             .await?;
-            println!("Settling pending VTXOs...");
+            println!("Boarding settle: confirming pending boarded deposits into ARK offchain...");
             match ark.settle().await? {
                 Some(txid) => println!("Settlement txid: {txid}"),
-                None => println!("Nothing to settle."),
+                None => println!("Nothing to boarding-settle."),
             }
         }
 
@@ -1701,7 +1723,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Proof: {}", result.to_proof_string());
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::SendOnchain {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::SettleAddress {
             address,
             amount,
             network,
@@ -1717,12 +1739,12 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
             let txid = ark.send_onchain(&address, amount).await?;
-            println!("ARK send-onchain: {} sats", amount);
+            println!("ARK settle-address: {} sats", amount);
             println!("Destination: {address}");
             println!("On-chain txid: {txid}");
         }
 
-        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::SendOnchainSelf {
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Settle {
             amount,
             index,
             network,
@@ -1739,9 +1761,42 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
             let txid = ark.send_onchain(&destination, amount).await?;
-            println!("ARK send-onchain-self: {} sats", amount);
+            println!("ARK settle: {} sats", amount);
             println!("Taproot destination(index={}): {destination}", index);
             println!("On-chain txid: {txid}");
+        }
+
+        Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::VerifyProof {
+            proof,
+            min_amount_sats,
+            network,
+            asp_url,
+        })) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let network = Network::from(network);
+            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network)?;
+            let ark = ArkPaymentWallet::connect(
+                &btc,
+                &asp_url,
+                SqliteArkDb::open(&bitcoin_db_path(&wallet_path))?,
+            )
+            .await?;
+            let (vtxo_txid, declared_amount_sats) = parse_ark_proof(&proof).ok_or_else(|| {
+                anyhow::anyhow!("invalid proof format; expected ark:<64-hex-vtxo_txid>:<amount_sats>")
+            })?;
+            let min_required = min_amount_sats.unwrap_or(declared_amount_sats);
+            let verified = ark.verify_incoming_vtxo(&vtxo_txid, min_required).await?;
+            println!("ARK proof verified");
+            println!("Declared txid:      {vtxo_txid}");
+            println!("Declared amount:    {declared_amount_sats} sats");
+            println!("Minimum required:   {min_required} sats");
+            println!("Verified txid:      {}", verified.txid);
+            println!("Verified amount:    {} sats", verified.amount_sats);
+            println!("Expires at (epoch): {}", verified.expires_at);
+            println!(
+                "Preconfirmed:       {}",
+                if verified.is_preconfirmed { "yes" } else { "no" }
+            );
         }
 
         // ── key management ───────────────────────────────────────────────────
