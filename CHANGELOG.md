@@ -13,6 +13,18 @@ _Nothing yet._
 
 ---
 
+## [0.1.25] — 2026-03-04
+
+### Changed
+
+- Clarified rail-aware CLI help text:
+  - `hrmw contract buy --amount` now documents decimal units by listing rail
+    (webcash or bitcoin), not webcash-only wording.
+  - `hrmw timeline post --price-min/--price-max` now documents decimal values
+    as `--currency`-dependent (defaulting to webcash when omitted).
+
+---
+
 ## [0.1.24] — 2026-03-04
 
 ### Changed

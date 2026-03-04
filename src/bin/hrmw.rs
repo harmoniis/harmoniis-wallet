@@ -563,10 +563,12 @@ enum TimelineCmd {
         /// Optional repeated service terms (e.g. --service-term same-day)
         #[arg(long = "service-term")]
         service_terms: Vec<String>,
-        /// Optional minimum listing price in Webcash decimal format
+        /// Optional minimum listing price in decimal format for --currency
+        /// (defaults to webcash when --currency is omitted)
         #[arg(long)]
         price_min: Option<String>,
-        /// Optional maximum listing price in Webcash decimal format
+        /// Optional maximum listing price in decimal format for --currency
+        /// (defaults to webcash when --currency is omitted)
         #[arg(long)]
         price_max: Option<String>,
         /// Optional currency (defaults to webcash when price is set)
@@ -682,7 +684,7 @@ enum ContractCmd {
         role: String,
     },
 
-    /// Buy a new contract (buyer pays webcash to Arbitration Service).
+    /// Buy a new contract (buyer pays using selected payment rail).
     ///
     /// Calls POST /api/arbitration/contracts/buy.
     #[command(alias = "issue")]
@@ -690,7 +692,8 @@ enum ContractCmd {
         /// Post ID of the seller's service offer on the timeline
         #[arg(long)]
         post: String,
-        /// Contract value in decimal webcash units (e.g. "1.5")
+        /// Contract value in decimal units of the listing rail
+        /// (e.g. "1.5" for webcash, "0.000001" for bitcoin).
         #[arg(long)]
         amount: String,
         /// Contract type: service | product_digital | product_physical
