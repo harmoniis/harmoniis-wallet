@@ -347,7 +347,6 @@ enum BitcoinArkCmd {
         asp_url: String,
     },
     /// Deposit: show ARK boarding address (send on-chain BTC here)
-    #[command(visible_alias = "board", visible_alias = "boarding-start")]
     Deposit {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
@@ -384,7 +383,6 @@ enum BitcoinArkCmd {
         asp_url: String,
     },
     /// Boarding: finalize deposited on-chain BTC into ARK offchain VTXOs
-    #[command(visible_alias = "settle-boarding", visible_alias = "boarding-settle", visible_alias = "boarding-end")]
     Boarding {
         /// Bitcoin network
         #[arg(long, value_enum, default_value_t = BitcoinNetworkArg::Bitcoin)]
@@ -407,7 +405,6 @@ enum BitcoinArkCmd {
         asp_url: String,
     },
     /// ARK settle-address: move ARK funds to an on-chain Bitcoin address
-    #[command(visible_alias = "send-onchain")]
     SettleAddress {
         /// Destination on-chain Bitcoin address (must match selected network)
         address: String,
@@ -421,7 +418,6 @@ enum BitcoinArkCmd {
         asp_url: String,
     },
     /// Settle ARK offchain to this wallet's deterministic taproot on-chain address
-    #[command(visible_alias = "send-onchain-self")]
     Settle {
         /// Amount in satoshis
         amount: u64,
@@ -1568,14 +1564,8 @@ async fn main() -> anyhow::Result<()> {
             match onchain_sync {
                 Ok(sync) => {
                     println!("Onchain confirmed:    {} sats", sync.confirmed_sats);
-                    println!(
-                        "Onchain trusted pend: {} sats",
-                        sync.trusted_pending_sats
-                    );
-                    println!(
-                        "Onchain untrusted:    {} sats",
-                        sync.untrusted_pending_sats
-                    );
+                    println!("Onchain trusted pend: {} sats", sync.trusted_pending_sats);
+                    println!("Onchain untrusted:    {} sats", sync.untrusted_pending_sats);
                     println!("Onchain total:        {} sats", sync.total_sats);
                 }
                 Err(e) => {
@@ -1657,14 +1647,8 @@ async fn main() -> anyhow::Result<()> {
             match onchain_sync {
                 Ok(sync) => {
                     println!("Onchain confirmed:    {} sats", sync.confirmed_sats);
-                    println!(
-                        "Onchain trusted pend: {} sats",
-                        sync.trusted_pending_sats
-                    );
-                    println!(
-                        "Onchain untrusted:    {} sats",
-                        sync.untrusted_pending_sats
-                    );
+                    println!("Onchain trusted pend: {} sats", sync.trusted_pending_sats);
+                    println!("Onchain untrusted:    {} sats", sync.untrusted_pending_sats);
                     println!("Onchain total:        {} sats", sync.total_sats);
                 }
                 Err(e) => {
@@ -1782,7 +1766,9 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
             let (vtxo_txid, declared_amount_sats) = parse_ark_proof(&proof).ok_or_else(|| {
-                anyhow::anyhow!("invalid proof format; expected ark:<64-hex-vtxo_txid>:<amount_sats>")
+                anyhow::anyhow!(
+                    "invalid proof format; expected ark:<64-hex-vtxo_txid>:<amount_sats>"
+                )
             })?;
             let min_required = min_amount_sats.unwrap_or(declared_amount_sats);
             let verified = ark.verify_incoming_vtxo(&vtxo_txid, min_required).await?;
@@ -1795,7 +1781,11 @@ async fn main() -> anyhow::Result<()> {
             println!("Expires at (epoch): {}", verified.expires_at);
             println!(
                 "Preconfirmed:       {}",
-                if verified.is_preconfirmed { "yes" } else { "no" }
+                if verified.is_preconfirmed {
+                    "yes"
+                } else {
+                    "no"
+                }
             );
         }
 

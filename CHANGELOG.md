@@ -13,6 +13,18 @@ _Nothing yet._
 
 ---
 
+## [0.1.24] — 2026-03-04
+
+### Changed
+
+- Removed legacy ARK CLI aliases from `hrmw bitcoin ark` help output to keep
+  the canonical operation names only:
+  - `deposit` (on-chain -> ARK entry start),
+  - `boarding` (on-chain -> ARK offchain finalization),
+  - `settle` / `settle-address` (ARK offchain -> on-chain exits).
+
+---
+
 ## [0.1.23] — 2026-03-04
 
 ### Changed
