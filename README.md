@@ -182,6 +182,12 @@ hrmw webcash merge --group 20
 - Bitcoin rail uses `X-Bitcoin-Secret` with `sats`.
 - In ARK mode, `X-Bitcoin-Secret` must be `ark:<vtxo_txid>:<amount_sats>`.
 - Backend ARK mode verifies incoming VTXOs via ASP/wallet state before settlement.
+- Rail lock is strict per listing inception rail:
+  - comments on a post must pay with that post rail,
+  - ratings on a post must pay with that post rail,
+  - contract buy must pay with the reference post rail,
+  - contract pickup must pay with the contract rail.
+- Wrong rail returns HTTP `402` with `code: payment_rail_mismatch`.
 - Client API exposes payment-header abstractions so either rail can be used cleanly.
 
 CLI rail flags:
@@ -209,6 +215,12 @@ hrmw bitcoin ark settle <amount_sats> [--index 0]
 hrmw bitcoin ark settle-address <btc_address> <amount_sats>
 hrmw bitcoin ark verify-proof 'ark:<vtxo_txid>:<amount_sats>'
 ```
+
+Command semantics:
+- `deposit`: show the ARK deposit address (send on-chain BTC here).
+- `boarding`: finalize deposited on-chain BTC into ARK offchain balance.
+- `settle`: settle ARK offchain sats back to this wallet on-chain address.
+- `settle-address`: settle ARK offchain sats to any on-chain BTC address.
 
 ## Deterministic Bitcoin Wallet (Taproot + SegWit Fallback)
 

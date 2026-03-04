@@ -13,6 +13,21 @@ _Nothing yet._
 
 ---
 
+## [0.1.23] — 2026-03-04
+
+### Changed
+
+- Clarified ARK flow terminology in docs and CLI guidance:
+  - `deposit` (show ARK deposit address)
+  - `boarding` (finalize on-chain deposit into ARK offchain)
+  - `settle` / `settle-address` (move ARK offchain back on-chain)
+- Added explicit rail-lock behavior in docs:
+  wrong rail now documented as `HTTP 402` with `payment_rail_mismatch`.
+- Added `verify-proof` usage guidance for ARK proof validation format
+  `ark:<vtxo_txid>:<amount_sats>`.
+
+---
+
 ## [0.1.16] — 2026-02-26
 
 ### Changed
