@@ -86,44 +86,52 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
-          # Cross-compiled builds (via cross)
+          # BSD + NetBSD cross-compiled targets (nightly + build-std + cargo-zigbuild)
           - os: ubuntu-latest
             target: x86_64-unknown-freebsd
             platform: freebsd-x86_64
-            use_cross: true
-          # NetBSD targets (tier 3 — require nightly + build-std)
+            use_zigbuild: true
           - os: ubuntu-latest
             target: x86_64-unknown-netbsd
             platform: netbsd-x86_64
-            use_nightly: true
+            use_zigbuild: true
           - os: ubuntu-latest
             target: aarch64-unknown-netbsd
             platform: netbsd-aarch64
-            use_nightly: true
+            use_zigbuild: true
           - os: ubuntu-latest
             target: riscv64gc-unknown-netbsd
             platform: netbsd-riscv64
-            use_nightly: true
+            use_zigbuild: true
           - os: ubuntu-latest
             target: powerpc-unknown-netbsd
             platform: netbsd-powerpc
-            use_nightly: true
+            use_zigbuild: true
           - os: ubuntu-latest
             target: sparc64-unknown-netbsd
             platform: netbsd-sparc64
-            use_nightly: true
+            use_zigbuild: true
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !matrix.use_nightly }}
+        if: ${{ !matrix.use_zigbuild }}
         with:
           targets: ${{ matrix.target }}
 
       - uses: dtolnay/rust-toolchain@nightly
-        if: matrix.use_nightly
+        if: matrix.use_zigbuild
         with:
           components: rust-src
+
+      - uses: mlugg/setup-zig@v2
+        if: matrix.use_zigbuild
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild
+        run: cargo install cargo-zigbuild
 
       - uses: actions/cache@v4
         with:
@@ -134,18 +142,12 @@ jobs:
           key: release-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.platform }}-
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.use_nightly }}" = "true" ]; then
-            cargo +nightly build --release --no-default-features --features bundled-sqlite \
+          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            cargo +nightly zigbuild --release --no-default-features --features bundled-sqlite \
               --target ${{ matrix.target }} -Z build-std=std,panic_abort
-          elif [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
           else
             HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
             if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
