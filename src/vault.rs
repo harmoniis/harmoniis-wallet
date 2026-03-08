@@ -125,8 +125,7 @@ mod tests {
 
     #[test]
     fn public_identity_is_stable_for_same_namespace() {
-        let slot_hex =
-            "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368";
+        let slot_hex = "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368";
         let root = VaultRootMaterial::from_slot_hex(slot_hex).expect("root");
         let a = root.derive_public_identity("harmonia").expect("identity a");
         let b = root.derive_public_identity("harmonia").expect("identity b");

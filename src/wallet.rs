@@ -377,8 +377,8 @@ impl RgbWallet {
         for entry in std::fs::read_dir(&shard_dir)
             .map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard dir: {e}")))?
         {
-            let entry =
-                entry.map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard entry: {e}")))?;
+            let entry = entry
+                .map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard entry: {e}")))?;
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -1267,9 +1267,8 @@ fn migrate_rgb_state(source_conn: &Connection, target_conn: &Connection) -> Resu
     }
 
     if table_exists(source_conn, "timeline_posts")? {
-        let mut stmt = source_conn.prepare(
-            "SELECT post_id, created_at, updated_at, metadata_json FROM timeline_posts",
-        )?;
+        let mut stmt = source_conn
+            .prepare("SELECT post_id, created_at, updated_at, metadata_json FROM timeline_posts")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,

@@ -241,7 +241,9 @@ fn list_contracts_returns_all() {
 #[test]
 fn rgb_state_is_not_partitioned_by_active_pgp_identity() {
     let wallet = RgbWallet::open_memory().unwrap();
-    wallet.store_contract(&make_contract("CTR_shared_1")).unwrap();
+    wallet
+        .store_contract(&make_contract("CTR_shared_1"))
+        .unwrap();
 
     wallet.create_pgp_identity("ops-signing").unwrap();
     wallet.set_active_pgp_identity("ops-signing").unwrap();
@@ -250,7 +252,9 @@ fn rgb_state_is_not_partitioned_by_active_pgp_identity() {
         "contract state must remain visible after switching active PGP key"
     );
 
-    wallet.store_contract(&make_contract("CTR_shared_2")).unwrap();
+    wallet
+        .store_contract(&make_contract("CTR_shared_2"))
+        .unwrap();
     wallet.set_active_pgp_identity("memory-wallet").unwrap();
     let contracts = wallet.list_contracts().unwrap();
     assert_eq!(contracts.len(), 2);

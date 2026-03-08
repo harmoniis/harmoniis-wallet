@@ -1,0 +1,62 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "harmoniis_wallet",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    edition = "2021",
+    deps = [
+        "@crate_index//:anyhow",
+        "@crate_index//:bdk_esplora",
+        "@crate_index//:bdk_wallet",
+        "@crate_index//:bip39",
+        "@crate_index//:chacha20poly1305",
+        "@crate_index//:chrono",
+        "@crate_index//:clap",
+        "@crate_index//:curve25519-dalek",
+        "@crate_index//:dirs-next",
+        "@crate_index//:ed25519-dalek",
+        "@crate_index//:hkdf",
+        "@crate_index//:hex",
+        "@crate_index//:rand",
+        "@crate_index//:rand_core",
+        "@crate_index//:reqwest",
+        "@crate_index//:rusqlite",
+        "@crate_index//:serde",
+        "@crate_index//:serde_json",
+        "@crate_index//:sha2",
+        "@crate_index//:thiserror",
+        "@crate_index//:tokio",
+        "@crate_index//:x25519-dalek",
+        "@crate_index//:zeroize",
+    ],
+)
+
+rust_binary(
+    name = "hrmw",
+    srcs = glob(["src/bin/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        ":harmoniis_wallet",
+        "@crate_index//:anyhow",
+        "@crate_index//:clap",
+        "@crate_index//:dirs-next",
+        "@crate_index//:serde_json",
+        "@crate_index//:tokio",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":harmoniis_wallet",
+)
+
+sh_binary(
+    name = "release",
+    srcs = ["scripts/build_release.sh"],
+)

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use bdk_esplora::{esplora_client, EsploraExt};
 use bdk_wallet::{
-    bitcoin::{Address, Amount, FeeRate, Network, Txid, bip32::Xpriv},
+    bitcoin::{bip32::Xpriv, Address, Amount, FeeRate, Network, Txid},
     template::{Bip84, Bip86},
     KeychainKind, SignOptions, TxOrdering, Wallet,
 };
