@@ -100,7 +100,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ !matrix.use_cross && matrix.target || '' }}
 
       - uses: actions/cache@v4
         with:
