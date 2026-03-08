@@ -91,28 +91,39 @@ jobs:
             target: x86_64-unknown-freebsd
             platform: freebsd-x86_64
             use_cross: true
-          - os: ubuntu-latest
-            target: riscv64gc-unknown-linux-gnu
-            platform: linux-riscv64
-            use_cross: true
-          - os: ubuntu-latest
-            target: powerpc64-unknown-linux-gnu
-            platform: linux-ppc64
-            use_cross: true
-          - os: ubuntu-latest
-            target: sparc64-unknown-linux-gnu
-            platform: linux-sparc64
-            use_cross: true
+          # NetBSD targets (tier 3 — require nightly + build-std)
           - os: ubuntu-latest
             target: x86_64-unknown-netbsd
             platform: netbsd-x86_64
-            use_cross: true
+            use_nightly: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-netbsd
+            platform: netbsd-aarch64
+            use_nightly: true
+          - os: ubuntu-latest
+            target: riscv64gc-unknown-netbsd
+            platform: netbsd-riscv64
+            use_nightly: true
+          - os: ubuntu-latest
+            target: powerpc-unknown-netbsd
+            platform: netbsd-powerpc
+            use_nightly: true
+          - os: ubuntu-latest
+            target: sparc64-unknown-netbsd
+            platform: netbsd-sparc64
+            use_nightly: true
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.use_nightly }}
         with:
           targets: ${{ matrix.target }}
+
+      - uses: dtolnay/rust-toolchain@nightly
+        if: matrix.use_nightly
+        with:
+          components: rust-src
 
       - uses: actions/cache@v4
         with:
@@ -130,7 +141,10 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
+          if [ "${{ matrix.use_nightly }}" = "true" ]; then
+            cargo +nightly build --release --no-default-features --features bundled-sqlite \
+              --target ${{ matrix.target }} -Z build-std=std,panic_abort
+          elif [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
           else
             HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
