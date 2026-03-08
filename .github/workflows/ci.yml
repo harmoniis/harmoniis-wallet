@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -70,21 +70,49 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Native builds
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
           - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
           - os: macos-latest
+            target: aarch64-apple-darwin
             platform: macos-aarch64
           - os: macos-latest
+            target: x86_64-apple-darwin
             platform: macos-x86_64
-            cross_target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+          # Cross-compiled builds (via cross)
+          - os: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            platform: freebsd-x86_64
+            use_cross: true
+          - os: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            platform: linux-riscv64
+            use_cross: true
+          - os: ubuntu-latest
+            target: powerpc64-unknown-linux-gnu
+            platform: linux-ppc64
+            use_cross: true
+          - os: ubuntu-latest
+            target: sparc64-unknown-linux-gnu
+            platform: linux-sparc64
+            use_cross: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-netbsd
+            platform: netbsd-x86_64
+            use_cross: true
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.cross_target || '' }}
+          targets: ${{ matrix.target }}
 
       - uses: actions/cache@v4
         with:
@@ -95,20 +123,35 @@ jobs:
           key: release-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.platform }}-
 
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: Build release binary
+        shell: bash
         run: |
-          if [ -n "${{ matrix.cross_target }}" ]; then
-            cargo build --release --no-default-features --features bundled-sqlite --target ${{ matrix.cross_target }}
-            mkdir -p target/release
-            cp target/${{ matrix.cross_target }}/release/hrmw target/release/
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
           else
-            cargo build --release --no-default-features --features bundled-sqlite
+            HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
+            if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
+              cargo build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
+            else
+              cargo build --release --no-default-features --features bundled-sqlite
+            fi
+          fi
+          # Copy cross-compiled artifacts to target/release for build_release.sh
+          if [ "${{ matrix.target }}" != "$(rustc -vV | grep host | awk '{print $2}')" ]; then
+            mkdir -p target/release
+            cp target/${{ matrix.target }}/release/hrmw target/release/ 2>/dev/null || true
+            cp target/${{ matrix.target }}/release/hrmw.exe target/release/ 2>/dev/null || true
           fi
 
       - name: Build release tarball
+        shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          bash scripts/build_release.sh "$VERSION"
+          bash scripts/build_release.sh "$VERSION" "${{ matrix.platform }}"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
