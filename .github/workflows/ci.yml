@@ -95,6 +95,7 @@ jobs:
             target: aarch64-unknown-freebsd
             platform: freebsd-aarch64
             use_cross: true
+            build_std: true
     steps:
       - uses: actions/checkout@v4
 
@@ -115,12 +116,16 @@ jobs:
         if: matrix.use_cross
         run: |
           rustup toolchain install nightly
+          rustup component add rust-src --toolchain nightly
           cargo +nightly install cross --git https://github.com/cross-rs/cross
 
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
+          if [ "${{ matrix.build_std }}" = "true" ]; then
+            cross +nightly build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }} \
+              -Z build-std=std,panic_abort
+          elif [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
           else
             HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
