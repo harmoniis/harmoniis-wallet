@@ -66,6 +66,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.best_effort || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,52 +87,49 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
-          # BSD + NetBSD cross-compiled targets (nightly + build-std + cargo-zigbuild)
+          # FreeBSD via cross
           - os: ubuntu-latest
             target: x86_64-unknown-freebsd
             platform: freebsd-x86_64
-            use_zigbuild: true
+            use_cross: true
+          # NetBSD targets (tier 3 — nightly + build-std + NetBSD sysroot)
           - os: ubuntu-latest
             target: x86_64-unknown-netbsd
             platform: netbsd-x86_64
-            use_zigbuild: true
+            use_netbsd_cross: true
+            best_effort: true
           - os: ubuntu-latest
             target: aarch64-unknown-netbsd
             platform: netbsd-aarch64
-            use_zigbuild: true
+            use_netbsd_cross: true
+            best_effort: true
           - os: ubuntu-latest
             target: riscv64gc-unknown-netbsd
             platform: netbsd-riscv64
-            use_zigbuild: true
+            use_netbsd_cross: true
+            best_effort: true
           - os: ubuntu-latest
             target: powerpc-unknown-netbsd
             platform: netbsd-powerpc
-            use_zigbuild: true
+            use_netbsd_cross: true
+            best_effort: true
           - os: ubuntu-latest
             target: sparc64-unknown-netbsd
             platform: netbsd-sparc64
-            use_zigbuild: true
+            use_netbsd_cross: true
+            best_effort: true
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !matrix.use_zigbuild }}
+        if: ${{ !matrix.use_netbsd_cross }}
         with:
           targets: ${{ matrix.target }}
 
       - uses: dtolnay/rust-toolchain@nightly
-        if: matrix.use_zigbuild
+        if: matrix.use_netbsd_cross
         with:
           components: rust-src
-
-      - uses: mlugg/setup-zig@v2
-        if: matrix.use_zigbuild
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        if: matrix.use_zigbuild
-        run: cargo install cargo-zigbuild
 
       - uses: actions/cache@v4
         with:
@@ -142,12 +140,62 @@ jobs:
           key: release-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.platform }}-
 
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install NetBSD cross-toolchain
+        if: matrix.use_netbsd_cross
+        shell: bash
+        run: |
+          ARCH="${{ matrix.target }}"
+          ARCH="${ARCH%%-*}"
+          case "$ARCH" in
+            x86_64)     GCC_ARCH="x86_64"   ; NBSD_ARCH="amd64"   ;;
+            aarch64)    GCC_ARCH="aarch64"   ; NBSD_ARCH="evbarm-aarch64" ;;
+            riscv64gc)  GCC_ARCH="riscv64"   ; NBSD_ARCH="riscv-riscv64" ;;
+            powerpc)    GCC_ARCH="powerpc"   ; NBSD_ARCH="evbppc"  ;;
+            sparc64)    GCC_ARCH="sparc64"   ; NBSD_ARCH="sparc64" ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install -y gcc-${GCC_ARCH}-linux-gnu || true
+          NETBSD_VER="10.1"
+          NETBSD_URL="https://cdn.netbsd.org/pub/NetBSD/NetBSD-${NETBSD_VER}/${NBSD_ARCH}/binary/sets"
+          SYSROOT="/opt/netbsd-sysroot"
+          sudo mkdir -p "$SYSROOT"
+          for set in base comp; do
+            echo "Downloading ${set}.tar.xz..."
+            curl -fsSL "${NETBSD_URL}/${set}.tar.xz" -o "/tmp/${set}.tar.xz" || \
+            curl -fsSL "${NETBSD_URL}/${set}.tgz" -o "/tmp/${set}.tgz" || true
+            if [ -f "/tmp/${set}.tar.xz" ]; then
+              sudo tar xf "/tmp/${set}.tar.xz" -C "$SYSROOT"
+            elif [ -f "/tmp/${set}.tgz" ]; then
+              sudo tar xzf "/tmp/${set}.tgz" -C "$SYSROOT"
+            fi
+          done
+          WRAPPER="/usr/local/bin/${ARCH}-unknown-netbsd-cc"
+          cat <<WRAPPER_EOF | sudo tee "$WRAPPER" > /dev/null
+          #!/bin/sh
+          exec ${GCC_ARCH}-linux-gnu-gcc --sysroot=${SYSROOT} "\$@"
+          WRAPPER_EOF
+          sudo chmod +x "$WRAPPER"
+          mkdir -p .cargo
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+          cat >> .cargo/config.toml <<CARGO_EOF
+          [target.${{ matrix.target }}]
+          linker = "${WRAPPER}"
+          CARGO_EOF
+          echo "CC_$TARGET_UPPER=${WRAPPER}" >> $GITHUB_ENV
+          echo "CFLAGS_$TARGET_UPPER=--sysroot=${SYSROOT}" >> $GITHUB_ENV
+
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            cargo +nightly zigbuild --release --no-default-features --features bundled-sqlite \
+          if [ "${{ matrix.use_netbsd_cross }}" = "true" ]; then
+            cargo +nightly build --release --no-default-features --features bundled-sqlite \
               --target ${{ matrix.target }} -Z build-std=std,panic_abort
+          elif [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
           else
             HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
             if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
