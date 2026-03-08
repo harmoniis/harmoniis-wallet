@@ -115,12 +115,6 @@ FreeBSD:
 pkg install -y rust cargo
 ```
 
-NetBSD:
-
-```sh
-pkgin -y install rust cargo
-```
-
 ### 2) Install `harmoniis-wallet`
 
 ```bash
