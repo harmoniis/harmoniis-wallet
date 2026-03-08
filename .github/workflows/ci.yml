@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,17 +22,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -59,3 +60,81 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
       - run: cargo build --no-default-features --features bundled-sqlite
+
+  release:
+    name: Release (${{ matrix.platform }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - os: macos-latest
+            platform: macos-aarch64
+          - os: macos-latest
+            platform: macos-x86_64
+            cross_target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cross_target || '' }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-${{ matrix.platform }}-
+
+      - name: Build release binary
+        run: |
+          if [ -n "${{ matrix.cross_target }}" ]; then
+            cargo build --release --no-default-features --features bundled-sqlite --target ${{ matrix.cross_target }}
+            mkdir -p target/release
+            cp target/${{ matrix.cross_target }}/release/hrmw target/release/
+          else
+            cargo build --release --no-default-features --features bundled-sqlite
+          fi
+
+      - name: Build release tarball
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          bash scripts/build_release.sh "$VERSION"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            harmoniis-wallet-*-${{ matrix.platform }}.tar.gz
+            harmoniis-wallet-*-${{ matrix.platform }}.tar.gz.sha256
+
+      - name: Upload install script
+        if: matrix.platform == 'linux-x86_64'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: install.sh
+
+  publish-crate:
+    name: Publish to crates.io
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-default-features --features bundled-sqlite
