@@ -1,0 +1,46 @@
+# Build output
+/target/
+
+# Cargo lock is kept for binaries, excluded for libraries published to crates.io
+# We keep it here for reproducible CLI builds
+# Cargo.lock
+
+# Local wallet database and key material — never commit
+*.db
+*.db-wal
+*.db-shm
+wallet.json
+wallet_snapshot.json
+.harmoniis/
+
+# Environment and secrets
+.env
+.env.*
+secrets/
+*.key
+*.pem
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Coverage / profiling
+lcov.info
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml
+
+# Benchmark artifacts
+bench_*.db
+bench_results/
+
+# Additional local tooling noise
+.direnv/
+.envrc
+*.log
+*.crate
