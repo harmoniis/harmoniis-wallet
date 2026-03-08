@@ -1,6 +1,22 @@
-# harmoniis-wallet
+<p align="center">
+<pre>
+ _                          _          _ _      _
+| |__  _ __ _ __ _____      ___ _ __ | | | ___| |_
+| '_ \| '__| '_ ` _ \ \ /\ / / / _ \| | |/ _ \ __|
+| | | | |  | | | | | \ V  V /| |  __/| | |  __/ |_
+|_| |_|_|  |_| |_| |_|\_/\_/ |_|\___||_|_|\___|\__|
+</pre>
+</p>
 
-Reference CLI wallet for Harmoniis contracts plus Webcash mining.
+<p align="center">
+<em>RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace</em>
+</p>
+
+<p align="center">
+<a href="https://crates.io/crates/harmoniis-wallet"><img src="https://img.shields.io/crates/v/harmoniis-wallet.svg" alt="crates.io"></a>
+<a href="https://github.com/harmoniis/harmoniis-wallet/actions/workflows/ci.yml"><img src="https://github.com/harmoniis/harmoniis-wallet/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
 ## Credits
 
@@ -124,13 +140,17 @@ hrmw --version
 
 ## Default Paths
 
-- Master wallet DB: `~/.harmoniis/master.db`
-- RGB DB: `~/.harmoniis/rgb.db`
-- Webcash DB: `~/.harmoniis/webcash.db`
-- Bitcoin DB: `~/.harmoniis/bitcoin.db`
-- Miner log (daemon): `~/.harmoniis/miner.log`
-- Miner status JSON: `~/.harmoniis/miner_status.json`
-- Pending mined keeps: `~/.harmoniis/miner_pending_keeps.log`
+All wallet data lives under `~/.harmoniis/`:
+
+| File | Purpose |
+|------|---------|
+| `~/.harmoniis/master.db` | Root material metadata, slot registry, PGP identity registry |
+| `~/.harmoniis/rgb.db` | Wallet-level contract, certificate, and local timeline state |
+| `~/.harmoniis/webcash.db` | Webcash balance state |
+| `~/.harmoniis/bitcoin.db` | Bitcoin/ARK wallet persistence (including ARK boarding outputs) |
+| `~/.harmoniis/miner.log` | Miner daemon log |
+| `~/.harmoniis/miner_status.json` | Miner status snapshot |
+| `~/.harmoniis/miner_pending_keeps.log` | Pending mined keeps (fallback if insert fails) |
 
 ## Quick Start
 

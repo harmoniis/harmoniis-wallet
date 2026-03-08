@@ -183,6 +183,10 @@ enum Cmd {
     /// Webcash mining
     #[command(subcommand)]
     Webminer(WebminerCmd),
+
+    /// Upgrade hrmw to the latest release from GitHub
+    #[command(alias = "self-update")]
+    Upgrade,
 }
 
 // ── Identity ──────────────────────────────────────────────────────────────────
@@ -3272,7 +3276,210 @@ async fn main() -> anyhow::Result<()> {
             };
             daemon::run_mining_loop(config).await?;
         }
+
+        // ── upgrade / self-update ────────────────────────────────────────────
+        Cmd::Upgrade => {
+            self_update::run_upgrade().await?;
+        }
     }
 
     Ok(())
 }
+
+// ── Self-update logic ─────────────────────────────────────────────────────────
+
+mod self_update {
+    use anyhow::{bail, Context};
+    use std::process::Command;
+
+    const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+    const RELEASES_URL: &str =
+        "https://api.github.com/repos/harmoniis/harmoniis-wallet/releases/latest";
+
+    /// Detect the platform label matching the release tarball naming convention.
+    fn detect_platform() -> anyhow::Result<&'static str> {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        match (os, arch) {
+            ("linux", "x86_64") => Ok("linux-x86_64"),
+            ("linux", "aarch64") => Ok("linux-aarch64"),
+            ("macos", "x86_64") => Ok("macos-x86_64"),
+            ("macos", "aarch64") => Ok("macos-aarch64"),
+            ("windows", "x86_64") => Ok("windows-x86_64"),
+            ("freebsd", "x86_64") => Ok("freebsd-x86_64"),
+            ("freebsd", "aarch64") => Ok("freebsd-aarch64"),
+            _ => bail!("unsupported platform: {os}-{arch}"),
+        }
+    }
+
+    /// Shell out to curl and return stdout bytes.
+    fn curl(args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        let output = Command::new("curl")
+            .args(args)
+            .output()
+            .context("failed to run curl — is it installed?")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("curl failed: {stderr}");
+        }
+        Ok(output.stdout)
+    }
+
+    /// Extract a string value for `key` from a (flat) JSON object.
+    /// Minimal parser — avoids pulling in serde_json just for two fields.
+    fn json_str_value(json: &str, key: &str) -> Option<String> {
+        let needle = format!("\"{}\"", key);
+        let idx = json.find(&needle)?;
+        let rest = &json[idx + needle.len()..];
+        // skip optional whitespace and colon
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix(':')?;
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    pub async fn run_upgrade() -> anyhow::Result<()> {
+        let platform = detect_platform()?;
+        println!("Current version : {CURRENT_VERSION}");
+        println!("Platform        : {platform}");
+        println!();
+
+        // 1. Query latest release metadata
+        println!("Checking latest release...");
+        let body = curl(&[
+            "-sSL",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: hrmw-self-update",
+            RELEASES_URL,
+        ])?;
+        let json = String::from_utf8(body).context("GitHub API returned non-UTF-8")?;
+
+        let tag = json_str_value(&json, "tag_name")
+            .context("could not find `tag_name` in release JSON")?;
+        let latest_version = tag.strip_prefix('v').unwrap_or(&tag);
+
+        // 2. Already up to date?
+        if latest_version == CURRENT_VERSION {
+            println!("Already up to date (v{CURRENT_VERSION}).");
+            return Ok(());
+        }
+        println!("Latest version  : {latest_version}");
+
+        // 3. Build expected tarball name and find download URL
+        let tarball_name =
+            format!("harmoniis-wallet-{latest_version}-{platform}.tar.gz");
+
+        // Search for the browser_download_url matching our tarball in the JSON.
+        // The assets array contains objects with "name" and "browser_download_url".
+        let download_url = {
+            let mut url: Option<String> = None;
+            // Walk through every browser_download_url and check the asset name.
+            let search = "\"browser_download_url\"";
+            let mut cursor = 0usize;
+            while let Some(pos) = json[cursor..].find(search) {
+                let abs = cursor + pos;
+                // Extract URL value
+                let after = &json[abs + search.len()..];
+                let after = after.trim_start().strip_prefix(':').unwrap_or(after);
+                let after = after.trim_start().strip_prefix('"').unwrap_or(after);
+                if let Some(end) = after.find('"') {
+                    let candidate = &after[..end];
+                    if candidate.ends_with(&tarball_name) {
+                        url = Some(candidate.to_string());
+                        break;
+                    }
+                }
+                cursor = abs + search.len();
+            }
+            url.with_context(|| {
+                format!(
+                    "release {tag} has no asset matching {tarball_name} — \
+                     is there a build for {platform}?"
+                )
+            })?
+        };
+        println!("Downloading     : {download_url}");
+
+        // 4. Download to a temp file
+        let tmp_dir = std::env::temp_dir().join(format!("hrmw-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_dir).context("failed to create temp dir")?;
+        let tarball_path = tmp_dir.join(&tarball_name);
+        curl(&[
+            "-sSL",
+            "-o",
+            tarball_path
+                .to_str()
+                .context("non-UTF-8 temp path")?,
+            &download_url,
+        ])?;
+
+        // 5. Extract — the tarball contains `harmoniis-wallet-{ver}/bin/hrmw`
+        let status = Command::new("tar")
+            .args(["xzf", tarball_path.to_str().unwrap(), "-C", tmp_dir.to_str().unwrap()])
+            .status()
+            .context("failed to run tar")?;
+        if !status.success() {
+            bail!("tar extraction failed");
+        }
+
+        let binary_name = if cfg!(windows) { "hrmw.exe" } else { "hrmw" };
+        let extracted_bin = tmp_dir
+            .join(format!("harmoniis-wallet-{latest_version}"))
+            .join("bin")
+            .join(binary_name);
+        if !extracted_bin.exists() {
+            bail!(
+                "expected binary not found in tarball at {}",
+                extracted_bin.display()
+            );
+        }
+
+        // 6. Replace the running binary
+        let current_exe =
+            std::env::current_exe().context("could not determine path of running hrmw binary")?;
+
+        // Canonicalize to resolve symlinks so we replace the actual file.
+        let target_path = std::fs::canonicalize(&current_exe).unwrap_or(current_exe);
+
+        // On Unix we can atomically rename over the target.  We first copy the
+        // new binary next to the target, then rename.
+        let staging_path = target_path.with_extension("new");
+        std::fs::copy(&extracted_bin, &staging_path).with_context(|| {
+            format!(
+                "failed to copy new binary to {} — do you have write permission?",
+                staging_path.display()
+            )
+        })?;
+
+        // Preserve executable permission on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&target_path)
+                .map(|m| m.permissions())
+                .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(&staging_path, perms).ok();
+        }
+
+        std::fs::rename(&staging_path, &target_path).with_context(|| {
+            format!(
+                "failed to replace {} — you may need to run with sudo",
+                target_path.display()
+            )
+        })?;
+
+        // Clean up temp directory.
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        println!();
+        println!("Upgraded hrmw: v{CURRENT_VERSION} -> v{latest_version}");
+        println!("Binary path   : {}", target_path.display());
+
+        Ok(())
+    }
+}
+
