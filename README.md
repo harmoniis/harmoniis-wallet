@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-<em>RGB-inspired smart-contract wallet for the Harmoniis decentralised marketplace</em>
+<em>Smart-contract wallet for the Harmoniis decentralised marketplace — RGB contracts, Webcash fees, Bitcoin/ARK settlement</em>
 </p>
 
 <p align="center">
@@ -18,139 +18,27 @@
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-## Credits
-
-- Webminer architecture/perf direction inspired by [`maaku/webminer`](https://github.com/maaku/webminer).
-- RGB model inspired by [`RGB-WG/rgb`](https://github.com/RGB-WG/rgb).
-- Witness custody/replace flow inspired by Webcash server semantics (replace invalidates old secret).
-
-## Key Model (Current)
-
-The wallet stores one BIP39 master mnemonic/entropy pair and derives every slot using hardened BIP32 paths:
-
-- `RGB identity key` (wallet contract identity)
-- `Webcash master secret`
-- `Bitcoin deterministic slot key`
-- `Generic vault root slot` (for app-scoped vault key derivation)
-- `PGP-style signing identities` (multiple, labeled, selectable)
-
-PGP identities are managed with labels:
-
-```bash
-hrmw identity pgp-list
-hrmw identity pgp-new --label ops-signing
-hrmw identity pgp-use --label ops-signing
-```
-
-`hrmw identity register` signs with the active PGP label by default.
-
-Master key backup / restore:
-
-```bash
-hrmw key export --format mnemonic
-hrmw key export --format hex --output ./master.hex
-hrmw key import --mnemonic "word1 word2 ... word12"
-hrmw key fingerprint
-```
-
-Password manager storage at setup time:
-
-```bash
-hrmw setup --password-manager required
-```
-
-Modes:
-
-- `required` (default): setup fails if no supported password manager is available.
-- `best-effort`: continue setup if password-manager storage fails.
-- `off`: skip password-manager storage.
-
-On macOS, this stores in Keychain under a `harmoniis` service label. If iCloud Keychain sync is enabled in macOS settings, those entries sync; `hrmw` cannot force iCloud sync from CLI.
-
-Deterministic slot map:
-
-- `pgp[i]` for `i=0..999` (identity scan range)
-- `webcash[0]` deterministic webcash master
-- `rgb[0]` deterministic RGB identity root
-- `bitcoin[0]` deterministic Bitcoin slot seed material
-- `vault[0]` deterministic vault root seed material (backward-compatible alias: `harmonia-vault[0]`)
-
-This allows reconstruction from only the master mnemonic (or entropy hex) plus server discovery.
-
-Derived vault material (for any consumer app) is exposed by `src/vault.rs`:
-
-```rust
-use harmoniis_wallet::{wallet::RgbWallet, VaultRootMaterial};
-
-let wallet = RgbWallet::open(std::path::Path::new(\"~/.harmoniis/master.db\"))?;
-let root = VaultRootMaterial::from_wallet(&wallet)?;
-let aead_key = root.derive_aead_key_bytes(\"my-app\")?;
-let mqtt_seed = root.derive_mqtt_tls_seed_bytes(\"default\")?;
-```
-
-Database model:
-
-- `master.db` stores root material metadata, slot registry, and PGP identity registry.
-- `rgb.db` stores wallet-level contract/certificate/local timeline state.
-- `webcash.db` stores Webcash balance state.
-- `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
-
-Important:
-
-- RGB contract state is wallet-scoped (`rgb.db`), not partitioned by active PGP key label.
-- PGP identities are signing keys derived from master key slots; switching active PGP label does not switch to a different RGB state database.
+---
 
 ## Install
 
-### 1) Install Rust
-
-Ubuntu/Debian:
+**macOS / Linux / FreeBSD:**
 
 ```bash
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-source ~/.cargo/env
+curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh
 ```
 
-macOS:
-
-```bash
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-source "$HOME/.cargo/env"
-```
-
-Windows (PowerShell):
+**Windows (PowerShell):**
 
 ```powershell
-winget install Rustlang.Rustup
-rustup default stable
+iwr https://harmoniis.com/wallet/install.ps1 -UseB | iex
 ```
 
-FreeBSD:
-
-```sh
-pkg install -y rust cargo
-```
-
-### 2) Install `harmoniis-wallet`
+**From source (requires Rust 1.86+):**
 
 ```bash
 cargo install harmoniis-wallet
-hrmw --version
 ```
-
-## Default Paths
-
-All wallet data lives under `~/.harmoniis/`:
-
-| File | Purpose |
-|------|---------|
-| `~/.harmoniis/master.db` | Root material metadata, slot registry, PGP identity registry |
-| `~/.harmoniis/rgb.db` | Wallet-level contract, certificate, and local timeline state |
-| `~/.harmoniis/webcash.db` | Webcash balance state |
-| `~/.harmoniis/bitcoin.db` | Bitcoin/ARK wallet persistence (including ARK boarding outputs) |
-| `~/.harmoniis/miner.log` | Miner daemon log |
-| `~/.harmoniis/miner_status.json` | Miner status snapshot |
-| `~/.harmoniis/miner_pending_keeps.log` | Pending mined keeps (fallback if insert fails) |
 
 ## Quick Start
 
@@ -158,12 +46,14 @@ All wallet data lives under `~/.harmoniis/`:
 hrmw setup
 hrmw info
 
-# Optional: create/select additional labeled signing keys
-hrmw identity pgp-new --label team-main --active
-hrmw identity pgp-list
-
 hrmw identity register --nick alice
 hrmw webcash info
+```
+
+## Upgrade
+
+```bash
+hrmw upgrade
 ```
 
 ## Contract Usage
@@ -297,6 +187,96 @@ hrmw webminer bench --cpu-threads 8
 Accepted mined keeps are inserted into wallet with replace semantics (old secret invalidated).
 If insert fails after acceptance, pending keeps are stored in `miner_pending_keeps.log`.
 
+## Key Model
+
+The wallet stores one BIP39 master mnemonic/entropy pair and derives every slot using hardened BIP32 paths:
+
+- `RGB identity key` (wallet contract identity)
+- `Webcash master secret`
+- `Bitcoin deterministic slot key`
+- `Generic vault root slot` (for app-scoped vault key derivation)
+- `PGP-style signing identities` (multiple, labeled, selectable)
+
+PGP identities are managed with labels:
+
+```bash
+hrmw identity pgp-list
+hrmw identity pgp-new --label ops-signing
+hrmw identity pgp-use --label ops-signing
+```
+
+`hrmw identity register` signs with the active PGP label by default.
+
+Master key backup / restore:
+
+```bash
+hrmw key export --format mnemonic
+hrmw key export --format hex --output ./master.hex
+hrmw key import --mnemonic "word1 word2 ... word12"
+hrmw key fingerprint
+```
+
+Password manager storage at setup time:
+
+```bash
+hrmw setup --password-manager required
+```
+
+Modes:
+
+- `required` (default): setup fails if no supported password manager is available.
+- `best-effort`: continue setup if password-manager storage fails.
+- `off`: skip password-manager storage.
+
+On macOS, this stores in Keychain under a `harmoniis` service label. If iCloud Keychain sync is enabled in macOS settings, those entries sync; `hrmw` cannot force iCloud sync from CLI.
+
+Deterministic slot map:
+
+- `pgp[i]` for `i=0..999` (identity scan range)
+- `webcash[0]` deterministic webcash master
+- `rgb[0]` deterministic RGB identity root
+- `bitcoin[0]` deterministic Bitcoin slot seed material
+- `vault[0]` deterministic vault root seed material (backward-compatible alias: `harmonia-vault[0]`)
+
+This allows reconstruction from only the master mnemonic (or entropy hex) plus server discovery.
+
+Derived vault material (for any consumer app) is exposed by `src/vault.rs`:
+
+```rust
+use harmoniis_wallet::{wallet::RgbWallet, VaultRootMaterial};
+
+let wallet = RgbWallet::open(std::path::Path::new(\"~/.harmoniis/master.db\"))?;
+let root = VaultRootMaterial::from_wallet(&wallet)?;
+let aead_key = root.derive_aead_key_bytes(\"my-app\")?;
+let mqtt_seed = root.derive_mqtt_tls_seed_bytes(\"default\")?;
+```
+
+Database model:
+
+- `master.db` stores root material metadata, slot registry, and PGP identity registry.
+- `rgb.db` stores wallet-level contract/certificate/local timeline state.
+- `webcash.db` stores Webcash balance state.
+- `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
+
+Important:
+
+- RGB contract state is wallet-scoped (`rgb.db`), not partitioned by active PGP key label.
+- PGP identities are signing keys derived from master key slots; switching active PGP label does not switch to a different RGB state database.
+
+## Default Paths
+
+All wallet data lives under `~/.harmoniis/`:
+
+| File | Purpose |
+|------|---------|
+| `~/.harmoniis/master.db` | Root material metadata, slot registry, PGP identity registry |
+| `~/.harmoniis/rgb.db` | Wallet-level contract, certificate, and local timeline state |
+| `~/.harmoniis/webcash.db` | Webcash balance state |
+| `~/.harmoniis/bitcoin.db` | Bitcoin/ARK wallet persistence (including ARK boarding outputs) |
+| `~/.harmoniis/miner.log` | Miner daemon log |
+| `~/.harmoniis/miner_status.json` | Miner status snapshot |
+| `~/.harmoniis/miner_pending_keeps.log` | Pending mined keeps (fallback if insert fails) |
+
 ## Backup and Restore
 
 Backup the entire wallet directory:
@@ -329,27 +309,15 @@ hrmw key import --mnemonic "word1 word2 ... word12" --force
 hrmw recover deterministic --pgp-start 0 --pgp-end 999
 ```
 
-Project test wallets (Alice/Bob with recovery verification):
-
-```bash
-cd harmoniis-wallet
-./scripts/prepare_project_test_wallets.sh
-```
-
-This creates `wallets/mainnet-test/{alice,bob}` and recovered verification wallets under the project root.
-
-Full mnemonic rebuild proof (root + RGB + Webcash + Bitcoin + ARK + PGP identities):
-
-```bash
-cd harmoniis-wallet
-./scripts/prove_mnemonic_rebuild.sh
-```
-
-This writes `wallets/rebuild-proof/RESULT.txt` plus source/restored snapshots for parity checks.
-
 ## Build and Test
 
 ```bash
 cargo build --release
 cargo test --test unit_tests
 ```
+
+## Credits
+
+- Webminer architecture/perf direction inspired by [`maaku/webminer`](https://github.com/maaku/webminer).
+- RGB smart-contract model built on [`RGB-WG/rgb`](https://github.com/RGB-WG/rgb) with Harmoniis witness-backed bearer state and arbitration service.
+- Witness custody/replace flow inspired by Webcash server semantics (replace invalidates old secret).
