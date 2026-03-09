@@ -139,7 +139,7 @@ Command semantics:
 - `settle`: settle ARK offchain sats back to this wallet on-chain address.
 - `settle-address`: settle ARK offchain sats to any on-chain BTC address.
 
-## Deterministic Bitcoin Wallet (Taproot + SegWit Fallback)
+## Deterministic Bitcoin Wallet
 
 The wallet derives a deterministic Bitcoin slot (`bitcoin[0]`) from the root key and exposes:
 - Taproot (`BIP86`) as the primary receive path.
