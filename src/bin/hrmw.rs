@@ -3370,8 +3370,7 @@ mod self_update {
         println!("Latest version  : {latest_version}");
 
         // 3. Build expected tarball name and find download URL
-        let tarball_name =
-            format!("harmoniis-wallet-{latest_version}-{platform}.tar.gz");
+        let tarball_name = format!("harmoniis-wallet-{latest_version}-{platform}.tar.gz");
 
         // Search for the browser_download_url matching our tarball in the JSON.
         // The assets array contains objects with "name" and "browser_download_url".
@@ -3411,15 +3410,18 @@ mod self_update {
         curl(&[
             "-sSL",
             "-o",
-            tarball_path
-                .to_str()
-                .context("non-UTF-8 temp path")?,
+            tarball_path.to_str().context("non-UTF-8 temp path")?,
             &download_url,
         ])?;
 
         // 5. Extract — the tarball contains `harmoniis-wallet-{ver}/bin/hrmw`
         let status = Command::new("tar")
-            .args(["xzf", tarball_path.to_str().unwrap(), "-C", tmp_dir.to_str().unwrap()])
+            .args([
+                "xzf",
+                tarball_path.to_str().unwrap(),
+                "-C",
+                tmp_dir.to_str().unwrap(),
+            ])
             .status()
             .context("failed to run tar")?;
         if !status.success() {
@@ -3482,4 +3484,3 @@ mod self_update {
         Ok(())
     }
 }
-
