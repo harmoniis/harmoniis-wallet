@@ -534,6 +534,18 @@ enum KeyCmd {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Sign an arbitrary message with a vault-derived identity
+    VaultSign {
+        /// Label of the vault-derived identity to use
+        #[arg(long)]
+        label: Option<String>,
+        /// Explicit vault slot index to use
+        #[arg(long)]
+        index: Option<u32>,
+        /// Message to sign
+        #[arg(long)]
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1965,6 +1977,19 @@ async fn main() -> anyhow::Result<()> {
             println!("Vault label:     {}", record.label.as_deref().unwrap_or(""));
             println!("Vault index:     {}", record.slot_index);
             println!("Vault public key: {}", record.descriptor);
+        }
+        Cmd::Key(KeyCmd::VaultSign {
+            label,
+            index,
+            message,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let (record, identity) = pick_vault_identity(&wallet, label.as_deref(), index)?;
+            let signature = identity.sign(&message);
+            println!("Vault label:     {}", record.label.as_deref().unwrap_or(""));
+            println!("Vault index:     {}", record.slot_index);
+            println!("Vault public key: {}", record.descriptor);
+            println!("Signature:       {}", signature);
         }
 
         // ── deterministic recovery ───────────────────────────────────────────
