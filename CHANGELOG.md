@@ -9,6 +9,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.33] — 2026-03-10
+
+### Added
+
+- Added wallet-derived vault identity signing support to `hrmw` so Harmonia
+  broker, remote config, and push flows can sign requests directly from labeled
+  vault-derived identities.
+- Added CLI support for labeled vault-derived identity management, including
+  creation, listing, export, and signing.
+
+### Changed
+
+- Extended wallet vault identity handling so derived identities can carry stable
+  labels and be used cleanly for MQTT/TLS and Harmonia remote-config flows.
+- Added PKCS#8 PEM export for wallet-derived Ed25519 identities used by the
+  Harmonia MQTT certificate flow.
+
 ## [0.1.26] — 2026-03-07
 
 ### Added
