@@ -29,7 +29,7 @@ use harmoniis_wallet::{
         PaymentSecret,
     },
     types::{Certificate, Contract, ContractStatus, ContractType, Role, WitnessSecret},
-    wallet::RgbWallet,
+    wallet::{RgbWallet, WalletSlotRecord},
     Identity,
 };
 use rand::Rng;
@@ -511,6 +511,29 @@ enum KeyCmd {
     },
     /// Show non-secret fingerprints for deterministic slots
     Fingerprint,
+    /// Create or materialize a labeled vault-derived identity for MQTT/TLS use
+    VaultNew {
+        /// Human label for the derived vault identity
+        #[arg(long)]
+        label: Option<String>,
+        /// Explicit vault slot index to materialize (index 0 is reserved for the vault root)
+        #[arg(long)]
+        index: Option<u32>,
+    },
+    /// List labeled vault-derived identities
+    VaultList,
+    /// Export a vault-derived identity private key as PKCS#8 PEM
+    VaultExport {
+        /// Label of the vault-derived identity to export
+        #[arg(long)]
+        label: Option<String>,
+        /// Explicit vault slot index to export
+        #[arg(long)]
+        index: Option<u32>,
+        /// Optional file path to write the PEM private key
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1095,6 +1118,27 @@ fn pick_pgp_identity(
             Ok((meta.label, identity))
         }
         None => active_pgp_identity(wallet),
+    }
+}
+
+fn pick_vault_identity(
+    wallet: &RgbWallet,
+    label: Option<&str>,
+    index: Option<u32>,
+) -> anyhow::Result<(WalletSlotRecord, Identity)> {
+    match (label, index) {
+        (Some(_), Some(_)) => anyhow::bail!("provide either --label or --index, not both"),
+        (Some(name), None) => {
+            let meta = wallet.vault_identity_by_label(name)?;
+            let identity = wallet.derive_vault_identity_for_index(meta.slot_index)?;
+            Ok((meta, identity))
+        }
+        (None, Some(slot_index)) => {
+            let meta = wallet.vault_identity_by_index(slot_index)?;
+            let identity = wallet.derive_vault_identity_for_index(meta.slot_index)?;
+            Ok((meta, identity))
+        }
+        (None, None) => anyhow::bail!("provide --label or --index"),
     }
 }
 
@@ -1863,6 +1907,64 @@ async fn main() -> anyhow::Result<()> {
             println!("Webcash slot:    {}", &webcash_slot[..16]);
             println!("Bitcoin slot:    {}", &bitcoin_slot[..16]);
             println!("Vault slot:      {}", &vault_slot[..16]);
+        }
+        Cmd::Key(KeyCmd::VaultNew { label, index }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let record = match index {
+                Some(slot_index) => {
+                    wallet.ensure_vault_identity_index(slot_index, label.as_deref())?
+                }
+                None => wallet.create_vault_identity(label.as_deref())?,
+            };
+            println!("Vault label:     {}", record.label.as_deref().unwrap_or(""));
+            println!("Vault index:     {}", record.slot_index);
+            println!("Vault public key: {}", record.descriptor);
+        }
+        Cmd::Key(KeyCmd::VaultList) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let items = wallet.list_vault_identities()?;
+            if items.is_empty() {
+                println!("No vault-derived identities.");
+            } else {
+                println!("{:<24} {:>8}  public_key", "label", "index");
+                for item in items {
+                    println!(
+                        "{:<24} {:>8}  {}",
+                        item.label.as_deref().unwrap_or(""),
+                        item.slot_index,
+                        item.descriptor
+                    );
+                }
+            }
+        }
+        Cmd::Key(KeyCmd::VaultExport {
+            label,
+            index,
+            output,
+        }) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let (record, identity) = pick_vault_identity(&wallet, label.as_deref(), index)?;
+            let pem = identity.private_key_pkcs8_pem()?;
+            if let Some(path) = output {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("failed creating export directory {}", parent.display())
+                    })?;
+                }
+                let mut f = fs::File::create(&path)
+                    .with_context(|| format!("failed creating {}", path.display()))?;
+                write!(f, "{pem}")?;
+                println!(
+                    "Exported vault-derived PKCS#8 private key ({}) to {}",
+                    record.label.as_deref().unwrap_or(""),
+                    path.display()
+                );
+            } else {
+                print!("{pem}");
+            }
+            println!("Vault label:     {}", record.label.as_deref().unwrap_or(""));
+            println!("Vault index:     {}", record.slot_index);
+            println!("Vault public key: {}", record.descriptor);
         }
 
         // ── deterministic recovery ───────────────────────────────────────────

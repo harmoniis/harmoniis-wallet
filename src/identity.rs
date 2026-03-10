@@ -1,5 +1,7 @@
 use crate::error::{Error, Result};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use pkcs8::LineEnding;
 use rand::rngs::OsRng;
 use zeroize::ZeroizeOnDrop;
 
@@ -37,6 +39,14 @@ impl Identity {
     /// Return the 32-byte private key as 64-char hex (for storage).
     pub fn private_key_hex(&self) -> String {
         hex::encode(self.signing_key.to_bytes())
+    }
+
+    /// Export the Ed25519 private key as PKCS#8 PEM.
+    pub fn private_key_pkcs8_pem(&self) -> Result<String> {
+        self.signing_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map(|pem| pem.to_string())
+            .map_err(|e| Error::Crypto(format!("pkcs8 pem encode failed: {e}")))
     }
 
     /// Return the 32-byte public key as 64-char hex.

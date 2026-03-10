@@ -83,6 +83,52 @@ fn pgp_identities_are_labeled_and_switchable() {
 }
 
 #[test]
+fn vault_identities_are_labeled_and_wallet_derived() {
+    let wallet = RgbWallet::open_memory().unwrap();
+
+    let alice = wallet
+        .create_vault_identity(Some("harmonia-agent-bob"))
+        .unwrap();
+    let bob = wallet
+        .create_vault_identity(Some("mqtt-client-alice"))
+        .unwrap();
+
+    assert_eq!(alice.label.as_deref(), Some("harmonia-agent-bob"));
+    assert_eq!(alice.slot_index, 1);
+    assert_eq!(bob.label.as_deref(), Some("mqtt-client-alice"));
+    assert_eq!(bob.slot_index, 2);
+    assert_ne!(alice.descriptor, bob.descriptor);
+
+    let listed = wallet.list_vault_identities().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].label.as_deref(), Some("harmonia-agent-bob"));
+    assert_eq!(listed[1].label.as_deref(), Some("mqtt-client-alice"));
+
+    let alice_identity = wallet
+        .derive_vault_identity_for_index(alice.slot_index)
+        .unwrap();
+    assert_eq!(alice_identity.public_key_hex(), alice.descriptor);
+    assert_ne!(
+        wallet.derive_vault_master_key_hex().unwrap(),
+        alice_identity.private_key_hex()
+    );
+}
+
+#[test]
+fn vault_identity_private_key_exports_as_pkcs8_pem() {
+    let wallet = RgbWallet::open_memory().unwrap();
+    let slot = wallet
+        .create_vault_identity(Some("mqtt-client-alice"))
+        .unwrap();
+    let identity = wallet
+        .derive_vault_identity_for_index(slot.slot_index)
+        .unwrap();
+    let pem = identity.private_key_pkcs8_pem().unwrap();
+    assert!(pem.contains("BEGIN PRIVATE KEY"));
+    assert!(pem.contains("END PRIVATE KEY"));
+}
+
+#[test]
 fn master_key_export_import_roundtrip_hex_and_mnemonic() {
     let wallet = RgbWallet::open_memory().unwrap();
     let root_hex = wallet.export_master_key_hex().unwrap();

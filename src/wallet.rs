@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{Error, Result},
     identity::Identity,
-    keychain::{HdKeychain, KEY_MODEL_VERSION_V3, SLOT_FAMILY_HARMONIA_VAULT, SLOT_FAMILY_VAULT},
+    keychain::{
+        HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT,
+        SLOT_FAMILY_VAULT,
+    },
     types::{Certificate, Contract, ContractStatus, ContractType, Role},
 };
 
@@ -51,6 +54,17 @@ pub struct PgpIdentitySnapshot {
     pub key_index: u32,
     pub private_key_hex: String,
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlotRecord {
+    pub family: String,
+    pub slot_index: u32,
+    pub descriptor: String,
+    pub db_rel_path: Option<String>,
+    pub label: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Serializable snapshot for backup/restore.
@@ -241,29 +255,63 @@ impl RgbWallet {
 
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('rgb', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='rgb' AND slot_index=0), ?2), ?2)",
+             VALUES ('rgb', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='rgb' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='rgb' AND slot_index=0), ?2), ?2)",
             params![rgb_hex, now],
         )?;
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('webcash', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='webcash' AND slot_index=0), ?2), ?2)",
+             VALUES ('webcash', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='webcash' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='webcash' AND slot_index=0), ?2), ?2)",
             params![webcash_hex, now],
         )?;
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('bitcoin', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), ?2), ?2)",
+             VALUES ('bitcoin', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), ?2), ?2)",
             params![bitcoin_hex, now],
         )?;
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('root', 0, ?1, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family='root' AND slot_index=0), ?2), ?2)",
+             VALUES ('root', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='root' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='root' AND slot_index=0), ?2), ?2)",
             params![root_hex, now],
         )?;
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES (?1, 0, ?2, NULL, NULL, COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=0), ?3), ?3)",
+             VALUES (?1, 0, ?2, NULL, (SELECT label FROM wallet_slots WHERE family=?1 AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=0), ?3), ?3)",
             params![SLOT_FAMILY_VAULT, vault_hex, now],
         )?;
+
+        let mut vault_stmt = self.master_conn.prepare(
+            "SELECT slot_index, label, created_at
+             FROM wallet_slots
+             WHERE family = ?1 AND slot_index > 0
+             ORDER BY slot_index ASC",
+        )?;
+        let vault_rows = vault_stmt.query_map(params![SLOT_FAMILY_VAULT], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let vault_rows = vault_rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(vault_stmt);
+        for row in vault_rows {
+            let (slot_index, label, created_at) = row;
+            let public_key_hex = self
+                .derive_vault_identity_for_index(slot_index)?
+                .public_key_hex();
+            self.master_conn.execute(
+                "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
+                params![
+                    SLOT_FAMILY_VAULT,
+                    i64::from(slot_index),
+                    public_key_hex,
+                    label,
+                    created_at,
+                    now
+                ],
+            )?;
+        }
 
         let mut stmt = self.master_conn.prepare(
             "SELECT key_index, public_key_hex, label FROM pgp_identities ORDER BY key_index ASC",
@@ -520,6 +568,90 @@ impl RgbWallet {
     /// Backward-compatible alias retained for Harmonia integration naming.
     pub fn derive_harmonia_vault_master_key_hex(&self) -> Result<String> {
         self.derive_slot_hex(SLOT_FAMILY_HARMONIA_VAULT, 0)
+    }
+
+    pub fn derive_vault_identity_for_index(&self, key_index: u32) -> Result<Identity> {
+        if key_index == 0 {
+            return Err(Error::Other(anyhow::anyhow!(
+                "vault key index 0 is reserved for the vault root"
+            )));
+        }
+        let private_key_hex = self.derive_slot_hex(SLOT_FAMILY_VAULT, key_index)?;
+        Identity::from_hex(&private_key_hex)
+    }
+
+    pub fn create_vault_identity(&self, label: Option<&str>) -> Result<WalletSlotRecord> {
+        let key_index = self.next_vault_key_index()?;
+        self.ensure_vault_identity_index(key_index, label)
+    }
+
+    pub fn ensure_vault_identity_index(
+        &self,
+        key_index: u32,
+        preferred_label: Option<&str>,
+    ) -> Result<WalletSlotRecord> {
+        if key_index == 0 || key_index >= MAX_VAULT_KEYS {
+            return Err(Error::Other(anyhow::anyhow!(
+                "vault key index out of range (valid: 1..{})",
+                MAX_VAULT_KEYS - 1
+            )));
+        }
+
+        let fallback_label = format!("vault-{key_index}-key-pairs");
+        let desired_raw = preferred_label.unwrap_or(fallback_label.as_str());
+        let desired = canonical_label(desired_raw)?;
+        let label = self.unique_vault_label(&desired, key_index)?;
+        let identity = self.derive_vault_identity_for_index(key_index)?;
+        let public_key_hex = identity.public_key_hex();
+
+        let tx = self.master_conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM wallet_slots WHERE family = ?1 AND slot_index = ?2",
+            params![SLOT_FAMILY_VAULT, i64::from(key_index)],
+        )?;
+        tx.execute(
+            "DELETE FROM wallet_slots WHERE family = ?1 AND label = ?2",
+            params![SLOT_FAMILY_VAULT, label.clone()],
+        )?;
+        tx.execute(
+            "INSERT INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5)",
+            params![
+                SLOT_FAMILY_VAULT,
+                i64::from(key_index),
+                public_key_hex,
+                label,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+        self.refresh_slot_registry()?;
+        self.vault_identity_by_index(key_index)
+    }
+
+    pub fn list_vault_identities(&self) -> Result<Vec<WalletSlotRecord>> {
+        self.list_wallet_slots(Some(SLOT_FAMILY_VAULT))
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter(|item| item.slot_index > 0)
+                    .collect()
+            })
+    }
+
+    pub fn vault_identity_by_label(&self, label: &str) -> Result<WalletSlotRecord> {
+        let canonical = canonical_label(label)?;
+        self.list_vault_identities()?
+            .into_iter()
+            .find(|item| item.label.as_deref() == Some(canonical.as_str()))
+            .ok_or_else(|| Error::NotFound(format!("vault identity label '{canonical}' not found")))
+    }
+
+    pub fn vault_identity_by_index(&self, key_index: u32) -> Result<WalletSlotRecord> {
+        self.list_vault_identities()?
+            .into_iter()
+            .find(|item| item.slot_index == key_index)
+            .ok_or_else(|| Error::NotFound(format!("vault identity index '{key_index}' not found")))
     }
 
     pub fn derive_slot_hex(&self, family: &str, index: u32) -> Result<String> {
@@ -818,6 +950,23 @@ impl RgbWallet {
         Ok(next)
     }
 
+    fn next_vault_key_index(&self) -> Result<u32> {
+        let mut stmt = self
+            .master_conn
+            .prepare("SELECT COALESCE(MAX(slot_index), 0) FROM wallet_slots WHERE family = ?1")?;
+        let max_idx: i64 = stmt.query_row(params![SLOT_FAMILY_VAULT], |row| row.get(0))?;
+        let next = max_idx.saturating_add(1);
+        let next = u32::try_from(next)
+            .map_err(|_| Error::Other(anyhow::anyhow!("too many vault identities in wallet")))?;
+        if next >= MAX_VAULT_KEYS {
+            return Err(Error::Other(anyhow::anyhow!(
+                "vault key index out of range (max {})",
+                MAX_VAULT_KEYS - 1
+            )));
+        }
+        Ok(next)
+    }
+
     fn unique_pgp_label(&self, desired: &str, key_index: u32) -> Result<String> {
         let mut candidate = desired.to_string();
         let mut suffix = 1u32;
@@ -830,6 +979,31 @@ impl RgbWallet {
                 return Ok(candidate);
             };
             let existing: u32 = row.get(0)?;
+            if existing == key_index {
+                return Ok(candidate);
+            }
+            candidate = format!("{desired}-{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+    }
+
+    fn unique_vault_label(&self, desired: &str, key_index: u32) -> Result<String> {
+        let mut candidate = desired.to_string();
+        let mut suffix = 1u32;
+        loop {
+            let mut stmt = self.master_conn.prepare(
+                "SELECT slot_index FROM wallet_slots
+                 WHERE family = ?1 AND label = ?2
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![SLOT_FAMILY_VAULT, candidate.clone()])?;
+            let Some(row) = rows.next()? else {
+                return Ok(candidate);
+            };
+            let existing_i: i64 = row.get(0)?;
+            let existing = u32::try_from(existing_i).map_err(|_| {
+                Error::Other(anyhow::anyhow!("invalid vault key index in wallet_slots"))
+            })?;
             if existing == key_index {
                 return Ok(candidate);
             }
@@ -863,6 +1037,37 @@ impl RgbWallet {
             let _ = self.refresh_slot_registry();
         }
         out
+    }
+
+    pub fn list_wallet_slots(&self, family: Option<&str>) -> Result<Vec<WalletSlotRecord>> {
+        let sql = if family.is_some() {
+            "SELECT family, slot_index, descriptor, db_rel_path, label, created_at, updated_at
+             FROM wallet_slots
+             WHERE family = ?1
+             ORDER BY family ASC, slot_index ASC"
+        } else {
+            "SELECT family, slot_index, descriptor, db_rel_path, label, created_at, updated_at
+             FROM wallet_slots
+             ORDER BY family ASC, slot_index ASC"
+        };
+        let mut stmt = self.master_conn.prepare(sql)?;
+        let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<WalletSlotRecord> {
+            Ok(WalletSlotRecord {
+                family: row.get(0)?,
+                slot_index: row.get(1)?,
+                descriptor: row.get(2)?,
+                db_rel_path: row.get(3)?,
+                label: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        };
+        let rows = match family {
+            Some(name) => stmt.query_map(params![name], mapper)?,
+            None => stmt.query_map([], mapper)?,
+        };
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Storage)
     }
 
     // ── Contracts ─────────────────────────────────────────────────────────────

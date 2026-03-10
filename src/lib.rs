@@ -24,7 +24,9 @@ pub use types::{
     WitnessProof, WitnessSecret,
 };
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
-pub use wallet::{PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSnapshot};
+pub use wallet::{
+    PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSlotRecord, WalletSnapshot,
+};
 
 #[cfg(feature = "securities")]
 pub use securities::{SecurityDeed, SecurityType, SecurityUnderlying};

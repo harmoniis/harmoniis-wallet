@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 
 pub const KEY_MODEL_VERSION_V3: &str = "v3-bip32";
 pub const MAX_PGP_KEYS: u32 = 1_000;
+pub const MAX_VAULT_KEYS: u32 = 1_000;
 pub const SLOT_FAMILY_VAULT: &str = "vault";
 /// Backward-compatible alias for existing integrations.
 pub const SLOT_FAMILY_HARMONIA_VAULT: &str = "harmonia-vault";
@@ -138,12 +139,13 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
             Ok((FAMILY_PGP, index))
         }
         SLOT_FAMILY_VAULT | SLOT_FAMILY_HARMONIA_VAULT => {
-            if index != 0 {
+            if index >= MAX_VAULT_KEYS {
                 return Err(Error::Other(anyhow::anyhow!(
-                    "vault family only supports index 0"
+                    "vault key index out of range (max {})",
+                    MAX_VAULT_KEYS - 1
                 )));
             }
-            Ok((FAMILY_HARMONIA_VAULT, 0))
+            Ok((FAMILY_HARMONIA_VAULT, index))
         }
         _ => Err(Error::Other(anyhow::anyhow!(
             "unknown key family '{family}'"
@@ -191,6 +193,7 @@ mod tests {
         let pgp_0 = keychain.derive_slot_hex("pgp", 0).unwrap();
         let pgp_1 = keychain.derive_slot_hex("pgp", 1).unwrap();
         let vault = keychain.derive_slot_hex(SLOT_FAMILY_VAULT, 0).unwrap();
+        let vault_1 = keychain.derive_slot_hex(SLOT_FAMILY_VAULT, 1).unwrap();
         assert_eq!(keychain.entropy_hex(), "00000000000000000000000000000000");
         assert_eq!(
             root,
@@ -220,6 +223,8 @@ mod tests {
             vault,
             "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368"
         );
+        assert_eq!(vault_1.len(), 64);
+        assert_ne!(vault_1, vault);
     }
 
     #[test]
