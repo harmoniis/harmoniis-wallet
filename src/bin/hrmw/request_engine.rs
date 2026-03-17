@@ -10,7 +10,10 @@ use harmoniis_wallet::{
     ark::{ArkPaymentWallet, SqliteArkDb},
     bitcoin::DeterministicBitcoinWallet,
     client::HarmoniisClient,
-    wallet::{NewPaymentAttempt, PaymentAttemptUpdate, RgbWallet},
+    wallet::{
+        NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptUpdate,
+        PaymentTransactionUpdate, RgbWallet,
+    },
     VoucherSecret,
 };
 use webylib::SecretWebcash;
@@ -59,6 +62,7 @@ struct PaymentDirective {
     header_name: String,
     required_amount: String,
     payment_unit: String,
+    challenge_id: Option<String>,
     response_code: Option<String>,
     response_body: String,
     rail_details: Value,
@@ -121,17 +125,18 @@ pub async fn execute_paid_request(
 ) -> anyhow::Result<RequestResponse> {
     let http = build_http_client()?;
     let url = build_request_url(&request.base_url, &request.endpoint)?;
-    let first = send_request(&http, request, &url, None).await?;
+    let first = send_request(&http, request, &url, None, None, None).await?;
     if first.status != 402 {
         return Ok(first);
     }
 
-    let directive = load_payment_directive(&http, &url, &first).await?;
+    let directive = load_payment_directive(&http, &url, &first, request.desired_rail).await?;
     let wallet = open_or_create_wallet(wallet_path)?;
     let service_origin = origin_string(&url);
     let endpoint_path = url.path().to_string();
     let method_upper = request.method.as_str().to_ascii_uppercase();
     let rail_token = directive.rail_name.to_ascii_lowercase();
+    let request_hash_value = request_hash(request);
 
     if wallet.is_payment_blacklisted(&service_origin, &endpoint_path, &method_upper, &rail_token)? {
         anyhow::bail!(
@@ -151,7 +156,58 @@ pub async fn execute_paid_request(
         required_amount: &directive.required_amount,
         payment_unit: &directive.payment_unit,
         payment_reference: None,
-        request_hash: &request_hash(request),
+        request_hash: &request_hash_value,
+    })?;
+    let challenge_metadata = serde_json::json!({
+        "url": url.as_str(),
+        "header_name": &directive.header_name,
+        "response_status": first.status,
+    })
+    .to_string();
+    let txn_id = wallet.record_payment_transaction(&NewPaymentTransaction {
+        attempt_id: Some(&attempt_id),
+        occurred_at: None,
+        direction: "outbound",
+        role: "payer",
+        source_system: "hrmw",
+        service_origin: Some(&service_origin),
+        frontend_kind: Some("hrmw"),
+        transport_kind: Some("http"),
+        endpoint_path: Some(&endpoint_path),
+        method: Some(&method_upper),
+        session_id: None,
+        action_kind: &request.action_hint,
+        resource_ref: None,
+        contract_ref: None,
+        invoice_ref: None,
+        challenge_id: directive.challenge_id.as_deref(),
+        rail: &rail_token,
+        payment_unit: &directive.payment_unit,
+        quoted_amount: Some(&directive.required_amount),
+        settled_amount: None,
+        fee_amount: None,
+        proof_ref: None,
+        proof_kind: None,
+        payer_ref: None,
+        payee_ref: Some(&service_origin),
+        request_hash: Some(&request_hash_value),
+        response_code: directive.response_code.as_deref(),
+        status: "challenge_received",
+        metadata_json: Some(&challenge_metadata),
+    })?;
+    let challenge_event_details = serde_json::json!({
+        "rail": &rail_token,
+        "required_amount": &directive.required_amount,
+        "payment_unit": &directive.payment_unit,
+        "response_code": &directive.response_code,
+    })
+    .to_string();
+    wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+        txn_id: &txn_id,
+        event_type: "challenge_received",
+        status: "challenge_received",
+        actor: "hrmw",
+        details_json: Some(&challenge_event_details),
     })?;
 
     let payment = acquire_payment(
@@ -162,6 +218,12 @@ pub async fn execute_paid_request(
         &request.action_hint,
     )
     .await?;
+    let (proof_kind, proof_ref) = payment_transaction_proof(&payment);
+    let payment_acquired_details = serde_json::json!({
+        "proof_kind": proof_kind,
+        "proof_ref": &proof_ref,
+    })
+    .to_string();
     wallet.update_payment_attempt(
         &attempt_id,
         &PaymentAttemptUpdate {
@@ -173,16 +235,63 @@ pub async fn execute_paid_request(
             final_state: "paid",
         },
     )?;
+    wallet.update_payment_transaction(
+        &txn_id,
+        &PaymentTransactionUpdate {
+            occurred_at: None,
+            service_origin: None,
+            frontend_kind: None,
+            transport_kind: None,
+            endpoint_path: None,
+            method: None,
+            session_id: None,
+            action_kind: None,
+            resource_ref: None,
+            contract_ref: None,
+            invoice_ref: None,
+            challenge_id: directive.challenge_id.as_deref(),
+            quoted_amount: Some(&directive.required_amount),
+            settled_amount: Some(&directive.required_amount),
+            fee_amount: None,
+            proof_ref: Some(&proof_ref),
+            proof_kind: Some(proof_kind),
+            payer_ref: None,
+            payee_ref: Some(&service_origin),
+            request_hash: None,
+            response_code: directive.response_code.as_deref(),
+            status: "payment_acquired",
+            metadata_json: None,
+        },
+    )?;
+    wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+        txn_id: &txn_id,
+        event_type: "payment_acquired",
+        status: "payment_acquired",
+        actor: "hrmw",
+        details_json: Some(&payment_acquired_details),
+    })?;
 
     let second = send_request(
         &http,
         request,
         &url,
         Some((payment.header_name(), &payment.header_value())),
+        directive.challenge_id.as_deref(),
+        Some(directive.rail),
     )
     .await;
     match second {
         Ok(resp) if (200..300).contains(&resp.status) => {
+            let success_metadata = serde_json::json!({
+                "status": resp.status,
+                "content_type": &resp.content_type,
+            })
+            .to_string();
+            let success_event_details = serde_json::json!({
+                "status": resp.status,
+                "response_code": parse_response_code(resp.body_json.as_ref()),
+            })
+            .to_string();
             wallet.update_payment_attempt(
                 &attempt_id,
                 &PaymentAttemptUpdate {
@@ -194,6 +303,41 @@ pub async fn execute_paid_request(
                     final_state: "succeeded",
                 },
             )?;
+            wallet.update_payment_transaction(
+                &txn_id,
+                &PaymentTransactionUpdate {
+                    occurred_at: None,
+                    service_origin: None,
+                    frontend_kind: None,
+                    transport_kind: None,
+                    endpoint_path: None,
+                    method: None,
+                    session_id: None,
+                    action_kind: None,
+                    resource_ref: None,
+                    contract_ref: None,
+                    invoice_ref: None,
+                    challenge_id: directive.challenge_id.as_deref(),
+                    quoted_amount: None,
+                    settled_amount: Some(&directive.required_amount),
+                    fee_amount: None,
+                    proof_ref: Some(&proof_ref),
+                    proof_kind: Some(proof_kind),
+                    payer_ref: None,
+                    payee_ref: Some(&service_origin),
+                    request_hash: None,
+                    response_code: None,
+                    status: "succeeded",
+                    metadata_json: Some(&success_metadata),
+                },
+            )?;
+            wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                txn_id: &txn_id,
+                event_type: "service_completed",
+                status: "succeeded",
+                actor: "service",
+                details_json: Some(&success_event_details),
+            })?;
             Ok(resp)
         }
         Ok(resp) => {
@@ -203,6 +347,7 @@ pub async fn execute_paid_request(
                 &directive,
                 &payment,
                 &attempt_id,
+                &txn_id,
                 &service_origin,
                 &endpoint_path,
                 &method_upper,
@@ -225,6 +370,7 @@ pub async fn execute_paid_request(
                 &directive,
                 &payment,
                 &attempt_id,
+                &txn_id,
                 &service_origin,
                 &endpoint_path,
                 &method_upper,
@@ -245,6 +391,7 @@ async fn recover_or_log_loss(
     directive: &PaymentDirective,
     payment: &AcquiredPayment,
     attempt_id: &str,
+    txn_id: &str,
     service_origin: &str,
     endpoint_path: &str,
     method_upper: &str,
@@ -254,6 +401,7 @@ async fn recover_or_log_loss(
     service_base_url: &str,
 ) -> anyhow::Result<()> {
     let rail_token = directive.rail_name.to_ascii_lowercase();
+    let (proof_kind, proof_ref) = payment_transaction_proof(payment);
     match payment {
         AcquiredPayment::Webcash { header_value, .. } => {
             let webcash_wallet = open_webcash_wallet(wallet_path, wallet).await?;
@@ -261,6 +409,14 @@ async fn recover_or_log_loss(
                 .map_err(|e| anyhow::anyhow!("invalid paid webcash token: {e}"))?;
             match webcash_wallet.insert(secret).await {
                 Ok(()) => {
+                    let recovered_details = serde_json::json!({
+                        "recovery_state": "reinserted",
+                        "proof_kind": proof_kind,
+                        "proof_ref": &proof_ref,
+                        "response_status": response_status,
+                        "response_code": &response_code,
+                    })
+                    .to_string();
                     wallet.update_payment_attempt(
                         attempt_id,
                         &PaymentAttemptUpdate {
@@ -272,8 +428,51 @@ async fn recover_or_log_loss(
                             final_state: "recovered",
                         },
                     )?;
+                    wallet.update_payment_transaction(
+                        txn_id,
+                        &PaymentTransactionUpdate {
+                            occurred_at: None,
+                            service_origin: None,
+                            frontend_kind: None,
+                            transport_kind: None,
+                            endpoint_path: None,
+                            method: None,
+                            session_id: None,
+                            action_kind: None,
+                            resource_ref: None,
+                            contract_ref: None,
+                            invoice_ref: None,
+                            challenge_id: directive.challenge_id.as_deref(),
+                            quoted_amount: None,
+                            settled_amount: Some(&directive.required_amount),
+                            fee_amount: None,
+                            proof_ref: Some(&proof_ref),
+                            proof_kind: Some(proof_kind),
+                            payer_ref: None,
+                            payee_ref: Some(service_origin),
+                            request_hash: None,
+                            response_code: response_code.as_deref(),
+                            status: "recovered",
+                            metadata_json: None,
+                        },
+                    )?;
+                    wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                        txn_id,
+                        event_type: "payment_recovered",
+                        status: "recovered",
+                        actor: "wallet",
+                        details_json: Some(&recovered_details),
+                    })?;
                 }
                 Err(err) if is_duplicate_wallet_row_error(&err.to_string()) => {
+                    let recovered_details = serde_json::json!({
+                        "recovery_state": "duplicate_present",
+                        "proof_kind": proof_kind,
+                        "proof_ref": &proof_ref,
+                        "response_status": response_status,
+                        "response_code": &response_code,
+                    })
+                    .to_string();
                     wallet.update_payment_attempt(
                         attempt_id,
                         &PaymentAttemptUpdate {
@@ -285,6 +484,41 @@ async fn recover_or_log_loss(
                             final_state: "recovered",
                         },
                     )?;
+                    wallet.update_payment_transaction(
+                        txn_id,
+                        &PaymentTransactionUpdate {
+                            occurred_at: None,
+                            service_origin: None,
+                            frontend_kind: None,
+                            transport_kind: None,
+                            endpoint_path: None,
+                            method: None,
+                            session_id: None,
+                            action_kind: None,
+                            resource_ref: None,
+                            contract_ref: None,
+                            invoice_ref: None,
+                            challenge_id: directive.challenge_id.as_deref(),
+                            quoted_amount: None,
+                            settled_amount: Some(&directive.required_amount),
+                            fee_amount: None,
+                            proof_ref: Some(&proof_ref),
+                            proof_kind: Some(proof_kind),
+                            payer_ref: None,
+                            payee_ref: Some(service_origin),
+                            request_hash: None,
+                            response_code: response_code.as_deref(),
+                            status: "recovered",
+                            metadata_json: None,
+                        },
+                    )?;
+                    wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                        txn_id,
+                        event_type: "payment_recovered",
+                        status: "recovered",
+                        actor: "wallet",
+                        details_json: Some(&recovered_details),
+                    })?;
                 }
                 Err(_) => {
                     let loss_id = wallet.store_payment_loss(
@@ -300,6 +534,16 @@ async fn recover_or_log_loss(
                         response_code.as_deref(),
                         response_body,
                     )?;
+                    let loss_details = serde_json::json!({
+                        "loss_id": &loss_id,
+                        "failure_stage": "post_payment_response_error",
+                        "recovery_state": "reinsert_failed",
+                        "proof_kind": proof_kind,
+                        "proof_ref": &proof_ref,
+                        "response_status": response_status,
+                        "response_code": &response_code,
+                    })
+                    .to_string();
                     wallet.update_payment_attempt(
                         attempt_id,
                         &PaymentAttemptUpdate {
@@ -311,6 +555,41 @@ async fn recover_or_log_loss(
                             final_state: &format!("lost_pending_reclaim:{loss_id}"),
                         },
                     )?;
+                    wallet.update_payment_transaction(
+                        txn_id,
+                        &PaymentTransactionUpdate {
+                            occurred_at: None,
+                            service_origin: None,
+                            frontend_kind: None,
+                            transport_kind: None,
+                            endpoint_path: None,
+                            method: None,
+                            session_id: None,
+                            action_kind: None,
+                            resource_ref: None,
+                            contract_ref: None,
+                            invoice_ref: None,
+                            challenge_id: directive.challenge_id.as_deref(),
+                            quoted_amount: None,
+                            settled_amount: Some(&directive.required_amount),
+                            fee_amount: None,
+                            proof_ref: Some(&proof_ref),
+                            proof_kind: Some(proof_kind),
+                            payer_ref: None,
+                            payee_ref: Some(service_origin),
+                            request_hash: None,
+                            response_code: response_code.as_deref(),
+                            status: "lost",
+                            metadata_json: None,
+                        },
+                    )?;
+                    wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                        txn_id,
+                        event_type: "payment_lost",
+                        status: "lost",
+                        actor: "wallet",
+                        details_json: Some(&loss_details),
+                    })?;
                 }
             }
         }
@@ -321,6 +600,14 @@ async fn recover_or_log_loss(
                 .reinsert_if_live(&voucher_client, secret)
                 .await?
             {
+                let recovered_details = serde_json::json!({
+                    "recovery_state": "reinserted",
+                    "proof_kind": proof_kind,
+                    "proof_ref": &proof_ref,
+                    "response_status": response_status,
+                    "response_code": &response_code,
+                })
+                .to_string();
                 wallet.update_payment_attempt(
                     attempt_id,
                     &PaymentAttemptUpdate {
@@ -332,6 +619,41 @@ async fn recover_or_log_loss(
                         final_state: "recovered",
                     },
                 )?;
+                wallet.update_payment_transaction(
+                    txn_id,
+                    &PaymentTransactionUpdate {
+                        occurred_at: None,
+                        service_origin: None,
+                        frontend_kind: None,
+                        transport_kind: None,
+                        endpoint_path: None,
+                        method: None,
+                        session_id: None,
+                        action_kind: None,
+                        resource_ref: None,
+                        contract_ref: None,
+                        invoice_ref: None,
+                        challenge_id: directive.challenge_id.as_deref(),
+                        quoted_amount: None,
+                        settled_amount: Some(&directive.required_amount),
+                        fee_amount: None,
+                        proof_ref: Some(&proof_ref),
+                        proof_kind: Some(proof_kind),
+                        payer_ref: None,
+                        payee_ref: Some(service_origin),
+                        request_hash: None,
+                        response_code: response_code.as_deref(),
+                        status: "recovered",
+                        metadata_json: None,
+                    },
+                )?;
+                wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                    txn_id,
+                    event_type: "payment_recovered",
+                    status: "recovered",
+                    actor: "wallet",
+                    details_json: Some(&recovered_details),
+                })?;
             } else {
                 let loss_id = wallet.store_payment_loss(
                     attempt_id,
@@ -346,6 +668,16 @@ async fn recover_or_log_loss(
                     response_code.as_deref(),
                     response_body,
                 )?;
+                let loss_details = serde_json::json!({
+                    "loss_id": &loss_id,
+                    "failure_stage": "post_payment_response_error",
+                    "recovery_state": "not_live",
+                    "proof_kind": proof_kind,
+                    "proof_ref": &proof_ref,
+                    "response_status": response_status,
+                    "response_code": &response_code,
+                })
+                .to_string();
                 wallet.update_payment_attempt(
                     attempt_id,
                     &PaymentAttemptUpdate {
@@ -357,6 +689,41 @@ async fn recover_or_log_loss(
                         final_state: &format!("lost_pending_reclaim:{loss_id}"),
                     },
                 )?;
+                wallet.update_payment_transaction(
+                    txn_id,
+                    &PaymentTransactionUpdate {
+                        occurred_at: None,
+                        service_origin: None,
+                        frontend_kind: None,
+                        transport_kind: None,
+                        endpoint_path: None,
+                        method: None,
+                        session_id: None,
+                        action_kind: None,
+                        resource_ref: None,
+                        contract_ref: None,
+                        invoice_ref: None,
+                        challenge_id: directive.challenge_id.as_deref(),
+                        quoted_amount: None,
+                        settled_amount: Some(&directive.required_amount),
+                        fee_amount: None,
+                        proof_ref: Some(&proof_ref),
+                        proof_kind: Some(proof_kind),
+                        payer_ref: None,
+                        payee_ref: Some(service_origin),
+                        request_hash: None,
+                        response_code: response_code.as_deref(),
+                        status: "lost",
+                        metadata_json: None,
+                    },
+                )?;
+                wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                    txn_id,
+                    event_type: "payment_lost",
+                    status: "lost",
+                    actor: "wallet",
+                    details_json: Some(&loss_details),
+                })?;
             }
         }
         AcquiredPayment::BitcoinArk { .. } => {
@@ -373,6 +740,16 @@ async fn recover_or_log_loss(
                 response_code.as_deref(),
                 response_body,
             )?;
+            let loss_details = serde_json::json!({
+                "loss_id": &loss_id,
+                "failure_stage": "post_payment_response_error",
+                "recovery_state": "irrecoverable_ark_transfer",
+                "proof_kind": proof_kind,
+                "proof_ref": &proof_ref,
+                "response_status": response_status,
+                "response_code": &response_code,
+            })
+            .to_string();
             wallet.update_payment_attempt(
                 attempt_id,
                 &PaymentAttemptUpdate {
@@ -384,6 +761,41 @@ async fn recover_or_log_loss(
                     final_state: &format!("lost_pending_reclaim:{loss_id}"),
                 },
             )?;
+            wallet.update_payment_transaction(
+                txn_id,
+                &PaymentTransactionUpdate {
+                    occurred_at: None,
+                    service_origin: None,
+                    frontend_kind: None,
+                    transport_kind: None,
+                    endpoint_path: None,
+                    method: None,
+                    session_id: None,
+                    action_kind: None,
+                    resource_ref: None,
+                    contract_ref: None,
+                    invoice_ref: None,
+                    challenge_id: directive.challenge_id.as_deref(),
+                    quoted_amount: None,
+                    settled_amount: Some(&directive.required_amount),
+                    fee_amount: None,
+                    proof_ref: Some(&proof_ref),
+                    proof_kind: Some(proof_kind),
+                    payer_ref: None,
+                    payee_ref: Some(service_origin),
+                    request_hash: None,
+                    response_code: response_code.as_deref(),
+                    status: "lost",
+                    metadata_json: None,
+                },
+            )?;
+            wallet.append_payment_transaction_event(&NewPaymentTransactionEvent {
+                txn_id,
+                event_type: "payment_lost",
+                status: "lost",
+                actor: "wallet",
+                details_json: Some(&loss_details),
+            })?;
         }
     }
     Ok(())
@@ -493,6 +905,8 @@ async fn send_request(
     request: &RequestSpec,
     url: &Url,
     payment_header: Option<(&str, &str)>,
+    payment_challenge: Option<&str>,
+    settled_rail: Option<PaymentRail>,
 ) -> anyhow::Result<RequestResponse> {
     let mut builder = http.request(request.method.clone(), url.clone());
     for (name, value) in &request.headers {
@@ -513,9 +927,22 @@ async fn send_request(
                 },
             );
         }
+        if !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-harmoniis-payment-rail"))
+        {
+            builder = builder.header("X-Harmoniis-Payment-Rail", rail_name(rail));
+        }
     }
     if let Some((name, value)) = payment_header {
         builder = builder.header(name, value);
+    }
+    if let Some(challenge_id) = payment_challenge {
+        builder = builder.header("X-Harmoniis-Payment-Challenge", challenge_id);
+    }
+    if let Some(rail) = settled_rail {
+        builder = builder.header("X-Harmoniis-Payment-Rail", rail_name(rail));
     }
     if !request.query.is_empty() {
         builder = builder.query(&request.query);
@@ -552,6 +979,7 @@ async fn load_payment_directive(
     http: &reqwest::Client,
     request_url: &Url,
     first_response: &RequestResponse,
+    preferred_rail: Option<PaymentRail>,
 ) -> anyhow::Result<PaymentDirective> {
     let body = first_response
         .body_json
@@ -561,23 +989,10 @@ async fn load_payment_directive(
         .get("payment")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow::anyhow!("402 response missing payment object"))?;
-    let rail_name = payment
-        .get("currency")
-        .and_then(Value::as_str)
-        .or_else(|| payment.get("expected_payment_rail").and_then(Value::as_str))
-        .unwrap_or("webcash")
-        .trim()
-        .to_ascii_lowercase();
-    let rail = parse_rail(&rail_name)?;
-    let header_name = payment
-        .get("header")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| match rail {
-            PaymentRail::Webcash => "X-Webcash-Secret",
-            PaymentRail::Voucher => "X-Voucher-Secret",
-            PaymentRail::Bitcoin => "X-Bitcoin-Secret",
-        })
-        .to_string();
+    let rail_details = payment.get("rail_details").cloned().unwrap_or(Value::Null);
+    let rail = select_payment_rail(payment, preferred_rail)?;
+    let rail_name = rail_name(rail).to_string();
+    let header_name = payment_header_name(payment, rail, &rail_details);
     let required_amount = payment
         .get("price")
         .or_else(|| payment.get("required_amount"))
@@ -594,9 +1009,9 @@ async fn load_payment_directive(
             PaymentRail::Bitcoin => "sats",
         })
         .to_string();
-    let mut rail_details = payment.get("rail_details").cloned().unwrap_or(Value::Null);
-    if !rail_details.is_object() {
-        rail_details = fetch_fee_schedule(
+    let mut effective_rail_details = rail_details;
+    if !effective_rail_details.is_object() {
+        effective_rail_details = fetch_fee_schedule(
             http,
             request_url,
             payment.get("fee_schedule_url").and_then(Value::as_str),
@@ -610,9 +1025,14 @@ async fn load_payment_directive(
         header_name,
         required_amount,
         payment_unit,
+        challenge_id: payment
+            .get("challenge_id")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("challenge_id").and_then(Value::as_str))
+            .map(ToString::to_string),
         response_code: parse_response_code(first_response.body_json.as_ref()),
         response_body: first_response.body_text.clone(),
-        rail_details,
+        rail_details: effective_rail_details,
     })
 }
 
@@ -713,6 +1133,81 @@ fn parse_rail(raw: &str) -> anyhow::Result<PaymentRail> {
     }
 }
 
+fn rail_name(rail: PaymentRail) -> &'static str {
+    match rail {
+        PaymentRail::Webcash => "webcash",
+        PaymentRail::Voucher => "voucher",
+        PaymentRail::Bitcoin => "bitcoin",
+    }
+}
+
+fn default_payment_header(rail: PaymentRail) -> &'static str {
+    match rail {
+        PaymentRail::Webcash => "X-Webcash-Secret",
+        PaymentRail::Voucher => "X-Voucher-Secret",
+        PaymentRail::Bitcoin => "X-Bitcoin-Secret",
+    }
+}
+
+fn select_payment_rail(
+    payment: &serde_json::Map<String, Value>,
+    preferred_rail: Option<PaymentRail>,
+) -> anyhow::Result<PaymentRail> {
+    let allowed = payment
+        .get("allowed_rails")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|raw| parse_rail(raw).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(preferred) = preferred_rail {
+        if allowed.is_empty() || allowed.contains(&preferred) {
+            return Ok(preferred);
+        }
+    }
+
+    if let Some(raw) = payment
+        .get("currency")
+        .and_then(Value::as_str)
+        .or_else(|| payment.get("expected_payment_rail").and_then(Value::as_str))
+    {
+        let parsed = parse_rail(raw)?;
+        if allowed.is_empty() || allowed.contains(&parsed) {
+            return Ok(parsed);
+        }
+    }
+
+    if let Some(first) = allowed.first().copied() {
+        return Ok(first);
+    }
+
+    Ok(PaymentRail::Webcash)
+}
+
+fn payment_header_name(
+    payment: &serde_json::Map<String, Value>,
+    rail: PaymentRail,
+    rail_details: &Value,
+) -> String {
+    rail_details
+        .get(rail_name(rail))
+        .and_then(|value| value.get("header"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            payment
+                .get("header")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| default_payment_header(rail).to_string())
+}
+
 fn origin_string(url: &Url) -> String {
     let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
     if let Some(port) = url.port() {
@@ -757,6 +1252,20 @@ fn hashed_reference(raw: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn payment_transaction_proof(payment: &AcquiredPayment) -> (&'static str, String) {
+    match payment {
+        AcquiredPayment::Webcash { header_value, .. } => {
+            ("webcash_secret_hash", hashed_reference(header_value))
+        }
+        AcquiredPayment::Voucher {
+            payment_reference, ..
+        } => ("voucher_public_hash", payment_reference.clone()),
+        AcquiredPayment::BitcoinArk {
+            payment_reference, ..
+        } => ("ark_vtxo_txid", payment_reference.clone()),
+    }
+}
+
 fn value_to_string(value: &Value) -> anyhow::Result<String> {
     match value {
         Value::String(text) => Ok(text.trim().to_string()),
@@ -767,4 +1276,39 @@ fn value_to_string(value: &Value) -> anyhow::Result<String> {
 
 fn is_duplicate_wallet_row_error(err: &str) -> bool {
     err.contains("UNIQUE constraint") || err.contains("already exists")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{payment_header_name, select_payment_rail, PaymentRail};
+    use serde_json::json;
+
+    #[test]
+    fn selects_preferred_allowed_rail() {
+        let payment = json!({
+            "allowed_rails": ["webcash", "voucher", "bitcoin"],
+            "currency": "webcash",
+        });
+        let payment = payment.as_object().expect("object");
+        assert_eq!(
+            select_payment_rail(payment, Some(PaymentRail::Voucher)).expect("selected rail"),
+            PaymentRail::Voucher
+        );
+    }
+
+    #[test]
+    fn prefers_selected_rail_header_over_top_level_default() {
+        let payment = json!({
+            "header": "X-Webcash-Secret",
+            "rail_details": {
+                "voucher": { "header": "X-Voucher-Secret" }
+            }
+        });
+        let payment_obj = payment.as_object().expect("object");
+        let rail_details = payment_obj.get("rail_details").expect("rail details");
+        assert_eq!(
+            payment_header_name(payment_obj, PaymentRail::Voucher, rail_details),
+            "X-Voucher-Secret"
+        );
+    }
 }

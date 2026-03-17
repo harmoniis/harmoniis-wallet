@@ -26,19 +26,17 @@ use harmoniis_wallet::{
 /// State: `public_hash → (status, contract_id, amount_units)`
 #[derive(Clone, Default)]
 struct Mockwitness {
-    inner: Arc<Mutex<HashMap<String, witnessRecord>>>,
+    inner: Arc<Mutex<HashMap<String, WitnessRecord>>>,
 }
 
 #[derive(Debug, Clone)]
-struct witnessRecord {
+struct WitnessRecord {
     status: String, // "live" | "spent" | "burned"
-    contract_id: String,
     contract_type: String,
-    amount_units: Option<u64>,
 }
 
 #[derive(Debug, PartialEq)]
-enum witnessStatus {
+enum WitnessStatus {
     Live,
     Spent,
     Burned,
@@ -55,11 +53,9 @@ impl Mockwitness {
         }
         map.insert(
             proof.public_hash.clone(),
-            witnessRecord {
+            WitnessRecord {
                 status: "live".to_string(),
-                contract_id: secret.contract_id().to_string(),
                 contract_type: contract_type.to_string(),
-                amount_units: None,
             },
         );
         println!(
@@ -79,11 +75,9 @@ impl Mockwitness {
         }
         map.insert(
             proof.public_hash.clone(),
-            witnessRecord {
+            WitnessRecord {
                 status: "live".to_string(),
-                contract_id: secret.contract_id.clone(),
                 contract_type: "RGB20:Stablecash".to_string(),
-                amount_units: Some(secret.amount_units),
             },
         );
         println!(
@@ -121,11 +115,9 @@ impl Mockwitness {
         map.get_mut(&old_proof.public_hash).unwrap().status = "spent".to_string();
         map.insert(
             new_proof.public_hash.clone(),
-            witnessRecord {
+            WitnessRecord {
                 status: "live".to_string(),
-                contract_id: new.contract_id().to_string(),
                 contract_type,
-                amount_units: None,
             },
         );
 
@@ -188,11 +180,9 @@ impl Mockwitness {
             }
             map.insert(
                 proof.public_hash.clone(),
-                witnessRecord {
+                WitnessRecord {
                     status: "live".to_string(),
-                    contract_id: contract_id.clone(),
                     contract_type: "RGB20:Stablecash".to_string(),
-                    amount_units: Some(output.amount_units),
                 },
             );
         }
@@ -215,28 +205,28 @@ impl Mockwitness {
     }
 
     /// Check status of a proof.
-    fn check_proof(&self, proof: &WitnessProof) -> witnessStatus {
+    fn check_proof(&self, proof: &WitnessProof) -> WitnessStatus {
         let map = self.inner.lock().unwrap();
         match map.get(&proof.public_hash) {
-            None => witnessStatus::NotFound,
+            None => WitnessStatus::NotFound,
             Some(rec) => match rec.status.as_str() {
-                "live" => witnessStatus::Live,
-                "spent" => witnessStatus::Spent,
-                "burned" => witnessStatus::Burned,
-                _ => witnessStatus::NotFound,
+                "live" => WitnessStatus::Live,
+                "spent" => WitnessStatus::Spent,
+                "burned" => WitnessStatus::Burned,
+                _ => WitnessStatus::NotFound,
             },
         }
     }
 
-    fn check_stablecash(&self, proof: &StablecashProof) -> witnessStatus {
+    fn check_stablecash(&self, proof: &StablecashProof) -> WitnessStatus {
         let map = self.inner.lock().unwrap();
         match map.get(&proof.public_hash) {
-            None => witnessStatus::NotFound,
+            None => WitnessStatus::NotFound,
             Some(rec) => match rec.status.as_str() {
-                "live" => witnessStatus::Live,
-                "spent" => witnessStatus::Spent,
-                "burned" => witnessStatus::Burned,
-                _ => witnessStatus::NotFound,
+                "live" => WitnessStatus::Live,
+                "spent" => WitnessStatus::Spent,
+                "burned" => WitnessStatus::Burned,
+                _ => WitnessStatus::NotFound,
             },
         }
     }
@@ -364,14 +354,14 @@ fn test_6_phase_rgb21_contract_flow() {
     buyer_wallet.store_contract(&contract).unwrap();
 
     // Assert proof is live
-    assert_eq!(witness.check_proof(&initial_proof), witnessStatus::Live);
+    assert_eq!(witness.check_proof(&initial_proof), WitnessStatus::Live);
     println!("Phase 2: Contract bought, witness proof verified live.");
 
     // ── Phase 3: Buyer bids with witness proof ─────────────────────────────────
     let bid_content = format!("Bid on {contract_id}: I'll do this for 10 USDH");
     let bid_sig = buyer_id.sign(&format!("post:{bid_content}"));
     // Backend verifies: witness_proof exists and is live, plus signature
-    assert_eq!(witness.check_proof(&initial_proof), witnessStatus::Live);
+    assert_eq!(witness.check_proof(&initial_proof), WitnessStatus::Live);
     assert!(
         Identity::verify(&buyer_fp, &format!("post:{bid_content}"), &bid_sig).unwrap(),
         "bid signature must verify"
@@ -400,9 +390,9 @@ fn test_6_phase_rgb21_contract_flow() {
     witness.replace_rgb21(&initial_secret, &new_secret).unwrap();
 
     // Old proof is now spent
-    assert_eq!(witness.check_proof(&initial_proof), witnessStatus::Spent);
+    assert_eq!(witness.check_proof(&initial_proof), WitnessStatus::Spent);
     // New proof is live
-    assert_eq!(witness.check_proof(&new_proof), witnessStatus::Live);
+    assert_eq!(witness.check_proof(&new_proof), WitnessStatus::Live);
 
     // Buyer's wallet: secret cleared (transferred), proof updated to new
     {
@@ -472,12 +462,12 @@ fn test_6_phase_rgb21_contract_flow() {
     assert_eq!(seller_secret.contract_id(), &contract_id);
     assert_eq!(
         witness.check_proof(&seller_secret.public_proof()),
-        witnessStatus::Live
+        WitnessStatus::Live
     );
 
     // Arbiter burns secret (settle: pay seller, burn contract)
     witness.burn_rgb21(&seller_secret).unwrap();
-    assert_eq!(witness.check_proof(&new_proof), witnessStatus::Burned);
+    assert_eq!(witness.check_proof(&new_proof), WitnessStatus::Burned);
 
     seller_contract.status = ContractStatus::Delivered;
     seller_contract.delivered_text = Some(delivered_text.to_string());
@@ -493,8 +483,8 @@ fn test_6_phase_rgb21_contract_flow() {
     }
 
     // Assert: original proof is spent, new proof is burned
-    assert_eq!(witness.check_proof(&initial_proof), witnessStatus::Spent);
-    assert_eq!(witness.check_proof(&new_proof), witnessStatus::Burned);
+    assert_eq!(witness.check_proof(&initial_proof), WitnessStatus::Spent);
+    assert_eq!(witness.check_proof(&new_proof), WitnessStatus::Burned);
 
     println!("Phase 6: Picked up. Original proof=Spent, transferred proof=Burned.");
     println!("\n=== 6-Phase flow PASSED ===\n");
@@ -515,13 +505,13 @@ fn test_rgb21_refund_before_accept() {
     let proof = secret.public_proof();
     witness.mint_rgb21(&secret, "RGB21:Contract").unwrap();
 
-    assert_eq!(witness.check_proof(&proof), witnessStatus::Live);
+    assert_eq!(witness.check_proof(&proof), WitnessStatus::Live);
 
     // Refund: buyer proves ownership (secret) → arbiter burns
     let refund_sig = buyer_id.sign(&format!("REFUND:{contract_id}"));
     assert!(Identity::verify(&buyer_fp, &format!("REFUND:{contract_id}"), &refund_sig).unwrap());
     witness.burn_rgb21(&secret).unwrap();
-    assert_eq!(witness.check_proof(&proof), witnessStatus::Burned);
+    assert_eq!(witness.check_proof(&proof), WitnessStatus::Burned);
     println!("Refund (before accept): contract burned. PASSED.");
 }
 
@@ -537,7 +527,7 @@ fn test_rgb20_stablecash_split_and_merge() {
     let total_secret = StablecashSecret::generate(1_000_000_000, "USDH_MAIN");
     let total_proof = total_secret.public_proof();
     witness.mint_rgb20(&total_secret).unwrap();
-    assert_eq!(witness.check_stablecash(&total_proof), witnessStatus::Live);
+    assert_eq!(witness.check_stablecash(&total_proof), WitnessStatus::Live);
 
     // Verify format: `u1000000000:USDH_MAIN:secret:hex64`
     let display = total_secret.display();
@@ -568,9 +558,9 @@ fn test_rgb20_stablecash_split_and_merge() {
     let pay_proof = pay_secret.public_proof();
     let change_proof = change_secret.public_proof();
 
-    assert_eq!(witness.check_stablecash(&total_proof), witnessStatus::Spent);
-    assert_eq!(witness.check_stablecash(&pay_proof), witnessStatus::Live);
-    assert_eq!(witness.check_stablecash(&change_proof), witnessStatus::Live);
+    assert_eq!(witness.check_stablecash(&total_proof), WitnessStatus::Spent);
+    assert_eq!(witness.check_stablecash(&pay_proof), WitnessStatus::Live);
+    assert_eq!(witness.check_stablecash(&change_proof), WitnessStatus::Live);
 
     println!("Split 10 USDH → 3 + 7 USDH: PASSED");
 
@@ -581,12 +571,12 @@ fn test_rgb20_stablecash_split_and_merge() {
         .unwrap();
 
     let merged_proof = merged_secret.public_proof();
-    assert_eq!(witness.check_stablecash(&pay_proof), witnessStatus::Spent);
+    assert_eq!(witness.check_stablecash(&pay_proof), WitnessStatus::Spent);
     assert_eq!(
         witness.check_stablecash(&change_proof),
-        witnessStatus::Spent
+        WitnessStatus::Spent
     );
-    assert_eq!(witness.check_stablecash(&merged_proof), witnessStatus::Live);
+    assert_eq!(witness.check_stablecash(&merged_proof), WitnessStatus::Live);
 
     println!("Merge 3 + 7 USDH → 10 USDH: PASSED");
 

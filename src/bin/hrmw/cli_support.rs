@@ -22,20 +22,6 @@ pub fn default_wallet_root() -> PathBuf {
     home.join(".harmoniis").join("wallet")
 }
 
-pub fn default_wallet_path() -> PathBuf {
-    default_wallet_root().join("master.db")
-}
-
-pub fn resolve_wallet_root(cli_wallet: Option<&Path>) -> PathBuf {
-    if let Some(path) = cli_wallet {
-        return path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-    }
-    default_wallet_root()
-}
-
 pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
     if let Some(path) = cli_wallet {
         if path
@@ -57,7 +43,7 @@ pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
         }
         return path;
     }
-    resolve_wallet_root(None).join("master.db")
+    default_wallet_root().join("master.db")
 }
 
 pub fn open_or_create_wallet(path: &Path) -> anyhow::Result<RgbWallet> {
@@ -448,76 +434,6 @@ pub fn extract_webcash_token(payment_output: &str) -> anyhow::Result<String> {
     anyhow::bail!("failed to extract webcash token from payment output: {trimmed}");
 }
 
-pub fn is_payment_required_error(err: &anyhow::Error) -> bool {
-    if let Some(herr) = err.downcast_ref::<harmoniis_wallet::error::Error>() {
-        return matches!(herr, harmoniis_wallet::error::Error::Api { status, .. } if *status == 402);
-    }
-    false
-}
-
-pub fn required_amount_from_api_error(err: &anyhow::Error) -> Option<String> {
-    fn amount_to_string(v: &serde_json::Value) -> Option<String> {
-        match v {
-            serde_json::Value::String(s) => {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }
-            serde_json::Value::Number(n) => n
-                .as_f64()
-                .map(|f| {
-                    if (f.fract() - 0.0).abs() < f64::EPSILON {
-                        format!("{}", f as u64)
-                    } else {
-                        let units = (f * 100_000_000.0).round() as u64;
-                        let whole = units / 100_000_000;
-                        let frac = units % 100_000_000;
-                        if frac == 0 {
-                            format!("{whole}")
-                        } else {
-                            format!("{whole}.{}", format!("{frac:08}").trim_end_matches('0'))
-                        }
-                    }
-                })
-                .filter(|s| !s.is_empty()),
-            _ => None,
-        }
-    }
-
-    if let Some(herr) = err.downcast_ref::<harmoniis_wallet::error::Error>() {
-        if let harmoniis_wallet::error::Error::Api { status, body } = herr {
-            if *status == 402 {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                    if let Some(req) = v.get("required_amount").and_then(amount_to_string) {
-                        return Some(req);
-                    }
-                    if let Some(req) = v.get("amount").and_then(amount_to_string) {
-                        return Some(req);
-                    }
-                    if let Some(req) = v
-                        .get("payment")
-                        .and_then(|p| p.get("price"))
-                        .and_then(amount_to_string)
-                    {
-                        return Some(req);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-pub fn required_amount_for_payment_retry(err: &anyhow::Error, fallback: &str) -> Option<String> {
-    if !is_payment_required_error(err) {
-        return None;
-    }
-    Some(required_amount_from_api_error(err).unwrap_or_else(|| fallback.to_string()))
-}
-
 pub async fn pay_from_wallet(
     rgb_wallet_path: &Path,
     wallet: &RgbWallet,
@@ -565,16 +481,6 @@ pub fn parse_amount_to_units(amount: &str) -> u64 {
         Ok(f) => (f * 1e8).round() as u64,
         Err(_) => 0,
     }
-}
-
-pub fn format_units_to_amount(units: u64) -> String {
-    let whole = units / 100_000_000;
-    let frac = units % 100_000_000;
-    if frac == 0 {
-        return whole.to_string();
-    }
-    let frac_str = format!("{frac:08}");
-    format!("{whole}.{}", frac_str.trim_end_matches('0'))
 }
 
 pub fn parse_keywords_csv(input: Option<&str>) -> Vec<String> {

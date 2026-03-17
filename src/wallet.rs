@@ -39,7 +39,6 @@ struct WalletDiskPaths {
     base_dir: PathBuf,
     master_path: PathBuf,
     rgb_path: PathBuf,
-    voucher_path: PathBuf,
     wallet_migration_path: PathBuf,
 }
 
@@ -138,6 +137,53 @@ pub struct PaymentBlacklistRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentTransactionRecord {
+    pub txn_id: String,
+    pub attempt_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub occurred_at: String,
+    pub direction: String,
+    pub role: String,
+    pub source_system: String,
+    pub service_origin: Option<String>,
+    pub frontend_kind: Option<String>,
+    pub transport_kind: Option<String>,
+    pub endpoint_path: Option<String>,
+    pub method: Option<String>,
+    pub session_id: Option<String>,
+    pub action_kind: String,
+    pub resource_ref: Option<String>,
+    pub contract_ref: Option<String>,
+    pub invoice_ref: Option<String>,
+    pub challenge_id: Option<String>,
+    pub rail: String,
+    pub payment_unit: String,
+    pub quoted_amount: Option<String>,
+    pub settled_amount: Option<String>,
+    pub fee_amount: Option<String>,
+    pub proof_ref: Option<String>,
+    pub proof_kind: Option<String>,
+    pub payer_ref: Option<String>,
+    pub payee_ref: Option<String>,
+    pub request_hash: Option<String>,
+    pub response_code: Option<String>,
+    pub status: String,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentTransactionEventRecord {
+    pub event_id: String,
+    pub txn_id: String,
+    pub created_at: String,
+    pub event_type: String,
+    pub status: String,
+    pub actor: String,
+    pub details_json: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewPaymentAttempt<'a> {
     pub service_origin: &'a str,
@@ -159,6 +205,75 @@ pub struct PaymentAttemptUpdate<'a> {
     pub response_body: Option<&'a str>,
     pub recovery_state: &'a str,
     pub final_state: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPaymentTransaction<'a> {
+    pub attempt_id: Option<&'a str>,
+    pub occurred_at: Option<&'a str>,
+    pub direction: &'a str,
+    pub role: &'a str,
+    pub source_system: &'a str,
+    pub service_origin: Option<&'a str>,
+    pub frontend_kind: Option<&'a str>,
+    pub transport_kind: Option<&'a str>,
+    pub endpoint_path: Option<&'a str>,
+    pub method: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub action_kind: &'a str,
+    pub resource_ref: Option<&'a str>,
+    pub contract_ref: Option<&'a str>,
+    pub invoice_ref: Option<&'a str>,
+    pub challenge_id: Option<&'a str>,
+    pub rail: &'a str,
+    pub payment_unit: &'a str,
+    pub quoted_amount: Option<&'a str>,
+    pub settled_amount: Option<&'a str>,
+    pub fee_amount: Option<&'a str>,
+    pub proof_ref: Option<&'a str>,
+    pub proof_kind: Option<&'a str>,
+    pub payer_ref: Option<&'a str>,
+    pub payee_ref: Option<&'a str>,
+    pub request_hash: Option<&'a str>,
+    pub response_code: Option<&'a str>,
+    pub status: &'a str,
+    pub metadata_json: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaymentTransactionUpdate<'a> {
+    pub occurred_at: Option<&'a str>,
+    pub service_origin: Option<&'a str>,
+    pub frontend_kind: Option<&'a str>,
+    pub transport_kind: Option<&'a str>,
+    pub endpoint_path: Option<&'a str>,
+    pub method: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub action_kind: Option<&'a str>,
+    pub resource_ref: Option<&'a str>,
+    pub contract_ref: Option<&'a str>,
+    pub invoice_ref: Option<&'a str>,
+    pub challenge_id: Option<&'a str>,
+    pub quoted_amount: Option<&'a str>,
+    pub settled_amount: Option<&'a str>,
+    pub fee_amount: Option<&'a str>,
+    pub proof_ref: Option<&'a str>,
+    pub proof_kind: Option<&'a str>,
+    pub payer_ref: Option<&'a str>,
+    pub payee_ref: Option<&'a str>,
+    pub request_hash: Option<&'a str>,
+    pub response_code: Option<&'a str>,
+    pub status: &'a str,
+    pub metadata_json: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPaymentTransactionEvent<'a> {
+    pub txn_id: &'a str,
+    pub event_type: &'a str,
+    pub status: &'a str,
+    pub actor: &'a str,
+    pub details_json: Option<&'a str>,
 }
 
 impl RgbWallet {
@@ -194,7 +309,6 @@ impl RgbWallet {
             base_dir: base_dir.clone(),
             master_path,
             rgb_path: base_dir.join(RGB_DB_FILENAME),
-            voucher_path: base_dir.join(VOUCHER_DB_FILENAME),
             wallet_migration_path: base_dir.join(WALLET_DB_FILENAME),
         })
     }
@@ -297,6 +411,65 @@ impl RgbWallet {
                 updated_at          TEXT NOT NULL,
                 PRIMARY KEY (service_origin, endpoint_path, method, rail)
             );
+
+            CREATE TABLE IF NOT EXISTS payment_transactions (
+                txn_id          TEXT PRIMARY KEY,
+                attempt_id      TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                occurred_at     TEXT NOT NULL,
+                direction       TEXT NOT NULL,
+                role            TEXT NOT NULL,
+                source_system   TEXT NOT NULL,
+                service_origin  TEXT,
+                frontend_kind   TEXT,
+                transport_kind  TEXT,
+                endpoint_path   TEXT,
+                method          TEXT,
+                session_id      TEXT,
+                action_kind     TEXT NOT NULL,
+                resource_ref    TEXT,
+                contract_ref    TEXT,
+                invoice_ref     TEXT,
+                challenge_id    TEXT,
+                rail            TEXT NOT NULL,
+                payment_unit    TEXT NOT NULL,
+                quoted_amount   TEXT,
+                settled_amount  TEXT,
+                fee_amount      TEXT,
+                proof_ref       TEXT,
+                proof_kind      TEXT,
+                payer_ref       TEXT,
+                payee_ref       TEXT,
+                request_hash    TEXT,
+                response_code   TEXT,
+                status          TEXT NOT NULL,
+                metadata_json   TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_transaction_events (
+                event_id       TEXT PRIMARY KEY,
+                txn_id         TEXT NOT NULL,
+                created_at     TEXT NOT NULL,
+                event_type     TEXT NOT NULL,
+                status         TEXT NOT NULL,
+                actor          TEXT NOT NULL,
+                details_json   TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_payment_transactions_created_at
+                ON payment_transactions(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_payment_transactions_status
+                ON payment_transactions(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_payment_transactions_direction
+                ON payment_transactions(direction, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_payment_transactions_action_kind
+                ON payment_transactions(action_kind, created_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_transactions_proof_ref
+                ON payment_transactions(direction, rail, proof_ref)
+                WHERE proof_ref IS NOT NULL AND proof_ref != '';
+            CREATE INDEX IF NOT EXISTS idx_payment_transaction_events_txn_id
+                ON payment_transaction_events(txn_id, created_at ASC);
             ",
         )?;
         ensure_root_and_identity_materialized(conn)?;
@@ -1469,6 +1642,235 @@ impl RgbWallet {
         Ok(())
     }
 
+    pub fn record_payment_transaction(&self, input: &NewPaymentTransaction<'_>) -> Result<String> {
+        let txn_id = format!("txn_{}", generate_secret_hex());
+        let now = chrono::Utc::now().to_rfc3339();
+        self.master_conn.execute(
+            "INSERT INTO payment_transactions (
+                txn_id, attempt_id, created_at, updated_at, occurred_at, direction, role,
+                source_system, service_origin, frontend_kind, transport_kind, endpoint_path,
+                method, session_id, action_kind, resource_ref, contract_ref, invoice_ref,
+                challenge_id, rail, payment_unit, quoted_amount, settled_amount, fee_amount,
+                proof_ref, proof_kind, payer_ref, payee_ref, request_hash, response_code,
+                status, metadata_json
+             ) VALUES (
+                ?1, ?2, ?3, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21, ?22, ?23,
+                ?24, ?25, ?26, ?27, ?28, ?29,
+                ?30, ?31
+             )",
+            params![
+                txn_id,
+                input.attempt_id,
+                now,
+                input.occurred_at.unwrap_or(&now),
+                input.direction,
+                input.role,
+                input.source_system,
+                input.service_origin,
+                input.frontend_kind,
+                input.transport_kind,
+                input.endpoint_path,
+                input.method,
+                input.session_id,
+                input.action_kind,
+                input.resource_ref,
+                input.contract_ref,
+                input.invoice_ref,
+                input.challenge_id,
+                input.rail,
+                input.payment_unit,
+                input.quoted_amount,
+                input.settled_amount,
+                input.fee_amount,
+                input.proof_ref,
+                input.proof_kind,
+                input.payer_ref,
+                input.payee_ref,
+                input.request_hash,
+                input.response_code,
+                input.status,
+                input.metadata_json,
+            ],
+        )?;
+        Ok(txn_id)
+    }
+
+    pub fn update_payment_transaction(
+        &self,
+        txn_id: &str,
+        update: &PaymentTransactionUpdate<'_>,
+    ) -> Result<()> {
+        self.master_conn.execute(
+            "UPDATE payment_transactions
+             SET updated_at = ?2,
+                 occurred_at = COALESCE(?3, occurred_at),
+                 service_origin = COALESCE(?4, service_origin),
+                 frontend_kind = COALESCE(?5, frontend_kind),
+                 transport_kind = COALESCE(?6, transport_kind),
+                 endpoint_path = COALESCE(?7, endpoint_path),
+                 method = COALESCE(?8, method),
+                 session_id = COALESCE(?9, session_id),
+                 action_kind = COALESCE(?10, action_kind),
+                 resource_ref = COALESCE(?11, resource_ref),
+                 contract_ref = COALESCE(?12, contract_ref),
+                 invoice_ref = COALESCE(?13, invoice_ref),
+                 challenge_id = COALESCE(?14, challenge_id),
+                 quoted_amount = COALESCE(?15, quoted_amount),
+                 settled_amount = COALESCE(?16, settled_amount),
+                 fee_amount = COALESCE(?17, fee_amount),
+                 proof_ref = COALESCE(?18, proof_ref),
+                 proof_kind = COALESCE(?19, proof_kind),
+                 payer_ref = COALESCE(?20, payer_ref),
+                 payee_ref = COALESCE(?21, payee_ref),
+                 request_hash = COALESCE(?22, request_hash),
+                 response_code = COALESCE(?23, response_code),
+                 status = ?24,
+                 metadata_json = COALESCE(?25, metadata_json)
+             WHERE txn_id = ?1",
+            params![
+                txn_id,
+                chrono::Utc::now().to_rfc3339(),
+                update.occurred_at,
+                update.service_origin,
+                update.frontend_kind,
+                update.transport_kind,
+                update.endpoint_path,
+                update.method,
+                update.session_id,
+                update.action_kind,
+                update.resource_ref,
+                update.contract_ref,
+                update.invoice_ref,
+                update.challenge_id,
+                update.quoted_amount,
+                update.settled_amount,
+                update.fee_amount,
+                update.proof_ref,
+                update.proof_kind,
+                update.payer_ref,
+                update.payee_ref,
+                update.request_hash,
+                update.response_code,
+                update.status,
+                update.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_payment_transaction_event(
+        &self,
+        event: &NewPaymentTransactionEvent<'_>,
+    ) -> Result<String> {
+        let event_id = format!("txe_{}", generate_secret_hex());
+        let now = chrono::Utc::now().to_rfc3339();
+        self.master_conn.execute(
+            "INSERT INTO payment_transaction_events (
+                event_id, txn_id, created_at, event_type, status, actor, details_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event_id,
+                event.txn_id,
+                now,
+                event.event_type,
+                event.status,
+                event.actor,
+                event.details_json.unwrap_or("{}"),
+            ],
+        )?;
+        Ok(event_id)
+    }
+
+    pub fn list_payment_transactions(&self) -> Result<Vec<PaymentTransactionRecord>> {
+        let mut stmt = self.master_conn.prepare(
+            "SELECT txn_id, attempt_id, created_at, updated_at, occurred_at, direction, role,
+                    source_system, service_origin, frontend_kind, transport_kind, endpoint_path,
+                    method, session_id, action_kind, resource_ref, contract_ref, invoice_ref,
+                    challenge_id, rail, payment_unit, quoted_amount, settled_amount, fee_amount,
+                    proof_ref, proof_kind, payer_ref, payee_ref, request_hash, response_code,
+                    status, metadata_json
+             FROM payment_transactions
+             ORDER BY occurred_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PaymentTransactionRecord {
+                txn_id: row.get(0)?,
+                attempt_id: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                occurred_at: row.get(4)?,
+                direction: row.get(5)?,
+                role: row.get(6)?,
+                source_system: row.get(7)?,
+                service_origin: row.get(8)?,
+                frontend_kind: row.get(9)?,
+                transport_kind: row.get(10)?,
+                endpoint_path: row.get(11)?,
+                method: row.get(12)?,
+                session_id: row.get(13)?,
+                action_kind: row.get(14)?,
+                resource_ref: row.get(15)?,
+                contract_ref: row.get(16)?,
+                invoice_ref: row.get(17)?,
+                challenge_id: row.get(18)?,
+                rail: row.get(19)?,
+                payment_unit: row.get(20)?,
+                quoted_amount: row.get(21)?,
+                settled_amount: row.get(22)?,
+                fee_amount: row.get(23)?,
+                proof_ref: row.get(24)?,
+                proof_kind: row.get(25)?,
+                payer_ref: row.get(26)?,
+                payee_ref: row.get(27)?,
+                request_hash: row.get(28)?,
+                response_code: row.get(29)?,
+                status: row.get(30)?,
+                metadata_json: row.get(31)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Storage)
+    }
+
+    pub fn list_payment_transaction_events(
+        &self,
+        txn_id: Option<&str>,
+    ) -> Result<Vec<PaymentTransactionEventRecord>> {
+        let sql = if txn_id.is_some() {
+            "SELECT event_id, txn_id, created_at, event_type, status, actor, details_json
+             FROM payment_transaction_events
+             WHERE txn_id = ?1
+             ORDER BY created_at ASC"
+        } else {
+            "SELECT event_id, txn_id, created_at, event_type, status, actor, details_json
+             FROM payment_transaction_events
+             ORDER BY created_at ASC"
+        };
+        let mut stmt = self.master_conn.prepare(sql)?;
+        let mapper = |row: &rusqlite::Row<'_>| -> std::result::Result<PaymentTransactionEventRecord, rusqlite::Error> {
+            Ok(PaymentTransactionEventRecord {
+                event_id: row.get(0)?,
+                txn_id: row.get(1)?,
+                created_at: row.get(2)?,
+                event_type: row.get(3)?,
+                status: row.get(4)?,
+                actor: row.get(5)?,
+                details_json: row
+                    .get::<_, Option<String>>(6)?
+                    .filter(|value| !value.is_empty() && value != "{}"),
+            })
+        };
+        let rows = match txn_id {
+            Some(id) => stmt.query_map(params![id], mapper)?,
+            None => stmt.query_map([], mapper)?,
+        };
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Storage)
+    }
+
     // ── Contracts ─────────────────────────────────────────────────────────────
 
     pub fn store_contract(&self, c: &Contract) -> Result<()> {
@@ -2231,4 +2633,184 @@ fn row_to_contract(row: &rusqlite::Row<'_>) -> Result<Contract> {
         arbitration_fee_wats: None,
         seller_value_wats: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        NewPaymentTransaction, NewPaymentTransactionEvent, PaymentTransactionUpdate, RgbWallet,
+    };
+
+    #[test]
+    fn payment_transactions_round_trip_in_memory_wallet() {
+        let wallet = RgbWallet::open_memory().expect("memory wallet");
+        let txn_id = wallet
+            .record_payment_transaction(&NewPaymentTransaction {
+                attempt_id: Some("pay_123"),
+                occurred_at: Some("2026-03-17T10:00:00Z"),
+                direction: "inbound",
+                role: "payee",
+                source_system: "harmonia",
+                service_origin: Some("https://node.example"),
+                frontend_kind: Some("http2"),
+                transport_kind: Some("http2"),
+                endpoint_path: Some("/v1/session"),
+                method: Some("POST"),
+                session_id: Some("session-1"),
+                action_kind: "identity-claim",
+                resource_ref: Some("identity:alice"),
+                contract_ref: None,
+                invoice_ref: None,
+                challenge_id: Some("challenge-1"),
+                rail: "webcash",
+                payment_unit: "wats",
+                quoted_amount: Some("42"),
+                settled_amount: None,
+                fee_amount: None,
+                proof_ref: None,
+                proof_kind: None,
+                payer_ref: Some("payer:alice"),
+                payee_ref: Some("payee:harmonia"),
+                request_hash: Some("hash-1"),
+                response_code: Some("payment_required"),
+                status: "challenge_received",
+                metadata_json: Some("{\"carrier\":\"http2\"}"),
+            })
+            .expect("record transaction");
+        wallet
+            .append_payment_transaction_event(&NewPaymentTransactionEvent {
+                txn_id: &txn_id,
+                event_type: "challenge_received",
+                status: "challenge_received",
+                actor: "gateway",
+                details_json: Some("{\"price\":\"42\"}"),
+            })
+            .expect("append event");
+        wallet
+            .update_payment_transaction(
+                &txn_id,
+                &PaymentTransactionUpdate {
+                    occurred_at: None,
+                    service_origin: None,
+                    frontend_kind: None,
+                    transport_kind: None,
+                    endpoint_path: None,
+                    method: None,
+                    session_id: None,
+                    action_kind: None,
+                    resource_ref: None,
+                    contract_ref: None,
+                    invoice_ref: None,
+                    challenge_id: Some("challenge-1"),
+                    quoted_amount: None,
+                    settled_amount: Some("42"),
+                    fee_amount: Some("1"),
+                    proof_ref: Some("proof-hash-1"),
+                    proof_kind: Some("webcash_secret_hash"),
+                    payer_ref: None,
+                    payee_ref: None,
+                    request_hash: None,
+                    response_code: Some("accepted"),
+                    status: "succeeded",
+                    metadata_json: Some("{\"settled\":true}"),
+                },
+            )
+            .expect("update transaction");
+
+        let txns = wallet
+            .list_payment_transactions()
+            .expect("list transactions");
+        assert_eq!(txns.len(), 1);
+        let txn = &txns[0];
+        assert_eq!(txn.txn_id, txn_id);
+        assert_eq!(txn.direction, "inbound");
+        assert_eq!(txn.role, "payee");
+        assert_eq!(txn.action_kind, "identity-claim");
+        assert_eq!(txn.challenge_id.as_deref(), Some("challenge-1"));
+        assert_eq!(txn.settled_amount.as_deref(), Some("42"));
+        assert_eq!(txn.fee_amount.as_deref(), Some("1"));
+        assert_eq!(txn.proof_kind.as_deref(), Some("webcash_secret_hash"));
+        assert_eq!(txn.proof_ref.as_deref(), Some("proof-hash-1"));
+        assert_eq!(txn.status, "succeeded");
+
+        let events = wallet
+            .list_payment_transaction_events(Some(&txn_id))
+            .expect("list txn events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "challenge_received");
+        assert_eq!(events[0].status, "challenge_received");
+        assert_eq!(events[0].actor, "gateway");
+    }
+
+    #[test]
+    fn payment_transactions_enforce_unique_proof_refs_per_direction_and_rail() {
+        let wallet = RgbWallet::open_memory().expect("memory wallet");
+        wallet
+            .record_payment_transaction(&NewPaymentTransaction {
+                attempt_id: None,
+                occurred_at: None,
+                direction: "inbound",
+                role: "payee",
+                source_system: "harmonia",
+                service_origin: Some("https://node.example"),
+                frontend_kind: Some("http2"),
+                transport_kind: Some("http2"),
+                endpoint_path: Some("/v1/session"),
+                method: Some("POST"),
+                session_id: Some("session-1"),
+                action_kind: "post",
+                resource_ref: None,
+                contract_ref: None,
+                invoice_ref: None,
+                challenge_id: None,
+                rail: "voucher",
+                payment_unit: "credits",
+                quoted_amount: Some("10"),
+                settled_amount: Some("10"),
+                fee_amount: None,
+                proof_ref: Some("proof-ref-1"),
+                proof_kind: Some("voucher_public_hash"),
+                payer_ref: None,
+                payee_ref: None,
+                request_hash: None,
+                response_code: None,
+                status: "succeeded",
+                metadata_json: None,
+            })
+            .expect("insert first proof ref");
+
+        let duplicate = wallet.record_payment_transaction(&NewPaymentTransaction {
+            attempt_id: None,
+            occurred_at: None,
+            direction: "inbound",
+            role: "payee",
+            source_system: "harmonia",
+            service_origin: Some("https://node.example"),
+            frontend_kind: Some("mqtt"),
+            transport_kind: Some("mqtt"),
+            endpoint_path: Some("/topic/posts"),
+            method: Some("PUBLISH"),
+            session_id: Some("session-2"),
+            action_kind: "comment",
+            resource_ref: None,
+            contract_ref: None,
+            invoice_ref: None,
+            challenge_id: None,
+            rail: "voucher",
+            payment_unit: "credits",
+            quoted_amount: Some("10"),
+            settled_amount: Some("10"),
+            fee_amount: None,
+            proof_ref: Some("proof-ref-1"),
+            proof_kind: Some("voucher_public_hash"),
+            payer_ref: None,
+            payee_ref: None,
+            request_hash: None,
+            response_code: None,
+            status: "succeeded",
+            metadata_json: None,
+        });
+
+        assert!(duplicate.is_err(), "duplicate proof ref should be rejected");
+    }
 }
