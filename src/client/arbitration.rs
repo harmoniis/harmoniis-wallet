@@ -28,6 +28,7 @@ pub struct BuyRequest {
     pub witness_zkp: String,
     pub reference_post: String,
     pub signature: String, // sign("buy_contract:{fp}:{reference_post}:{contract_id}:{witness_proof}")
+    pub accept_terms: bool,
 }
 
 pub fn witness_commitment_message(
@@ -262,8 +263,11 @@ impl HarmoniisClient {
         req: &BuyRequest,
         payment: PaymentSecret<'_>,
     ) -> Result<serde_json::Value> {
+        let mut body = serde_json::to_value(req)
+            .map_err(|e| Error::InvalidFormat(format!("failed to serialize BuyRequest: {e}")))?;
+        body["accept_terms"] = json!(true);
         let resp = self.http.post(self.url("arbitration/contracts/buy"));
-        let resp = apply_payment_header(resp, payment).json(req).send().await?;
+        let resp = apply_payment_header(resp, payment).json(&body).send().await?;
         let resp = Self::check_status(resp).await?;
         Ok(resp.json().await?)
     }
@@ -305,6 +309,7 @@ impl HarmoniisClient {
         let body = json!({
             "seller_fingerprint": seller_fp,
             "signature": sig,
+            "accept_terms": true,
         });
         let resp = self
             .http
@@ -346,25 +351,18 @@ impl HarmoniisClient {
         id: &str,
         actor_fingerprint: &str,
         signature: &str,
-        webcash: &str,
     ) -> Result<serde_json::Value> {
-        self.pickup_with_payment(
-            id,
-            actor_fingerprint,
-            signature,
-            PaymentSecret::Webcash(webcash),
-        )
-        .await
+        self.pickup_with_payment(id, actor_fingerprint, signature)
+            .await
     }
 
     /// `POST /api/v1/arbitration/contracts/{id}/pickup`
-    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`) on first pickup.
+    /// Pickup is free and does NOT require a payment header.
     pub async fn pickup_with_payment(
         &self,
         id: &str,
         actor_fingerprint: &str,
         signature: &str,
-        payment: PaymentSecret<'_>,
     ) -> Result<serde_json::Value> {
         let body = json!({
             "actor_fingerprint": actor_fingerprint,
@@ -372,8 +370,7 @@ impl HarmoniisClient {
         });
         let resp = self
             .http
-            .post(self.url(&format!("arbitration/contracts/{id}/pickup")));
-        let resp = apply_payment_header(resp, payment)
+            .post(self.url(&format!("arbitration/contracts/{id}/pickup")))
             .json(&body)
             .send()
             .await?;

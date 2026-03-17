@@ -160,6 +160,7 @@ async fn test_full_6_phase_contract_flow() {
         attachments: vec![],
         activity_metadata: None,
         signature: offer_sig,
+        accept_terms: Some(true),
     };
     let offer_post_id = match client.publish_post(&offer_req, "").await {
         Ok(post_id) => post_id,
@@ -205,6 +206,7 @@ async fn test_full_6_phase_contract_flow() {
         witness_zkp,
         reference_post: offer_post_id.clone(),
         signature: sig,
+        accept_terms: true,
     };
     let buy_resp = match client.buy_contract(&buy_req, "").await {
         Ok(v) => v,
@@ -257,6 +259,7 @@ async fn test_full_6_phase_contract_flow() {
         attachments: vec![],
         activity_metadata: None,
         signature: bid_sig,
+        accept_terms: None,
     };
     let bid_post_id = match client.publish_post(&bid_req, "").await {
         Ok(post_id) => post_id,
@@ -350,20 +353,10 @@ async fn test_full_6_phase_contract_flow() {
 
     // ── Step 11: Buyer picks up ───────────────────────────────────────────────
     let pickup_sig = buyer_id.sign(&contract_id);
-    let pickup_resp = match client
-        .pickup(&contract_id, &buyer_fp, &pickup_sig, "")
+    let pickup_resp = client
+        .pickup(&contract_id, &buyer_fp, &pickup_sig)
         .await
-    {
-        Ok(v) => v,
-        Err(err) => {
-            let needed = required_amount_from_error(&err).unwrap_or_else(|| "0.015".to_string());
-            let payment = wallet_pay(&buyer_webcash_wallet, &needed, "pickup").await;
-            client
-                .pickup(&contract_id, &buyer_fp, &pickup_sig, &payment)
-                .await
-                .expect("pickup with wallet payment")
-        }
-    };
+        .expect("pickup without payment");
     println!("Picked up: {pickup_resp}");
 
     {

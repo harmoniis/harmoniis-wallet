@@ -149,6 +149,8 @@ pub struct PublishPostRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_metadata: Option<PostActivityMetadata>,
     pub signature: String, // sign("post:{content}")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_terms: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -356,6 +356,8 @@ fn test_6_phase_rgb21_contract_flow() {
         role: Role::Buyer,
         delivered_text: None,
         certificate_id: None,
+        arbitration_fee_wats: None,
+        seller_value_wats: None,
         created_at: now.clone(),
         updated_at: now.clone(),
     };
@@ -427,6 +429,8 @@ fn test_6_phase_rgb21_contract_flow() {
         role: Role::Seller,
         delivered_text: None,
         certificate_id: None,
+        arbitration_fee_wats: None,
+        seller_value_wats: None,
         created_at: now.clone(),
         updated_at: now.clone(),
     };

@@ -9,6 +9,7 @@ pub mod keychain;
 pub mod miner;
 pub mod types;
 pub mod vault;
+pub mod voucher_wallet;
 pub mod wallet;
 
 // Securities module — DORMANT. Compiled only when feature = "securities" is set.
@@ -21,12 +22,15 @@ pub use error::{Error, Result};
 pub use identity::Identity;
 pub use types::{
     Certificate, Contract, ContractStatus, ContractType, Role, StablecashProof, StablecashSecret,
-    WitnessProof, WitnessSecret,
+    VoucherProof, VoucherSecret, WitnessProof, WitnessSecret,
 };
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 pub use wallet::{
-    PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSlotRecord, WalletSnapshot,
+    NewPaymentAttempt, PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord,
+    PaymentLossRecord, PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSlotRecord,
+    WalletSnapshot,
 };
+pub use voucher_wallet::{VoucherStats, VoucherWallet};
 
 #[cfg(feature = "securities")]
 pub use securities::{SecurityDeed, SecurityType, SecurityUnderlying};

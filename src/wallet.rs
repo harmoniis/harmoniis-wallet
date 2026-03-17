@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    crypto::generate_secret_hex,
     error::{Error, Result},
     identity::Identity,
     keychain::{
@@ -24,6 +25,7 @@ const META_KEY_MODEL_VERSION: &str = "key_model_version";
 pub const MAX_PGP_KEYS: u32 = 1_000;
 const MASTER_DB_FILENAME: &str = "master.db";
 const RGB_DB_FILENAME: &str = "rgb.db";
+const VOUCHER_DB_FILENAME: &str = "voucher.db";
 const WALLET_DB_FILENAME: &str = "wallet.db";
 const RGB_SHARD_DIR: &str = "identities";
 
@@ -37,6 +39,7 @@ struct WalletDiskPaths {
     base_dir: PathBuf,
     master_path: PathBuf,
     rgb_path: PathBuf,
+    voucher_path: PathBuf,
     wallet_migration_path: PathBuf,
 }
 
@@ -84,6 +87,80 @@ pub struct WalletSnapshot {
     pub certificates: Vec<Certificate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentAttemptRecord {
+    pub attempt_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub service_origin: String,
+    pub endpoint_path: String,
+    pub method: String,
+    pub rail: String,
+    pub action_hint: String,
+    pub required_amount: String,
+    pub payment_unit: String,
+    pub payment_reference: Option<String>,
+    pub request_hash: String,
+    pub response_status: Option<u16>,
+    pub response_code: Option<String>,
+    pub response_body: Option<String>,
+    pub recovery_state: String,
+    pub final_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentLossRecord {
+    pub loss_id: String,
+    pub attempt_id: String,
+    pub created_at: String,
+    pub service_origin: String,
+    pub endpoint_path: String,
+    pub method: String,
+    pub rail: String,
+    pub amount: String,
+    pub payment_reference: Option<String>,
+    pub failure_stage: String,
+    pub response_status: Option<u16>,
+    pub response_code: Option<String>,
+    pub response_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBlacklistRecord {
+    pub service_origin: String,
+    pub endpoint_path: String,
+    pub method: String,
+    pub rail: String,
+    pub blacklisted_until: Option<String>,
+    pub reason: String,
+    pub triggered_by_loss_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPaymentAttempt<'a> {
+    pub service_origin: &'a str,
+    pub endpoint_path: &'a str,
+    pub method: &'a str,
+    pub rail: &'a str,
+    pub action_hint: &'a str,
+    pub required_amount: &'a str,
+    pub payment_unit: &'a str,
+    pub payment_reference: Option<&'a str>,
+    pub request_hash: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaymentAttemptUpdate<'a> {
+    pub payment_reference: Option<&'a str>,
+    pub response_status: Option<u16>,
+    pub response_code: Option<&'a str>,
+    pub response_body: Option<&'a str>,
+    pub recovery_state: &'a str,
+    pub final_state: &'a str,
+}
+
 impl RgbWallet {
     fn resolve_disk_paths(path: &Path) -> Result<WalletDiskPaths> {
         let normalized = if path
@@ -117,6 +194,7 @@ impl RgbWallet {
             base_dir: base_dir.clone(),
             master_path,
             rgb_path: base_dir.join(RGB_DB_FILENAME),
+            voucher_path: base_dir.join(VOUCHER_DB_FILENAME),
             wallet_migration_path: base_dir.join(WALLET_DB_FILENAME),
         })
     }
@@ -169,6 +247,55 @@ impl RgbWallet {
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 PRIMARY KEY (family, slot_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_attempts (
+                attempt_id        TEXT PRIMARY KEY,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                service_origin    TEXT NOT NULL,
+                endpoint_path     TEXT NOT NULL,
+                method            TEXT NOT NULL,
+                rail              TEXT NOT NULL,
+                action_hint       TEXT NOT NULL,
+                required_amount   TEXT NOT NULL,
+                payment_unit      TEXT NOT NULL,
+                payment_reference TEXT,
+                request_hash      TEXT NOT NULL,
+                response_status   INTEGER,
+                response_code     TEXT,
+                response_body     TEXT,
+                recovery_state    TEXT NOT NULL,
+                final_state       TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_losses (
+                loss_id            TEXT PRIMARY KEY,
+                attempt_id         TEXT NOT NULL,
+                created_at         TEXT NOT NULL,
+                service_origin     TEXT NOT NULL,
+                endpoint_path      TEXT NOT NULL,
+                method             TEXT NOT NULL,
+                rail               TEXT NOT NULL,
+                amount             TEXT NOT NULL,
+                payment_reference  TEXT,
+                failure_stage      TEXT NOT NULL,
+                response_status    INTEGER,
+                response_code      TEXT,
+                response_body      TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_blacklist (
+                service_origin      TEXT NOT NULL,
+                endpoint_path       TEXT NOT NULL,
+                method              TEXT NOT NULL,
+                rail                TEXT NOT NULL,
+                blacklisted_until   TEXT,
+                reason              TEXT NOT NULL,
+                triggered_by_loss_id TEXT,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL,
+                PRIMARY KEY (service_origin, endpoint_path, method, rail)
             );
             ",
         )?;
@@ -250,6 +377,7 @@ impl RgbWallet {
         let root_hex = self.derive_slot_hex("root", 0)?;
         let rgb_hex = self.derive_slot_hex("rgb", 0)?;
         let webcash_hex = self.derive_slot_hex("webcash", 0)?;
+        let voucher_hex = self.derive_slot_hex("voucher", 0)?;
         let bitcoin_hex = self.derive_slot_hex("bitcoin", 0)?;
         let vault_hex = self.derive_slot_hex(SLOT_FAMILY_VAULT, 0)?;
 
@@ -267,6 +395,11 @@ impl RgbWallet {
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
              VALUES ('bitcoin', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), ?2), ?2)",
             params![bitcoin_hex, now],
+        )?;
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES ('voucher', 0, ?1, ?2, (SELECT label FROM wallet_slots WHERE family='voucher' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='voucher' AND slot_index=0), ?3), ?3)",
+            params![voucher_hex, Some(VOUCHER_DB_FILENAME.to_string()), now],
         )?;
         self.master_conn.execute(
             "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
@@ -555,6 +688,10 @@ impl RgbWallet {
 
     pub fn derive_webcash_master_secret_hex(&self) -> Result<String> {
         self.derive_slot_hex("webcash", 0)
+    }
+
+    pub fn derive_voucher_master_secret_hex(&self) -> Result<String> {
+        self.derive_slot_hex("voucher", 0)
     }
 
     pub fn derive_bitcoin_master_key_hex(&self) -> Result<String> {
@@ -1070,6 +1207,268 @@ impl RgbWallet {
             .map_err(Error::Storage)
     }
 
+    // ── Payment audit ────────────────────────────────────────────────────────
+
+    pub fn record_payment_attempt_start(&self, input: &NewPaymentAttempt<'_>) -> Result<String> {
+        let attempt_id = format!("pay_{}", generate_secret_hex());
+        let now = chrono::Utc::now().to_rfc3339();
+        self.master_conn.execute(
+            "INSERT INTO payment_attempts (
+                attempt_id, created_at, updated_at, service_origin, endpoint_path,
+                method, rail, action_hint, required_amount, payment_unit,
+                payment_reference, request_hash, response_status, response_code,
+                response_body, recovery_state, final_state
+            ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, NULL, 'pending', 'pending')",
+            params![
+                attempt_id,
+                now,
+                input.service_origin,
+                input.endpoint_path,
+                input.method,
+                input.rail,
+                input.action_hint,
+                input.required_amount,
+                input.payment_unit,
+                input.payment_reference,
+                input.request_hash,
+            ],
+        )?;
+        Ok(attempt_id)
+    }
+
+    pub fn update_payment_attempt(
+        &self,
+        attempt_id: &str,
+        update: &PaymentAttemptUpdate<'_>,
+    ) -> Result<()> {
+        self.master_conn.execute(
+            "UPDATE payment_attempts
+             SET updated_at = ?2,
+                 payment_reference = COALESCE(?3, payment_reference),
+                 response_status = ?4,
+                 response_code = ?5,
+                 response_body = ?6,
+                 recovery_state = ?7,
+                 final_state = ?8
+             WHERE attempt_id = ?1",
+            params![
+                attempt_id,
+                chrono::Utc::now().to_rfc3339(),
+                update.payment_reference,
+                update.response_status.map(i64::from),
+                update.response_code,
+                update.response_body,
+                update.recovery_state,
+                update.final_state,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn store_payment_loss(
+        &self,
+        attempt_id: &str,
+        service_origin: &str,
+        endpoint_path: &str,
+        method: &str,
+        rail: &str,
+        amount: &str,
+        payment_reference: Option<&str>,
+        failure_stage: &str,
+        response_status: Option<u16>,
+        response_code: Option<&str>,
+        response_body: Option<&str>,
+    ) -> Result<String> {
+        let loss_id = format!("loss_{}", generate_secret_hex());
+        let now = chrono::Utc::now().to_rfc3339();
+        self.master_conn.execute(
+            "INSERT INTO payment_losses (
+                loss_id, attempt_id, created_at, service_origin, endpoint_path,
+                method, rail, amount, payment_reference, failure_stage,
+                response_status, response_code, response_body
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                loss_id,
+                attempt_id,
+                now,
+                service_origin,
+                endpoint_path,
+                method,
+                rail,
+                amount,
+                payment_reference,
+                failure_stage,
+                response_status.map(i64::from),
+                response_code,
+                response_body,
+            ],
+        )?;
+        self.blacklist_if_needed(service_origin, endpoint_path, method, rail, &loss_id)?;
+        Ok(loss_id)
+    }
+
+    pub fn list_payment_losses(&self) -> Result<Vec<PaymentLossRecord>> {
+        let mut stmt = self.master_conn.prepare(
+            "SELECT loss_id, attempt_id, created_at, service_origin, endpoint_path,
+                    method, rail, amount, payment_reference, failure_stage,
+                    response_status, response_code, response_body
+             FROM payment_losses
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PaymentLossRecord {
+                loss_id: row.get(0)?,
+                attempt_id: row.get(1)?,
+                created_at: row.get(2)?,
+                service_origin: row.get(3)?,
+                endpoint_path: row.get(4)?,
+                method: row.get(5)?,
+                rail: row.get(6)?,
+                amount: row.get(7)?,
+                payment_reference: row.get(8)?,
+                failure_stage: row.get(9)?,
+                response_status: row
+                    .get::<_, Option<i64>>(10)?
+                    .and_then(|v| u16::try_from(v).ok()),
+                response_code: row.get(11)?,
+                response_body: row.get(12)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Storage)
+    }
+
+    pub fn list_payment_blacklist(&self) -> Result<Vec<PaymentBlacklistRecord>> {
+        let mut stmt = self.master_conn.prepare(
+            "SELECT service_origin, endpoint_path, method, rail,
+                    blacklisted_until, reason, triggered_by_loss_id, created_at, updated_at
+             FROM payment_blacklist
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PaymentBlacklistRecord {
+                service_origin: row.get(0)?,
+                endpoint_path: row.get(1)?,
+                method: row.get(2)?,
+                rail: row.get(3)?,
+                blacklisted_until: row.get(4)?,
+                reason: row.get(5)?,
+                triggered_by_loss_id: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Storage)
+    }
+
+    pub fn clear_payment_blacklist(
+        &self,
+        service_origin: &str,
+        endpoint_path: &str,
+        method: &str,
+        rail: &str,
+    ) -> Result<bool> {
+        let changed = self.master_conn.execute(
+            "DELETE FROM payment_blacklist
+             WHERE service_origin = ?1 AND endpoint_path = ?2 AND method = ?3 AND rail = ?4",
+            params![service_origin, endpoint_path, method, rail],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn payment_blacklist_entry(
+        &self,
+        service_origin: &str,
+        endpoint_path: &str,
+        method: &str,
+        rail: &str,
+    ) -> Result<Option<PaymentBlacklistRecord>> {
+        let mut stmt = self.master_conn.prepare(
+            "SELECT service_origin, endpoint_path, method, rail,
+                    blacklisted_until, reason, triggered_by_loss_id, created_at, updated_at
+             FROM payment_blacklist
+             WHERE service_origin = ?1 AND endpoint_path = ?2 AND method = ?3 AND rail = ?4",
+        )?;
+        let mut rows = stmt.query(params![service_origin, endpoint_path, method, rail])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(PaymentBlacklistRecord {
+            service_origin: row.get(0)?,
+            endpoint_path: row.get(1)?,
+            method: row.get(2)?,
+            rail: row.get(3)?,
+            blacklisted_until: row.get(4)?,
+            reason: row.get(5)?,
+            triggered_by_loss_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        }))
+    }
+
+    pub fn is_payment_blacklisted(
+        &self,
+        service_origin: &str,
+        endpoint_path: &str,
+        method: &str,
+        rail: &str,
+    ) -> Result<bool> {
+        let Some(entry) =
+            self.payment_blacklist_entry(service_origin, endpoint_path, method, rail)?
+        else {
+            return Ok(false);
+        };
+        Ok(match entry.blacklisted_until.as_deref() {
+            Some(until) => until >= chrono::Utc::now().to_rfc3339().as_str(),
+            None => true,
+        })
+    }
+
+    fn blacklist_if_needed(
+        &self,
+        service_origin: &str,
+        endpoint_path: &str,
+        method: &str,
+        rail: &str,
+        loss_id: &str,
+    ) -> Result<()> {
+        let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(24)).to_rfc3339();
+        let mut stmt = self.master_conn.prepare(
+            "SELECT COUNT(*)
+             FROM payment_losses
+             WHERE service_origin = ?1
+               AND endpoint_path = ?2
+               AND method = ?3
+               AND rail = ?4
+               AND created_at >= ?5",
+        )?;
+        let count: i64 = stmt.query_row(
+            params![service_origin, endpoint_path, method, rail, cutoff],
+            |row| row.get(0),
+        )?;
+        if count < 3 {
+            return Ok(());
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        self.master_conn.execute(
+            "INSERT OR REPLACE INTO payment_blacklist (
+                service_origin, endpoint_path, method, rail, blacklisted_until,
+                reason, triggered_by_loss_id, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, NULL,
+                'service returned errors after consuming payment 3 times in the last 24 hours',
+                ?5,
+                COALESCE((SELECT created_at FROM payment_blacklist
+                          WHERE service_origin = ?1 AND endpoint_path = ?2 AND method = ?3 AND rail = ?4), ?6),
+                ?6
+             )",
+            params![service_origin, endpoint_path, method, rail, loss_id, now],
+        )?;
+        Ok(())
+    }
+
     // ── Contracts ─────────────────────────────────────────────────────────────
 
     pub fn store_contract(&self, c: &Contract) -> Result<()> {
@@ -1407,6 +1806,8 @@ fn migrate_rgb_state(source_conn: &Connection, target_conn: &Connection) -> Resu
                 certificate_id: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
+                arbitration_fee_wats: None,
+                seller_value_wats: None,
             })
         })?;
         for row in rows {
@@ -1827,5 +2228,7 @@ fn row_to_contract(row: &rusqlite::Row<'_>) -> Result<Contract> {
         certificate_id: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+        arbitration_fee_wats: None,
+        seller_value_wats: None,
     })
 }

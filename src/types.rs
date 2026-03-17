@@ -239,6 +239,8 @@ pub struct Contract {
     pub role: Role,
     pub delivered_text: Option<String>,
     pub certificate_id: Option<String>,
+    pub arbitration_fee_wats: Option<u64>,
+    pub seller_value_wats: Option<u64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -268,6 +270,8 @@ impl Contract {
             role,
             delivered_text: None,
             certificate_id: None,
+            arbitration_fee_wats: None,
+            seller_value_wats: None,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -425,6 +429,124 @@ impl StablecashProof {
             "u{}:{}:public:{}",
             self.amount_units, self.contract_id, self.public_hash
         )
+    }
+}
+
+// ── VoucherSecret ────────────────────────────────────────────────────────────
+
+/// Prepaid credit bearer token — split/merge via replace endpoint.
+///
+/// Wire format: `v{amount}:secret:{hex64}`
+/// Proof format: `v{amount}:public:{sha256_hex64}`
+///
+/// Amount is in integer credits (1 credit = $1).
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct VoucherSecret {
+    pub amount_units: u64,
+    hex_value: String,
+}
+
+impl VoucherSecret {
+    /// Generate a fresh random Voucher secret.
+    pub fn generate(amount_units: u64) -> Self {
+        Self {
+            amount_units,
+            hex_value: crate::crypto::generate_secret_hex(),
+        }
+    }
+
+    /// Parse from `v{amount}:secret:{hex64}`.
+    pub fn parse(s: &str) -> Result<Self> {
+        if !s.starts_with('v') {
+            return Err(Error::InvalidFormat(format!(
+                "VoucherSecret must start with 'v': {s}"
+            )));
+        }
+        let rest = &s[1..];
+        let mid = ":secret:";
+        let sep = rest
+            .find(mid)
+            .ok_or_else(|| Error::InvalidFormat(format!("missing ':secret:' in: {s}")))?;
+        let amount_str = &rest[..sep];
+        let amount_units: u64 = amount_str
+            .parse()
+            .map_err(|_| Error::InvalidFormat(format!("invalid amount in: {s}")))?;
+        let hex_value = &rest[sep + mid.len()..];
+        if hex_value.len() != 64 || !hex_value.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Error::InvalidFormat(format!(
+                "hex_value must be 64 lowercase hex chars in: {s}"
+            )));
+        }
+        Ok(Self {
+            amount_units,
+            hex_value: hex_value.to_string(),
+        })
+    }
+
+    /// Serialize to wire format: `v{amount}:secret:{hex64}`
+    pub fn display(&self) -> String {
+        format!("v{}:secret:{}", self.amount_units, self.hex_value)
+    }
+
+    /// Compute the public proof.
+    pub fn public_proof(&self) -> VoucherProof {
+        let raw = hex::decode(&self.hex_value).expect("always valid hex");
+        VoucherProof {
+            amount_units: self.amount_units,
+            public_hash: crate::crypto::sha256_bytes(&raw),
+        }
+    }
+
+    pub fn hex_value(&self) -> &str {
+        &self.hex_value
+    }
+}
+
+impl std::fmt::Debug for VoucherSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoucherSecret")
+            .field("amount_units", &self.amount_units)
+            .field("hex_value", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Voucher public proof — `v{amount}:public:{sha256_hex64}`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoucherProof {
+    pub amount_units: u64,
+    pub public_hash: String,
+}
+
+impl VoucherProof {
+    pub fn parse(s: &str) -> Result<Self> {
+        if !s.starts_with('v') {
+            return Err(Error::InvalidFormat(format!(
+                "VoucherProof must start with 'v': {s}"
+            )));
+        }
+        let rest = &s[1..];
+        let mid = ":public:";
+        let sep = rest
+            .find(mid)
+            .ok_or_else(|| Error::InvalidFormat(format!("missing ':public:' in: {s}")))?;
+        let amount_units: u64 = rest[..sep]
+            .parse()
+            .map_err(|_| Error::InvalidFormat(format!("invalid amount in: {s}")))?;
+        let public_hash = &rest[sep + mid.len()..];
+        if public_hash.len() != 64 {
+            return Err(Error::InvalidFormat(format!(
+                "public_hash must be 64 chars in: {s}"
+            )));
+        }
+        Ok(Self {
+            amount_units,
+            public_hash: public_hash.to_string(),
+        })
+    }
+
+    pub fn display(&self) -> String {
+        format!("v{}:public:{}", self.amount_units, self.public_hash)
     }
 }
 

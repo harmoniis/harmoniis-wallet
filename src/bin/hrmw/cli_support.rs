@@ -10,19 +10,30 @@ use harmoniis_wallet::{
         timeline::{PostActivityMetadata, PostAttachment},
         HarmoniisClient,
     },
+    voucher_wallet::VoucherWallet,
     wallet::RgbWallet,
+    VoucherSecret,
 };
 use rand::Rng;
 use webylib::{Amount as WebcashAmount, Wallet as WebcashWallet};
 
-pub fn default_wallet_path() -> PathBuf {
+pub fn default_wallet_root() -> PathBuf {
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("master.db")
+    home.join(".harmoniis").join("wallet")
 }
 
-fn compat_wallet_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("wallet.db")
+pub fn default_wallet_path() -> PathBuf {
+    default_wallet_root().join("master.db")
+}
+
+pub fn resolve_wallet_root(cli_wallet: Option<&Path>) -> PathBuf {
+    if let Some(path) = cli_wallet {
+        return path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
+    default_wallet_root()
 }
 
 pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
@@ -46,15 +57,7 @@ pub fn resolve_wallet_path(cli_wallet: Option<PathBuf>) -> PathBuf {
         }
         return path;
     }
-    let preferred = default_wallet_path();
-    if preferred.exists() {
-        return preferred;
-    }
-    let compat = compat_wallet_path();
-    if compat.exists() {
-        return compat;
-    }
-    preferred
+    resolve_wallet_root(None).join("master.db")
 }
 
 pub fn open_or_create_wallet(path: &Path) -> anyhow::Result<RgbWallet> {
@@ -382,6 +385,14 @@ pub fn default_webcash_wallet_path(master_wallet_path: &Path) -> PathBuf {
     base_dir.join("webcash.db")
 }
 
+pub fn default_voucher_wallet_path(master_wallet_path: &Path) -> PathBuf {
+    let base_dir = master_wallet_path
+        .parent()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base_dir.join("voucher.db")
+}
+
 pub async fn open_webcash_wallet(
     master_wallet_path: &Path,
     wallet: &RgbWallet,
@@ -401,6 +412,26 @@ pub async fn open_webcash_wallet(
         .await
         .context("failed to store deterministic webcash master secret")?;
     Ok(webcash_wallet)
+}
+
+pub fn open_voucher_wallet(
+    master_wallet_path: &Path,
+    wallet: &RgbWallet,
+) -> anyhow::Result<VoucherWallet> {
+    let voucher_path = default_voucher_wallet_path(master_wallet_path);
+    let voucher_wallet = VoucherWallet::open(&voucher_path).with_context(|| {
+        format!(
+            "failed to open voucher wallet at {}",
+            voucher_path.display()
+        )
+    })?;
+    let master_secret = wallet
+        .derive_voucher_master_secret_hex()
+        .context("failed to derive wallet voucher master secret")?;
+    voucher_wallet
+        .store_master_secret(&master_secret)
+        .context("failed to store deterministic voucher master secret")?;
+    Ok(voucher_wallet)
 }
 
 pub fn extract_webcash_token(payment_output: &str) -> anyhow::Result<String> {
@@ -501,6 +532,20 @@ pub async fn pay_from_wallet(
         .await
         .with_context(|| format!("failed to create wallet payment for {memo}"))?;
     extract_webcash_token(&payment_output)
+}
+
+pub async fn pay_voucher_from_wallet(
+    rgb_wallet_path: &Path,
+    wallet: &RgbWallet,
+    client: &HarmoniisClient,
+    amount_units: u64,
+    memo: &str,
+) -> anyhow::Result<VoucherSecret> {
+    let voucher_wallet = open_voucher_wallet(rgb_wallet_path, wallet)?;
+    voucher_wallet
+        .pay(client, amount_units, memo)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 pub fn make_client(api: &str, direct: bool) -> HarmoniisClient {
@@ -806,7 +851,7 @@ fn default_terms_markdown() -> String {
         "",
         "1. Scope is exactly what is written in the listing descriptor attachment.",
         "2. Buyer and seller must agree on delivery details through contract and bid flow.",
-        "3. Payment, pickup fee, and dispute/refund rules follow Harmoniis contract endpoints.",
+        "3. Payment, arbitration fee, and dispute/refund rules follow Harmoniis contract endpoints.",
     ]
     .join("\n")
 }

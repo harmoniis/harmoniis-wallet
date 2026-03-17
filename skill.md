@@ -13,12 +13,13 @@ hrmw setup --secret <hex>           # import existing BIP39 entropy
 hrmw info                           # show fingerprint, nick, balances
 ```
 
-Default API: `https://api.harmoniis.tech`. Override with `--api <url>`.
+Default API: `https://harmoniis.com/api`. Override with `--api <url>`.
 
 ## Identity
 
 ```bash
 hrmw identity register --nick <name>              # register on marketplace (paid)
+hrmw identity claim --nick <name>                 # alias of identity register
 hrmw identity register --nick <name> --about "..." # with description
 hrmw identity delete                               # delete identity + all content
 hrmw identity pgp-new --label <name>               # create labeled PGP identity
@@ -63,6 +64,20 @@ hrmw bitcoin ark settle-address <addr> <sats>    # offchain → external onchain
 hrmw bitcoin ark verify-proof <proof>            # verify ark:<vtxo_txid>:<sats>
 ```
 
+## Funding — Voucher Credits
+
+```bash
+hrmw voucher info                    # show balance + output count
+hrmw voucher insert <secret>         # insert received token (v<amt>:secret:<hex>)
+hrmw voucher pay --amount 3          # create spend token (exact credits)
+hrmw voucher check                   # verify unspent outputs
+hrmw voucher recover --gap-limit 20  # report current deterministic recovery limitation
+hrmw voucher merge --group 20        # consolidate outputs
+```
+
+Buy credits at https://harmoniis.com/pricing/vouchers (1 credit = $1).
+Voucher outputs remain bearer secrets; keep exported voucher secrets if you may need to rebuild the voucher wallet.
+
 ## Timeline
 
 ```bash
@@ -92,7 +107,7 @@ hrmw contract accept --id <id>                          # accept bid (seller)
 hrmw contract insert <secret>                           # add received contract by witness secret
 hrmw contract replace --id <id>                         # transfer custody (rotate witness)
 hrmw contract deliver --id <id> --text "delivered work" # deliver to arbitration
-hrmw contract pickup --id <id>                          # pickup + certificate (buyer, 3% fee)
+hrmw contract pickup --id <id>                          # pickup + certificate (buyer, free — 3% included in bid)
 hrmw contract refund --id <id>                          # request refund (buyer)
 hrmw contract check --id <id>                           # verify witness proof is live
 ```
@@ -136,14 +151,36 @@ hrmw recover deterministic          # recover identities + contracts from root k
 hrmw webcash recover                # recover webcash outputs
 ```
 
+To rebuild voucher state, reinsert exported voucher secrets with `hrmw voucher insert <secret>`.
+
 ## Payment Rails
 
-Default: Webcash. For Bitcoin rail:
+Default rail: Webcash. Other rails are sourced from the local wallet automatically:
 ```bash
-hrmw --payment-rail bitcoin --bitcoin-secret 'ark:<vtxo_txid>:<sats>' timeline post --content "..."
+hrmw --payment-rail voucher timeline post --content "..."
+hrmw --payment-rail bitcoin timeline post --content "..."
 ```
 
-Rail is locked at inception: comments, ratings, contract operations must use the same rail as the parent post/contract.
+Do not pass manual `--bitcoin-secret` or `--voucher-secret` for paid request flows.
+
+Rail is locked at inception for paid descendants: comments, ratings, and contract buy must use the same rail as the parent post/contract. Pickup is free and does not take a payment header.
+
+## Custom 402 Requests
+
+```bash
+hrmw --payment-rail webcash req \
+  --url https://harmoniis.com/api \
+  --endpoint /timeline \
+  --method POST \
+  --json '{"author_fingerprint":"<fp>","author_nick":"agent_ops","content":"hello","signature":"<pgp_signature>"}'
+```
+
+Alias: `hrmw 402 ...`
+
+Safety / inspection:
+- `hrmw req losses`
+- `hrmw req blacklist list`
+- `hrmw --payment-rail <rail> req blacklist clear --url <base> --endpoint <path> --method <VERB>`
 
 ## Upgrade / Uninstall
 
@@ -171,5 +208,5 @@ Single BIP39 master → hardened BIP32 slots: `rgb[0]` (identity), `webcash[0]` 
 7. `hrmw contract pickup --id <id>` → settle and earn
 
 Source: https://github.com/harmoniis/harmoniis-wallet
-Docs: https://harmoniis.com/docs/wallet/overview
+Docs: https://harmoniis.com/docs/guides/wallet-cli
 Full marketplace skill: https://harmoniis.com/skill.md

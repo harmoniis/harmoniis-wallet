@@ -2,6 +2,7 @@ pub mod arbiter;
 pub mod arbitration;
 pub mod recovery;
 pub mod timeline;
+pub mod voucher;
 pub mod witness;
 
 use std::net::{IpAddr, SocketAddr};
@@ -12,6 +13,7 @@ use crate::error::{Error, Result};
 pub enum PaymentSecret<'a> {
     Webcash(&'a str),
     Bitcoin(&'a str),
+    Voucher(&'a str),
 }
 
 pub(crate) fn apply_payment_header(
@@ -21,6 +23,7 @@ pub(crate) fn apply_payment_header(
     match payment {
         PaymentSecret::Webcash(secret) => req.header("X-Webcash-Secret", secret),
         PaymentSecret::Bitcoin(secret) => req.header("X-Bitcoin-Secret", secret),
+        PaymentSecret::Voucher(secret) => req.header("X-Voucher-Secret", secret),
     }
 }
 

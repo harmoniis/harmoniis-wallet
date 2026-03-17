@@ -21,6 +21,8 @@ fn make_contract(id: &str) -> Contract {
         role: Role::Buyer,
         delivered_text: None,
         certificate_id: None,
+        arbitration_fee_wats: None,
+        seller_value_wats: None,
         created_at: now.clone(),
         updated_at: now,
     }

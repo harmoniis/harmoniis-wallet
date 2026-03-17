@@ -11,28 +11,35 @@ use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
 use super::{select_backend, BackendChoice, MinerConfig};
 
-/// PID file path: ~/.harmoniis/miner.pid
+fn default_wallet_root() -> PathBuf {
+    if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".harmoniis").join("wallet")
+}
+
+/// PID file path: wallet-root/miner.pid
 pub fn pid_file_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("miner.pid")
+    default_wallet_root().join("miner.pid")
 }
 
-/// Log file path: ~/.harmoniis/miner.log
+/// Log file path: wallet-root/miner.log
 pub fn log_file_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("miner.log")
+    default_wallet_root().join("miner.log")
 }
 
-/// Orphan log (solutions that were rejected): ~/.harmoniis/miner_orphans.log
+/// Orphan log (solutions that were rejected): wallet-root/miner_orphans.log
 pub fn orphan_log_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("miner_orphans.log")
+    default_wallet_root().join("miner_orphans.log")
 }
 
-/// Pending keep log (accepted on server but not persisted locally yet): ~/.harmoniis/miner_pending_keeps.log
+/// Pending keep log (accepted on server but not persisted locally yet): wallet-root/miner_pending_keeps.log
 pub fn pending_keep_log_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("miner_pending_keeps.log")
+    default_wallet_root().join("miner_pending_keeps.log")
 }
 
 fn is_duplicate_wallet_row_error(err: &webylib::Error) -> bool {

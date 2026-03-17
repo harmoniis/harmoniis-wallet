@@ -9,6 +9,35 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.34] — 2026-03-17
+
+### Added
+
+- Added a shared wallet-owned HTTP 402 request engine for:
+  - `identity register` / `identity claim`
+  - `timeline post`
+  - `timeline comment`
+  - `timeline rate`
+  - `contract buy`
+  - `contract bid`
+- Added generic paid-request execution via `hrmw req` with `hrmw 402` alias.
+- Added paid-request loss and blacklist inspection:
+  - `hrmw req losses`
+  - `hrmw req blacklist list`
+  - `hrmw req blacklist clear`
+- Added first-class voucher wallet persistence and automatic voucher-funded retries.
+
+### Changed
+
+- Paid requests now acquire Webcash, Voucher, and ARK Bitcoin value from local wallet state instead of manual payment-secret flags.
+- `402` retry flow now uses `payment.rail_details` / `/api/info` acquisition metadata and sends `X-Payment-Rail` on unpaid probes.
+- README and skill docs now describe the local-wallet payment flow, generic paid requests, voucher behavior, and free pickup semantics.
+
+### Fixed
+
+- Webcash and Voucher secrets are reinserted locally after post-payment service errors when still live.
+- Unrecoverable paid-request failures are now logged and auto-blacklisted after repeated endpoint losses.
+
 ## [0.1.33] — 2026-03-10
 
 ### Added

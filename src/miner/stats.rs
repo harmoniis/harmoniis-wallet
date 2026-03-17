@@ -97,10 +97,20 @@ impl StatsTracker {
     }
 }
 
-/// Default status file path: ~/.harmoniis/miner_status.json
-pub fn status_file_path() -> PathBuf {
+fn default_wallet_root() -> PathBuf {
+    if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".harmoniis").join("miner_status.json")
+    home.join(".harmoniis").join("wallet")
+}
+
+/// Default status file path: wallet-root/miner_status.json
+pub fn status_file_path() -> PathBuf {
+    default_wallet_root().join("miner_status.json")
 }
 
 /// Format a hash rate for display.

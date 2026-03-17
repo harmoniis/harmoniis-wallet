@@ -26,6 +26,7 @@ const FAMILY_WEBCASH: u32 = 2;
 const FAMILY_BITCOIN: u32 = 3;
 const FAMILY_PGP: u32 = 4;
 const FAMILY_HARMONIA_VAULT: u32 = 5;
+const FAMILY_VOUCHER: u32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct HdKeychain {
@@ -147,6 +148,14 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
             }
             Ok((FAMILY_HARMONIA_VAULT, index))
         }
+        "voucher" => {
+            if index != 0 {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "voucher family only supports index 0"
+                )));
+            }
+            Ok((FAMILY_VOUCHER, 0))
+        }
         _ => Err(Error::Other(anyhow::anyhow!(
             "unknown key family '{family}'"
         ))),
@@ -225,6 +234,10 @@ mod tests {
         );
         assert_eq!(vault_1.len(), 64);
         assert_ne!(vault_1, vault);
+
+        let voucher = keychain.derive_slot_hex("voucher", 0).unwrap();
+        assert_eq!(voucher.len(), 64);
+        assert_ne!(voucher, vault);
     }
 
     #[test]

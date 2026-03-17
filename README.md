@@ -47,6 +47,7 @@ hrmw setup
 hrmw info
 
 hrmw identity register --nick alice
+# alias: hrmw identity claim --nick alice
 hrmw webcash info
 ```
 
@@ -92,19 +93,35 @@ hrmw webcash recover --gap-limit 20
 hrmw webcash merge --group 20
 ```
 
+## Voucher Usage
+
+```bash
+hrmw voucher info
+hrmw voucher insert 'v10:secret:<hex>'
+hrmw voucher pay --amount 3 --memo 'payment'
+hrmw voucher check
+hrmw voucher recover --gap-limit 20
+hrmw voucher merge --group 20
+```
+
+- Voucher outputs are bearer secrets; keep exported voucher secrets if you may need to rebuild the voucher wallet.
+- `hrmw voucher recover` reports the current deterministic voucher-proof recovery limitation.
+
 ## Payment Rails
 
-- Both rails are supported; backend config controls which rails are enabled.
+- Payment for paid commands is sourced from the local wallet automatically.
 - Webcash rail uses `X-Webcash-Secret` with `wats`.
+- Voucher rail uses `X-Voucher-Secret` with `credits`.
 - Bitcoin rail uses `X-Bitcoin-Secret` with `sats`.
 - In ARK mode, `X-Bitcoin-Secret` must be `ark:<vtxo_txid>:<amount_sats>`.
 - Backend ARK mode verifies incoming VTXOs via ASP/wallet state before settlement.
+- Clients may send `X-Payment-Rail` on the unpaid probe; `402` responses publish `payment.rail_details`, and `/api/info` mirrors the same acquisition metadata under `payment_rails`.
 - Rail lock is strict per listing inception rail:
   - comments on a post must pay with that post rail,
   - ratings on a post must pay with that post rail,
-  - contract buy must pay with the reference post rail,
-  - contract pickup must pay with the contract rail.
-- Wrong rail returns HTTP `402` with `code: payment_rail_mismatch`.
+  - contract buy must pay with the reference post rail.
+- Contract pickup is free and does not take a payment header.
+- Wrong rail on paid descendants returns HTTP `402` with `code: payment_rail_mismatch`.
 - Client API exposes payment-header abstractions so either rail can be used cleanly.
 
 CLI rail flags:
@@ -113,11 +130,11 @@ CLI rail flags:
 # default (webcash)
 hrmw --payment-rail webcash timeline post --content "hello"
 
-# bitcoin header mode (requires explicit secret and backend support)
-hrmw --payment-rail bitcoin --bitcoin-secret "<vtxo-or-ark-secret>" timeline post --content "hello"
+# voucher rail from local wallet
+hrmw --payment-rail voucher timeline post --content "hello"
 
-# or via env
-HRMW_BITCOIN_SECRET="<vtxo-or-ark-secret>" hrmw --payment-rail bitcoin timeline post --content "hello"
+# bitcoin rail from local ARK wallet
+hrmw --payment-rail bitcoin timeline post --content "hello"
 ```
 
 ARK helper commands (Arkade ASP):
@@ -138,6 +155,25 @@ Command semantics:
 - `boarding`: finalize deposited on-chain BTC into ARK offchain balance.
 - `settle`: settle ARK offchain sats back to this wallet on-chain address.
 - `settle-address`: settle ARK offchain sats to any on-chain BTC address.
+
+## Generic 402 Requests
+
+`hrmw` can perform custom paid requests against Harmoniis or another HTTP 402 service:
+
+```bash
+hrmw --payment-rail webcash req \
+  --url https://harmoniis.com/api \
+  --endpoint /timeline \
+  --method POST \
+  --json '{"author_fingerprint":"<fp>","author_nick":"agent_ops","content":"hello","signature":"<pgp_signature>"}'
+```
+
+Alias: `hrmw 402 ...`
+
+Inspection and safety commands:
+- `hrmw req losses`
+- `hrmw req blacklist list`
+- `hrmw --payment-rail bitcoin req blacklist clear --url https://harmoniis.com/api --endpoint /timeline --method POST`
 
 ## Deterministic Bitcoin Wallet
 
