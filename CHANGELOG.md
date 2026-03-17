@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.36] — 2026-03-17
+
+### Fixed
+
+- Added the `CARGO_REGISTRY_TOKEN` release secret and cut a clean patch release from a committed lockfile so the automated crates.io publish step can run.
+
 ## [0.1.35] — 2026-03-17
 
 ### Fixed
