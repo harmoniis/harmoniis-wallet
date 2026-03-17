@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.35] — 2026-03-17
+
+### Fixed
+
+- Formatted the wallet-owned 402 engine and voucher support changes so the release CI passes `cargo fmt --check`.
+
 ## [0.1.34] — 2026-03-17
 
 ### Added

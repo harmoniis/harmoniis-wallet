@@ -145,7 +145,10 @@ impl VoucherWallet {
     pub async fn check(&self, client: &HarmoniisClient) -> Result<VoucherStats> {
         let live = self.list_live_outputs()?;
         for batch in live.chunks(100) {
-            let proofs: Vec<String> = batch.iter().map(|secret| secret.public_proof().display()).collect();
+            let proofs: Vec<String> = batch
+                .iter()
+                .map(|secret| secret.public_proof().display())
+                .collect();
             let response = client.voucher_check(&proofs).await?;
             let results = response
                 .get("results")
@@ -160,7 +163,10 @@ impl VoucherWallet {
                         .and_then(|v| v.as_bool())
                         .map(|spent| !spent)
                         .unwrap_or(false);
-                    self.set_status(&secret.public_proof().public_hash, if is_live { "live" } else { "spent" })?;
+                    self.set_status(
+                        &secret.public_proof().public_hash,
+                        if is_live { "live" } else { "spent" },
+                    )?;
                 }
             }
         }
@@ -232,7 +238,9 @@ impl VoucherWallet {
         let inputs = live.into_iter().take(target_group).collect::<Vec<_>>();
         let total: u64 = inputs.iter().map(|secret| secret.amount_units).sum();
         let merged = VoucherSecret::generate(total);
-        client.voucher_replace(&inputs, std::slice::from_ref(&merged)).await?;
+        client
+            .voucher_replace(&inputs, std::slice::from_ref(&merged))
+            .await?;
         for input in &inputs {
             self.set_status(&input.public_proof().public_hash, "spent")?;
         }

@@ -267,7 +267,10 @@ impl HarmoniisClient {
             .map_err(|e| Error::InvalidFormat(format!("failed to serialize BuyRequest: {e}")))?;
         body["accept_terms"] = json!(true);
         let resp = self.http.post(self.url("arbitration/contracts/buy"));
-        let resp = apply_payment_header(resp, payment).json(&body).send().await?;
+        let resp = apply_payment_header(resp, payment)
+            .json(&body)
+            .send()
+            .await?;
         let resp = Self::check_status(resp).await?;
         Ok(resp.json().await?)
     }

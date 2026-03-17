@@ -25,12 +25,12 @@ pub use types::{
     VoucherProof, VoucherSecret, WitnessProof, WitnessSecret,
 };
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
+pub use voucher_wallet::{VoucherStats, VoucherWallet};
 pub use wallet::{
     NewPaymentAttempt, PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord,
     PaymentLossRecord, PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSlotRecord,
     WalletSnapshot,
 };
-pub use voucher_wallet::{VoucherStats, VoucherWallet};
 
 #[cfg(feature = "securities")]
 pub use securities::{SecurityDeed, SecurityType, SecurityUnderlying};

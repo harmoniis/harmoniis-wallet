@@ -44,8 +44,8 @@ mod media;
 #[path = "hrmw/request_engine.rs"]
 mod request_engine;
 use cli_support::{
-    build_activity_metadata, build_post_attachments, default_webcash_wallet_path,
-    default_voucher_wallet_path, extract_webcash_token, make_client, next_contract_id, now_utc,
+    build_activity_metadata, build_post_attachments, default_voucher_wallet_path,
+    default_webcash_wallet_path, extract_webcash_token, make_client, next_contract_id, now_utc,
     open_or_create_wallet, open_voucher_wallet, open_webcash_wallet, parse_amount_to_units,
     parse_keywords_csv, resolve_wallet_path, store_master_in_password_manager,
     write_recovery_sidecar,
@@ -1378,7 +1378,8 @@ async fn execute_marketplace_paid_json<T: Serialize>(
     action_hint: &str,
     payload: &T,
 ) -> anyhow::Result<Value> {
-    let spec = build_marketplace_request(api, direct, payment_rail, endpoint, action_hint, payload)?;
+    let spec =
+        build_marketplace_request(api, direct, payment_rail, endpoint, action_hint, payload)?;
     let response = execute_paid_request(wallet_path, &spec).await?;
     ensure_success_json(response)
 }
@@ -1392,7 +1393,8 @@ async fn execute_marketplace_paid_status<T: Serialize>(
     action_hint: &str,
     payload: &T,
 ) -> anyhow::Result<()> {
-    let spec = build_marketplace_request(api, direct, payment_rail, endpoint, action_hint, payload)?;
+    let spec =
+        build_marketplace_request(api, direct, payment_rail, endpoint, action_hint, payload)?;
     let response = execute_paid_request(wallet_path, &spec).await?;
     ensure_success_status(response)
 }
@@ -1429,8 +1431,8 @@ fn build_req_body(args: &ReqArgs) -> anyhow::Result<RequestBodySpec> {
         });
     }
     if let Some(path) = &args.body_file {
-        let bytes =
-            fs::read(path).with_context(|| format!("failed to read body file {}", path.display()))?;
+        let bytes = fs::read(path)
+            .with_context(|| format!("failed to read body file {}", path.display()))?;
         return Ok(RequestBodySpec::Raw {
             bytes,
             content_type: args.content_type.clone(),
@@ -1741,8 +1743,8 @@ async fn main() -> anyhow::Result<()> {
                     println!("Spent outputs:  {}", stats.spent_outputs);
                 }
                 VoucherCmd::Insert { secret } => {
-                    let parsed =
-                        harmoniis_wallet::VoucherSecret::parse(&secret).map_err(anyhow::Error::from)?;
+                    let parsed = harmoniis_wallet::VoucherSecret::parse(&secret)
+                        .map_err(anyhow::Error::from)?;
                     voucher_wallet.insert(parsed)?;
                     let stats = voucher_wallet.stats()?;
                     println!(

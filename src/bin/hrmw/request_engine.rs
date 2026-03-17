@@ -1,10 +1,10 @@
-use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
 use anyhow::Context;
 use bdk_wallet::bitcoin::Network;
 use reqwest::{Method, Url};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 
 use harmoniis_wallet::{
     ark::{ArkPaymentWallet, SqliteArkDb},
@@ -133,12 +133,7 @@ pub async fn execute_paid_request(
     let method_upper = request.method.as_str().to_ascii_uppercase();
     let rail_token = directive.rail_name.to_ascii_lowercase();
 
-    if wallet.is_payment_blacklisted(
-        &service_origin,
-        &endpoint_path,
-        &method_upper,
-        &rail_token,
-    )? {
+    if wallet.is_payment_blacklisted(&service_origin, &endpoint_path, &method_upper, &rail_token)? {
         anyhow::bail!(
             "Refusing to pay {} {}{}: this service returned errors after consuming payment 3 times in the last 24 hours. Endpoint is blacklisted pending human attention.",
             method_upper,
@@ -159,9 +154,14 @@ pub async fn execute_paid_request(
         request_hash: &request_hash(request),
     })?;
 
-    let payment =
-        acquire_payment(wallet_path, &wallet, &directive, &request.base_url, &request.action_hint)
-            .await?;
+    let payment = acquire_payment(
+        wallet_path,
+        &wallet,
+        &directive,
+        &request.base_url,
+        &request.action_hint,
+    )
+    .await?;
     wallet.update_payment_attempt(
         &attempt_id,
         &PaymentAttemptUpdate {
@@ -174,8 +174,13 @@ pub async fn execute_paid_request(
         },
     )?;
 
-    let second = send_request(&http, request, &url, Some((payment.header_name(), &payment.header_value())))
-        .await;
+    let second = send_request(
+        &http,
+        request,
+        &url,
+        Some((payment.header_name(), &payment.header_value())),
+    )
+    .await;
     match second {
         Ok(resp) if (200..300).contains(&resp.status) => {
             wallet.update_payment_attempt(
@@ -312,7 +317,10 @@ async fn recover_or_log_loss(
         AcquiredPayment::Voucher { secret, .. } => {
             let voucher_client = HarmoniisClient::new(service_base_url);
             let voucher_wallet = open_voucher_wallet(wallet_path, wallet)?;
-            if voucher_wallet.reinsert_if_live(&voucher_client, secret).await? {
+            if voucher_wallet
+                .reinsert_if_live(&voucher_client, secret)
+                .await?
+            {
                 wallet.update_payment_attempt(
                     attempt_id,
                     &PaymentAttemptUpdate {
@@ -390,8 +398,9 @@ async fn acquire_payment(
 ) -> anyhow::Result<AcquiredPayment> {
     match directive.rail {
         PaymentRail::Webcash => {
-            let token = pay_from_wallet(wallet_path, wallet, &directive.required_amount, action_hint)
-                .await?;
+            let token =
+                pay_from_wallet(wallet_path, wallet, &directive.required_amount, action_hint)
+                    .await?;
             Ok(AcquiredPayment::Webcash {
                 header_name: directive.header_name.clone(),
                 payment_reference: hashed_reference(&token),
@@ -400,18 +409,12 @@ async fn acquire_payment(
         }
         PaymentRail::Voucher => {
             let client = HarmoniisClient::new(service_base_url);
-            let amount_units = directive
-                .required_amount
-                .parse::<u64>()
-                .with_context(|| format!("invalid voucher amount '{}'", directive.required_amount))?;
-            let secret = pay_voucher_from_wallet(
-                wallet_path,
-                wallet,
-                &client,
-                amount_units,
-                action_hint,
-            )
-            .await?;
+            let amount_units = directive.required_amount.parse::<u64>().with_context(|| {
+                format!("invalid voucher amount '{}'", directive.required_amount)
+            })?;
+            let secret =
+                pay_voucher_from_wallet(wallet_path, wallet, &client, amount_units, action_hint)
+                    .await?;
             Ok(AcquiredPayment::Voucher {
                 header_name: directive.header_name.clone(),
                 payment_reference: secret.public_proof().public_hash.clone(),
@@ -426,11 +429,13 @@ async fn acquire_payment(
             let db = SqliteArkDb::open(&crate::bitcoin_db_path(wallet_path))
                 .map_err(anyhow::Error::from)?;
             let ark = ArkPaymentWallet::connect(&btc, &asp_url, db).await?;
-            let amount_sats = directive
-                .required_amount
-                .parse::<u64>()
-                .with_context(|| format!("invalid bitcoin amount '{}'", directive.required_amount))?;
-            let proof = ark.send_payment(&offchain_receive_address, amount_sats).await?.to_proof_string();
+            let amount_sats = directive.required_amount.parse::<u64>().with_context(|| {
+                format!("invalid bitcoin amount '{}'", directive.required_amount)
+            })?;
+            let proof = ark
+                .send_payment(&offchain_receive_address, amount_sats)
+                .await?
+                .to_proof_string();
             let payment_reference = proof
                 .strip_prefix("ark:")
                 .and_then(|rest| rest.split(':').next())
@@ -479,7 +484,8 @@ fn build_request_url(base_url: &str, endpoint: &str) -> anyhow::Result<Url> {
         let current = base.path().to_string();
         base.set_path(&format!("{current}/"));
     }
-    base.join(endpoint).with_context(|| format!("failed to join endpoint '{endpoint}'"))
+    base.join(endpoint)
+        .with_context(|| format!("failed to join endpoint '{endpoint}'"))
 }
 
 async fn send_request(
@@ -498,11 +504,14 @@ async fn send_request(
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("x-payment-rail"))
         {
-            builder = builder.header("X-Payment-Rail", match rail {
-                PaymentRail::Webcash => "webcash",
-                PaymentRail::Voucher => "voucher",
-                PaymentRail::Bitcoin => "bitcoin",
-            });
+            builder = builder.header(
+                "X-Payment-Rail",
+                match rail {
+                    PaymentRail::Webcash => "webcash",
+                    PaymentRail::Voucher => "voucher",
+                    PaymentRail::Bitcoin => "bitcoin",
+                },
+            );
         }
     }
     if let Some((name, value)) = payment_header {
@@ -514,7 +523,10 @@ async fn send_request(
     builder = match &request.body {
         RequestBodySpec::None => builder,
         RequestBodySpec::Json(value) => builder.json(value),
-        RequestBodySpec::Raw { bytes, content_type } => builder
+        RequestBodySpec::Raw {
+            bytes,
+            content_type,
+        } => builder
             .header("content-type", content_type)
             .body(bytes.clone()),
     };
@@ -582,18 +594,15 @@ async fn load_payment_directive(
             PaymentRail::Bitcoin => "sats",
         })
         .to_string();
-    let mut rail_details = payment
-        .get("rail_details")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let mut rail_details = payment.get("rail_details").cloned().unwrap_or(Value::Null);
     if !rail_details.is_object() {
         rail_details = fetch_fee_schedule(
             http,
             request_url,
             payment.get("fee_schedule_url").and_then(Value::as_str),
         )
-            .await
-            .unwrap_or(Value::Null);
+        .await
+        .unwrap_or(Value::Null);
     }
     Ok(PaymentDirective {
         rail,
@@ -643,7 +652,12 @@ fn bitcoin_ark_payment_target(rail_details: &Value) -> anyhow::Result<(Network, 
     let mode = bitcoin
         .get("mode")
         .and_then(Value::as_str)
-        .or_else(|| bitcoin.get("ark").and_then(|v| v.get("mode")).and_then(Value::as_str))
+        .or_else(|| {
+            bitcoin
+                .get("ark")
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or("ark");
     if !mode.eq_ignore_ascii_case("ark") {
         anyhow::bail!("bitcoin rail is not ARK mode");
@@ -651,7 +665,12 @@ fn bitcoin_ark_payment_target(rail_details: &Value) -> anyhow::Result<(Network, 
     let asp_url = bitcoin
         .get("asp_url")
         .and_then(Value::as_str)
-        .or_else(|| bitcoin.get("ark").and_then(|v| v.get("asp_url")).and_then(Value::as_str))
+        .or_else(|| {
+            bitcoin
+                .get("ark")
+                .and_then(|v| v.get("asp_url"))
+                .and_then(Value::as_str)
+        })
         .ok_or_else(|| anyhow::anyhow!("bitcoin rail metadata missing asp_url"))?
         .to_string();
     let offchain_receive_address = bitcoin
@@ -695,11 +714,7 @@ fn parse_rail(raw: &str) -> anyhow::Result<PaymentRail> {
 }
 
 fn origin_string(url: &Url) -> String {
-    let mut origin = format!(
-        "{}://{}",
-        url.scheme(),
-        url.host_str().unwrap_or_default()
-    );
+    let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
     if let Some(port) = url.port() {
         origin.push(':');
         origin.push_str(&port.to_string());
@@ -725,7 +740,10 @@ fn request_hash(request: &RequestSpec) -> String {
     match &request.body {
         RequestBodySpec::None => {}
         RequestBodySpec::Json(value) => hasher.update(value.to_string().as_bytes()),
-        RequestBodySpec::Raw { bytes, content_type } => {
+        RequestBodySpec::Raw {
+            bytes,
+            content_type,
+        } => {
             hasher.update(content_type.as_bytes());
             hasher.update(bytes);
         }
