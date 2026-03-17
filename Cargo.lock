@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.33"
+version = "0.1.35"
 dependencies = [
  "anyhow",
  "ark-bdk-wallet",
