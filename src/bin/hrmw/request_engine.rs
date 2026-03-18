@@ -214,7 +214,7 @@ pub async fn execute_paid_request(
         wallet_path,
         &wallet,
         &directive,
-        &request.base_url,
+        &service_origin,
         &request.action_hint,
     )
     .await?;
@@ -354,7 +354,7 @@ pub async fn execute_paid_request(
                 Some(resp.status),
                 parse_response_code(resp.body_json.as_ref()),
                 Some(resp.body_text.as_str()),
-                &request.base_url,
+                &service_origin,
             )
             .await?;
             Err(anyhow::anyhow!(
@@ -377,7 +377,7 @@ pub async fn execute_paid_request(
                 None,
                 Some("request_send_failed".to_string()),
                 Some(&err.to_string()),
-                &request.base_url,
+                &service_origin,
             )
             .await?;
             Err(err)
@@ -892,6 +892,10 @@ fn build_request_url(base_url: &str, endpoint: &str) -> anyhow::Result<Url> {
     if endpoint.is_empty() {
         return Ok(base);
     }
+    let endpoint = endpoint.trim_start_matches('/');
+    if endpoint.is_empty() {
+        return Ok(base);
+    }
     if !base.path().ends_with('/') {
         let current = base.path().to_string();
         base.set_path(&format!("{current}/"));
@@ -1280,7 +1284,7 @@ fn is_duplicate_wallet_row_error(err: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{payment_header_name, select_payment_rail, PaymentRail};
+    use super::{build_request_url, payment_header_name, select_payment_rail, PaymentRail};
     use serde_json::json;
 
     #[test]
@@ -1310,5 +1314,21 @@ mod tests {
             payment_header_name(payment_obj, PaymentRail::Voucher, rail_details),
             "X-Voucher-Secret"
         );
+    }
+
+    #[test]
+    fn request_url_keeps_base_path_for_leading_slash_endpoints() {
+        let url = build_request_url("https://example.com/api/v1", "/posts").expect("url");
+        assert_eq!(url.as_str(), "https://example.com/api/v1/posts");
+    }
+
+    #[test]
+    fn request_url_accepts_absolute_endpoint_override() {
+        let url = build_request_url(
+            "https://example.com/api/v1",
+            "https://payments.example.net/custom",
+        )
+        .expect("url");
+        assert_eq!(url.as_str(), "https://payments.example.net/custom");
     }
 }

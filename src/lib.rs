@@ -27,9 +27,10 @@ pub use types::{
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 pub use voucher_wallet::{VoucherStats, VoucherWallet};
 pub use wallet::{
-    NewPaymentAttempt, PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord,
-    PaymentLossRecord, PgpIdentityRecord, PgpIdentitySnapshot, RgbWallet, WalletSlotRecord,
-    WalletSnapshot,
+    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
+    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
+    PaymentTransactionRecord, PaymentTransactionUpdate, PgpIdentityRecord, PgpIdentitySnapshot,
+    RgbWallet, WalletSlotRecord, WalletSnapshot,
 };
 
 #[cfg(feature = "securities")]
