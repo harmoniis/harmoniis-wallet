@@ -9,6 +9,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.38] — 2026-03-18
+
+### Fixed
+
+- Published the current request-engine and accounting-compatible wallet surface as a new release so Harmonia can consume a versioned `harmoniis-wallet` crate in CI and release automation instead of relying on an unpublishable sibling-only checkout.
+
+## [0.1.37] — 2026-03-18
+
+### Fixed
+
+- Corrected paid-request compatibility for multi-rail `HTTP 402` flows, including proper rail/header selection and challenge-id echoing for settlement correlation.
+- Restored the wallet request-engine regression coverage so the release test suite catches 402/client compatibility drift before publishing.
+
 ## [0.1.36] — 2026-03-17
 
 ### Fixed
