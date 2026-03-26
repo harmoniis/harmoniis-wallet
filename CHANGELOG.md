@@ -9,6 +9,32 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.39] — 2026-03-26
+
+### Added
+
+- `hrmw setup` is now idempotent: re-running on an existing wallet updates
+  settings (e.g. `--password-manager off`) without destroying key material.
+- Password manager credentials can now be removed post-setup via
+  `hrmw setup --password-manager off`.
+- Release binaries for Linux, macOS, and Windows now include GPU mining support
+  (wgpu: DX12/Vulkan/Metal). Previously GPU was compile-time only for source builds.
+- Added `install.ps1` PowerShell installer for first-time Windows users.
+
+### Changed
+
+- CI/CD overhauled to follow Harmonia patterns:
+  - FreeBSD builds use native VM via `cross-platform-actions` instead of `cross-rs`.
+  - Windows builds use MSVC environment setup (`ilammy/msvc-dev-cmd`).
+  - All native platform releases compiled with GPU support.
+  - FreeBSD aarch64 dropped; FreeBSD x86_64 now uses native VM builds.
+
+### Fixed
+
+- Fixed `GPU: feature-disabled [MISS]` on Windows — release binaries now include
+  the wgpu GPU backend which auto-selects DX12 or Vulkan for AMD and NVIDIA GPUs.
+- Fixed inability to change password manager setting after initial wallet setup.
+
 ## [0.1.38] — 2026-03-18
 
 ### Fixed
@@ -345,7 +371,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.39...HEAD
+[0.1.39]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.39
 [0.1.12]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.12
 [0.1.11]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.11
 [0.1.10]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.10

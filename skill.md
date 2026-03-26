@@ -11,6 +11,10 @@ hrmw setup                          # generate master secret + PGP key
 hrmw setup --password-manager off   # skip OS keychain
 hrmw setup --secret <hex>           # import existing BIP39 entropy
 hrmw info                           # show fingerprint, nick, balances
+
+# Re-run on existing wallet (idempotent — changes settings, never destroys data)
+hrmw setup --password-manager off        # remove credentials from OS store
+hrmw setup --password-manager required   # (re-)store credentials in OS store
 ```
 
 Default API: `https://harmoniis.com/api`. Override with `--api <url>`.

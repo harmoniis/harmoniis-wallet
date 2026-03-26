@@ -29,6 +29,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # MSVC setup for Windows (Harmonia pattern)
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Force MSVC compiler tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CC=cl.exe" >> $env:GITHUB_ENV
+          "CXX=cl.exe" >> $env:GITHUB_ENV
+          "AR=lib.exe" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
+          "CXX_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -48,10 +63,36 @@ jobs:
         run: cargo build --no-default-features --features bundled-sqlite,gpu
 
       - name: Unit tests
-        run: cargo test --no-default-features --features bundled-sqlite --test unit_tests
+        run: cargo test --no-default-features --features bundled-sqlite,gpu --test unit_tests
 
       - name: Local simulation tests
-        run: cargo test --no-default-features --features bundled-sqlite --test local_sim
+        run: cargo test --no-default-features --features bundled-sqlite,gpu --test local_sim
+
+  test-freebsd:
+    name: Test (FreeBSD)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in FreeBSD VM
+        uses: cross-platform-actions/action@v0.32.0
+        with:
+          operating_system: freebsd
+          version: "14.2"
+          architecture: x86-64
+          memory: 8G
+          cpu_count: 4
+          shell: bash
+          sync_files: true
+          run: |
+            set -euo pipefail
+            export IGNORE_OSVERSION=yes
+            sudo pkg install -y curl bash ca_root_nss
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            . "$HOME/.cargo/env"
+            cargo build --release --no-default-features --features bundled-sqlite
+            cargo test --release --no-default-features --features bundled-sqlite --test unit_tests
+            cargo test --release --no-default-features --features bundled-sqlite --test local_sim
 
   msrv:
     name: MSRV (1.86)
@@ -64,46 +105,66 @@ jobs:
   release:
     name: Release (${{ matrix.platform }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, test-freebsd]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Native builds
+          # Native builds — GPU enabled
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
+            features: bundled-sqlite,gpu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
+            features: bundled-sqlite,gpu
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos-aarch64
+            features: bundled-sqlite,gpu
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos-x86_64
+            features: bundled-sqlite,gpu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
-          # FreeBSD via cross
+            features: bundled-sqlite,gpu
+          # FreeBSD — native VM build (no GPU in VM)
           - os: ubuntu-latest
             target: x86_64-unknown-freebsd
             platform: freebsd-x86_64
-            use_cross: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-freebsd
-            platform: freebsd-aarch64
-            use_cross: true
-            build_std: true
+            features: bundled-sqlite
+            freebsd_vm: true
+            freebsd_version: "14.2"
+            freebsd_arch: x86-64
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        if: "!matrix.freebsd_vm"
         with:
-          targets: ${{ !matrix.use_cross && matrix.target || '' }}
+          targets: ${{ matrix.target }}
+
+      # MSVC setup for Windows release builds
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Force MSVC compiler tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CC=cl.exe" >> $env:GITHUB_ENV
+          "CXX=cl.exe" >> $env:GITHUB_ENV
+          "AR=lib.exe" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
+          "CXX_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
 
       - uses: actions/cache@v4
+        if: "!matrix.freebsd_vm"
         with:
           path: |
             ~/.cargo/registry
@@ -112,37 +173,46 @@ jobs:
           key: release-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.platform }}-
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: |
-          rustup toolchain install nightly
-          rustup component add rust-src --toolchain nightly
-          cargo +nightly install cross --git https://github.com/cross-rs/cross
+      # FreeBSD release build via VM
+      - name: Build release binary (FreeBSD VM)
+        if: matrix.freebsd_vm
+        uses: cross-platform-actions/action@v0.32.0
+        with:
+          operating_system: freebsd
+          version: ${{ matrix.freebsd_version }}
+          architecture: ${{ matrix.freebsd_arch }}
+          memory: 8G
+          cpu_count: 4
+          shell: bash
+          sync_files: true
+          run: |
+            set -euo pipefail
+            export IGNORE_OSVERSION=yes
+            sudo pkg install -y curl bash ca_root_nss
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            . "$HOME/.cargo/env"
+            cargo build --release --no-default-features --features ${{ matrix.features }}
+            VERSION=${GITHUB_REF_NAME#v}
+            bash scripts/build_release.sh "$VERSION" "${{ matrix.platform }}"
 
+      # Native release build
       - name: Build release binary
+        if: "!matrix.freebsd_vm"
         shell: bash
         run: |
-          if [ "${{ matrix.build_std }}" = "true" ]; then
-            cross +nightly build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }} \
-              -Z build-std=std,panic_abort
-          elif [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
-          else
-            HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
-            if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
-              cargo build --release --no-default-features --features bundled-sqlite --target ${{ matrix.target }}
-            else
-              cargo build --release --no-default-features --features bundled-sqlite
-            fi
-          fi
-          # Copy cross-compiled artifacts to target/release for build_release.sh
-          if [ "${{ matrix.target }}" != "$(rustc -vV | grep host | awk '{print $2}')" ]; then
+          HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
+          if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
+            cargo build --release --no-default-features --features ${{ matrix.features }} --target ${{ matrix.target }}
+            # Copy cross-compiled artifacts for build_release.sh
             mkdir -p target/release
             cp target/${{ matrix.target }}/release/hrmw target/release/ 2>/dev/null || true
             cp target/${{ matrix.target }}/release/hrmw.exe target/release/ 2>/dev/null || true
+          else
+            cargo build --release --no-default-features --features ${{ matrix.features }}
           fi
 
       - name: Build release tarball
+        if: "!matrix.freebsd_vm"
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
@@ -155,24 +225,29 @@ jobs:
             harmoniis-wallet-*-${{ matrix.platform }}.tar.gz
             harmoniis-wallet-*-${{ matrix.platform }}.tar.gz.sha256
 
-      - name: Upload install script
+      - name: Upload install scripts
         if: matrix.platform == 'linux-x86_64'
         uses: softprops/action-gh-release@v2
         with:
-          files: install.sh
+          files: |
+            install.sh
+            install.ps1
 
   publish-crate:
     name: Publish to crates.io
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
-    continue-on-error: true
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Skip publish when token is unavailable
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: echo "CARGO_REGISTRY_TOKEN is not configured; skipping crates.io publish"
+
       - name: Publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: env.CARGO_REGISTRY_TOKEN != ''
         run: cargo publish --no-default-features --features bundled-sqlite

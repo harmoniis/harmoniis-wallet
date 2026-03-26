@@ -252,19 +252,39 @@ hrmw key import --mnemonic "word1 word2 ... word12"
 hrmw key fingerprint
 ```
 
-Password manager storage at setup time:
+Password manager storage:
 
 ```bash
+# During initial setup
 hrmw setup --password-manager required
+
+# Change setting on an existing wallet (idempotent — safe to re-run)
+hrmw setup --password-manager off        # remove credentials from OS store
+hrmw setup --password-manager required   # (re-)store credentials in OS store
+hrmw setup --password-manager best-effort
 ```
 
 Modes:
 
-- `required` (default): setup fails if no supported password manager is available.
-- `best-effort`: continue setup if password-manager storage fails.
-- `off`: skip password-manager storage.
+- `required` (default): fails if no supported password manager is available.
+- `best-effort`: continue if password-manager storage fails.
+- `off`: remove credentials from OS store (or skip storage on first run).
 
-On macOS, this stores in Keychain under a `harmoniis` service label. If iCloud Keychain sync is enabled in macOS settings, those entries sync; `hrmw` cannot force iCloud sync from CLI.
+Re-running `hrmw setup` on an existing wallet is safe: it never destroys key material, contracts, or identities. It only updates the password manager setting. To re-import a master key, use `hrmw key import --force` instead.
+
+After switching to `off`, back up your master key immediately:
+
+```bash
+hrmw key export --format mnemonic
+```
+
+Supported credential stores:
+
+| Platform | Backend |
+|----------|---------|
+| macOS | Keychain (with optional iCloud sync) |
+| Linux | Secret Service (`secret-tool`) |
+| Windows | Credential Manager (`cmdkey`) |
 
 Deterministic slot map:
 

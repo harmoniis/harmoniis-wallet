@@ -363,6 +363,214 @@ fn store_cmdkey_value(target: &str, account: &str, secret: &str) -> anyhow::Resu
     Ok(())
 }
 
+// ── Remove / check credential store ──────────────────────────────────────────
+
+pub fn remove_master_from_password_manager(
+    path: &Path,
+    wallet: &RgbWallet,
+) -> anyhow::Result<PasswordManagerBackend> {
+    #[cfg(target_os = "macos")]
+    {
+        if command_exists("security") {
+            remove_master_macos_keychain(path, wallet)?;
+            return Ok(PasswordManagerBackend::MacOsKeychain);
+        }
+        anyhow::bail!("`security` command not found; macOS Keychain unavailable");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if command_exists("secret-tool") {
+            remove_master_linux_secret_service(path, wallet)?;
+            return Ok(PasswordManagerBackend::LinuxSecretService);
+        }
+        anyhow::bail!(
+            "no supported password manager backend found (expected `secret-tool` for Secret Service)"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if command_exists("cmdkey") {
+            remove_master_windows_credential_manager(path, wallet)?;
+            return Ok(PasswordManagerBackend::WindowsCredentialManager);
+        }
+        anyhow::bail!("`cmdkey` not found; Windows Credential Manager unavailable");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        let _ = wallet;
+        anyhow::bail!("no supported password manager backend for this OS");
+    }
+}
+
+pub fn check_master_in_password_manager(path: &Path, wallet: &RgbWallet) -> anyhow::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        if !command_exists("security") {
+            return Ok(false);
+        }
+        return check_master_macos_keychain(path, wallet);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !command_exists("secret-tool") {
+            return Ok(false);
+        }
+        return check_master_linux_secret_service(path, wallet);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !command_exists("cmdkey") {
+            return Ok(false);
+        }
+        return check_master_windows_credential_manager(path, wallet);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        let _ = wallet;
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_master_macos_keychain(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    delete_macos_keychain_secret(
+        &format!("{service_prefix}.wallet:{wallet_id}:mnemonic"),
+        &fingerprint,
+    )?;
+    delete_macos_keychain_secret(
+        &format!("{service_prefix}.wallet:{wallet_id}:entropy-hex"),
+        &fingerprint,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_keychain_secret(service: &str, account: &str) -> anyhow::Result<()> {
+    let status = Command::new("security")
+        .args(["delete-generic-password", "-a", account, "-s", service])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to execute `security` for service {service}"))?;
+    if !status.success() {
+        anyhow::bail!("credential not found for service {service} (nothing to remove)");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_master_macos_keychain(path: &Path, wallet: &RgbWallet) -> anyhow::Result<bool> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let status = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-a",
+            &fingerprint,
+            "-s",
+            &format!("{service_prefix}.wallet:{wallet_id}:mnemonic"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to execute `security`")?;
+    Ok(status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_master_linux_secret_service(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    clear_secret_tool_value(&service_prefix, &wallet_id, "mnemonic", &fingerprint)?;
+    clear_secret_tool_value(&service_prefix, &wallet_id, "entropy-hex", &fingerprint)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn clear_secret_tool_value(
+    service: &str,
+    wallet_id: &str,
+    kind: &str,
+    account: &str,
+) -> anyhow::Result<()> {
+    let status = Command::new("secret-tool")
+        .args([
+            "clear", "service", service, "wallet", wallet_id, "kind", kind, "account", account,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run secret-tool clear for {kind}"))?;
+    if !status.success() {
+        anyhow::bail!("secret-tool clear failed for {kind} (credential may not exist)");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn check_master_linux_secret_service(path: &Path, wallet: &RgbWallet) -> anyhow::Result<bool> {
+    let (wallet_id, fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let output = Command::new("secret-tool")
+        .args([
+            "lookup",
+            "service",
+            &service_prefix,
+            "wallet",
+            &wallet_id,
+            "kind",
+            "mnemonic",
+            "account",
+            &fingerprint,
+        ])
+        .output()
+        .context("failed to run secret-tool lookup")?;
+    Ok(output.status.success() && !output.stdout.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn remove_master_windows_credential_manager(path: &Path, wallet: &RgbWallet) -> anyhow::Result<()> {
+    let (wallet_id, _fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    delete_cmdkey_value(&format!("{service_prefix}.wallet:{wallet_id}:mnemonic"))?;
+    delete_cmdkey_value(&format!("{service_prefix}.wallet:{wallet_id}:entropy-hex"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_cmdkey_value(target: &str) -> anyhow::Result<()> {
+    let status = Command::new("cmdkey")
+        .args([&format!("/delete:{target}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to execute cmdkey /delete for target {target}"))?;
+    if !status.success() {
+        anyhow::bail!("cmdkey /delete failed for target {target} (credential may not exist)");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn check_master_windows_credential_manager(
+    path: &Path,
+    wallet: &RgbWallet,
+) -> anyhow::Result<bool> {
+    let (wallet_id, _fingerprint, service_prefix) = wallet_password_labels(path, wallet)?;
+    let output = Command::new("cmdkey")
+        .args([&format!(
+            "/list:{service_prefix}.wallet:{wallet_id}:mnemonic"
+        )])
+        .output()
+        .context("failed to execute cmdkey /list")?;
+    Ok(output.status.success())
+}
+
 pub fn default_webcash_wallet_path(master_wallet_path: &Path) -> PathBuf {
     let base_dir = master_wallet_path
         .parent()
@@ -757,7 +965,7 @@ fn default_terms_markdown() -> String {
         "",
         "1. Scope is exactly what is written in the listing descriptor attachment.",
         "2. Buyer and seller must agree on delivery details through contract and bid flow.",
-        "3. Payment, arbitration fee, and dispute/refund rules follow Harmoniis contract endpoints.",
+        "3. Payment, arbitration profit, and dispute/refund rules follow Harmoniis contract endpoints.",
     ]
     .join("\n")
 }

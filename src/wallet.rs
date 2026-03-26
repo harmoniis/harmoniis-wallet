@@ -2208,7 +2208,7 @@ fn migrate_rgb_state(source_conn: &Connection, target_conn: &Connection) -> Resu
                 certificate_id: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
-                arbitration_fee_wats: None,
+                arbitration_profit_wats: None,
                 seller_value_wats: None,
             })
         })?;
@@ -2630,7 +2630,7 @@ fn row_to_contract(row: &rusqlite::Row<'_>) -> Result<Contract> {
         certificate_id: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
-        arbitration_fee_wats: None,
+        arbitration_profit_wats: None,
         seller_value_wats: None,
     })
 }

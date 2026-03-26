@@ -44,11 +44,11 @@ mod media;
 #[path = "hrmw/request_engine.rs"]
 mod request_engine;
 use cli_support::{
-    build_activity_metadata, build_post_attachments, default_voucher_wallet_path,
-    default_webcash_wallet_path, extract_webcash_token, make_client, next_contract_id, now_utc,
-    open_or_create_wallet, open_voucher_wallet, open_webcash_wallet, parse_amount_to_units,
-    parse_keywords_csv, resolve_wallet_path, store_master_in_password_manager,
-    write_recovery_sidecar,
+    build_activity_metadata, build_post_attachments, check_master_in_password_manager,
+    default_voucher_wallet_path, default_webcash_wallet_path, extract_webcash_token, make_client,
+    next_contract_id, now_utc, open_or_create_wallet, open_voucher_wallet, open_webcash_wallet,
+    parse_amount_to_units, parse_keywords_csv, remove_master_from_password_manager,
+    resolve_wallet_path, store_master_in_password_manager, write_recovery_sidecar,
 };
 use media::{prepare_avatar_image, prepare_post_image};
 use request_engine::{execute_paid_request, RequestBodySpec, RequestResponse, RequestSpec};
@@ -1493,7 +1493,7 @@ fn contract_from_recovery(
         certificate_id: None,
         created_at: rc.created_at.clone().unwrap_or_else(now_utc),
         updated_at: rc.updated_at.clone().unwrap_or_else(now_utc),
-        arbitration_fee_wats: None,
+        arbitration_profit_wats: None,
         seller_value_wats: None,
     })
 }
@@ -1518,9 +1518,60 @@ async fn main() -> anyhow::Result<()> {
             password_manager,
         } => {
             if wallet_path.exists() {
-                println!("Wallet already exists at {}", wallet_path.display());
+                // ── Re-run mode: open existing wallet, apply settings ────────
+                let wallet =
+                    RgbWallet::open(&wallet_path).context("failed to open existing wallet")?;
+                println!("Wallet: {}", wallet_path.display());
+                println!("Fingerprint: {}", wallet.fingerprint()?);
+                if let Some(label) = wallet.wallet_label()? {
+                    println!("Label: {label}");
+                }
+                let pgp = wallet.list_pgp_identities()?;
+                println!("PGP identities: {}", pgp.len());
+                match check_master_in_password_manager(&wallet_path, &wallet) {
+                    Ok(true) => println!("Password manager: stored"),
+                    Ok(false) => println!("Password manager: not stored"),
+                    Err(_) => println!("Password manager: unknown"),
+                }
+
+                if secret.is_some() {
+                    anyhow::bail!(
+                        "cannot re-import key material via setup; \
+                         use `hrmw key import --force` instead"
+                    );
+                }
+
+                match password_manager {
+                    PasswordManagerMode::Required => {
+                        let backend = store_master_in_password_manager(&wallet_path, &wallet)?;
+                        println!("Stored master material in {}.", backend.label());
+                    }
+                    PasswordManagerMode::BestEffort => {
+                        match store_master_in_password_manager(&wallet_path, &wallet) {
+                            Ok(b) => println!("Stored master material in {}.", b.label()),
+                            Err(e) => eprintln!(
+                                "Warning: could not store master material in password manager: {e}"
+                            ),
+                        }
+                    }
+                    PasswordManagerMode::Off => {
+                        match remove_master_from_password_manager(&wallet_path, &wallet) {
+                            Ok(b) => {
+                                println!("Removed master material from {}.", b.label());
+                                eprintln!();
+                                eprintln!("Important: your master key is no longer in the OS credential store.");
+                                eprintln!("Back up your wallet now:");
+                                eprintln!("  hrmw key export --format mnemonic");
+                                eprintln!("  (write down the 12 words and store them offline)");
+                            }
+                            Err(e) => eprintln!("Note: {e}"),
+                        }
+                    }
+                }
                 return Ok(());
             }
+
+            // ── First-run: create new wallet ─────────────────────────────────
             let wallet = RgbWallet::create(&wallet_path).context("failed to create wallet")?;
             if let Some(hex) = secret {
                 wallet
