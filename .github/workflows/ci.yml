@@ -195,9 +195,15 @@ jobs:
             VERSION=${GITHUB_REF_NAME#v}
             bash scripts/build_release.sh "$VERSION" "${{ matrix.platform }}"
 
-      # Native release build
+      # Native release build (Windows — pwsh to avoid Git link.exe conflict)
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --no-default-features --features ${{ matrix.features }}
+
+      # Native release build (Unix)
       - name: Build release binary
-        if: "!matrix.freebsd_vm"
+        if: "!matrix.freebsd_vm && runner.os != 'Windows'"
         shell: bash
         run: |
           HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
@@ -206,7 +212,6 @@ jobs:
             # Copy cross-compiled artifacts for build_release.sh
             mkdir -p target/release
             cp target/${{ matrix.target }}/release/hrmw target/release/ 2>/dev/null || true
-            cp target/${{ matrix.target }}/release/hrmw.exe target/release/ 2>/dev/null || true
           else
             cargo build --release --no-default-features --features ${{ matrix.features }}
           fi
