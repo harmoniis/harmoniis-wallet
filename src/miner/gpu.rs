@@ -92,7 +92,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         backends: COMPUTE_BACKENDS,
         ..Default::default()
     });
-    let adapters = instance.enumerate_adapters(COMPUTE_BACKENDS);
+    let adapters = instance.enumerate_adapters(COMPUTE_BACKENDS).await;
     let adapter = identity.find_matching(adapters).ok_or_else(|| {
         anyhow::anyhow!(
             "no adapter matches vendor={} device={} backend={}",
@@ -101,18 +101,15 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
             identity.backend,
         )
     })?;
-    let info = adapter.get_info();
-    eprintln!("[gpu-probe] testing: {} ({:?})", info.name, info.backend);
+    let _info = adapter.get_info();
+    // Probe runs in a subprocess — keep quiet.
     let (device, _queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("probe"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("probe"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        })
         .await
         .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
 
@@ -159,7 +156,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
     // This is the call that can segfault on buggy AMD Vulkan drivers.
     let _pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -170,7 +167,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         compilation_options: Default::default(),
         cache: None,
     });
-    eprintln!("[gpu-probe] OK: {} ({:?})", info.name, info.backend);
+    // Success — parent process will use this adapter.
     Ok(())
 }
 
@@ -190,7 +187,7 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
         .arg("--backend")
         .arg(&identity.backend)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::null())
         .status();
     match status {
         Ok(s) => s.success(),
@@ -228,14 +225,14 @@ impl GpuMiner {
                 force_fallback_adapter: false,
             })
             .await;
-        if let Some(adapter) = preferred {
+        if let Ok(adapter) = preferred {
             if let Some(miner) = Self::try_from_adapter(adapter).await {
                 return Some(miner);
             }
         }
 
         // Fallback: scan all adapters and pick the first one we can open.
-        let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
         if adapters.is_empty() {
             eprintln!("No GPU adapters visible to wgpu (enumerate_adapters returned 0)");
             return None;
@@ -258,18 +255,15 @@ impl GpuMiner {
         }
 
         let adapter_name = info.name.clone();
-        println!("GPU adapter: {} ({:?})", adapter_name, info.backend);
+        // Adapter selection is an internal detail — don't print to user.
 
         let req_default = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("webminer"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("webminer"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await;
         let (device, queue) = match req_default {
             Ok(ok) => ok,
@@ -279,15 +273,12 @@ impl GpuMiner {
                     adapter_name, err_default
                 );
                 adapter
-                    .request_device(
-                        &wgpu::DeviceDescriptor {
-                            label: Some("webminer-downlevel"),
-                            required_features: wgpu::Features::empty(),
-                            required_limits: wgpu::Limits::downlevel_defaults(),
-                            ..Default::default()
-                        },
-                        None,
-                    )
+                    .request_device(&wgpu::DeviceDescriptor {
+                        label: Some("webminer-downlevel"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::downlevel_defaults(),
+                        ..Default::default()
+                    })
                     .await
                     .ok()?
             }
@@ -341,7 +332,7 @@ impl GpuMiner {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("miner_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -486,8 +477,10 @@ impl GpuMiner {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device
-            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
         rx.await??;
 
         let data = buffer_slice.get_mapped_range();

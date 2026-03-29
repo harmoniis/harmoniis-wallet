@@ -996,6 +996,8 @@ impl From<WebminerBackendArg> for harmoniis_wallet::miner::BackendChoice {
 
 #[derive(Subcommand)]
 enum WebminerCmd {
+    /// List all available GPU mining devices
+    ListDevices,
     /// Start mining in the background
     Start {
         /// Webcash server URL
@@ -1016,6 +1018,9 @@ enum WebminerCmd {
         /// Accept the Webcash terms of service
         #[arg(long)]
         accept_terms: bool,
+        /// Comma-separated device IDs to mine on (from list-devices)
+        #[arg(long, value_delimiter = ',')]
+        device: Option<Vec<usize>>,
     },
     /// Stop the running miner
     Stop,
@@ -1052,6 +1057,9 @@ enum WebminerCmd {
         cpu_threads: Option<usize>,
         #[arg(long)]
         accept_terms: bool,
+        /// Comma-separated device IDs to mine on (from list-devices)
+        #[arg(long, value_delimiter = ',')]
+        device: Option<Vec<usize>>,
         /// Master wallet path (defaults to global --wallet / ~/.harmoniis/wallet/master.db)
         #[arg(long)]
         wallet: Option<PathBuf>,
@@ -3634,6 +3642,18 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── webminer ────────────────────────────────────────────────────────────
+        Cmd::Webminer(WebminerCmd::ListDevices) => {
+            let devices = harmoniis_wallet::miner::enumerate_all_devices().await;
+            if devices.is_empty() {
+                println!("No mining devices found.");
+            } else {
+                println!("Available mining devices:");
+                for d in &devices {
+                    println!("  {}: {}", d.id, d.label);
+                }
+                println!("\nUse --device 0,1 to select specific devices.");
+            }
+        }
         Cmd::Webminer(WebminerCmd::Start {
             server,
             max_difficulty,
@@ -3641,6 +3661,7 @@ async fn main() -> anyhow::Result<()> {
             cpu_only,
             cpu_threads,
             accept_terms,
+            device,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
             let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
@@ -3658,6 +3679,7 @@ async fn main() -> anyhow::Result<()> {
                 backend: backend_choice,
                 cpu_threads,
                 accept_terms,
+                devices: device,
             };
             daemon::start(&config)?;
         }
@@ -3682,6 +3704,7 @@ async fn main() -> anyhow::Result<()> {
             cpu_only,
             cpu_threads,
             accept_terms,
+            device,
             wallet: run_wallet,
             webcash_wallet,
         }) => {
@@ -3703,6 +3726,7 @@ async fn main() -> anyhow::Result<()> {
                 backend: backend_choice,
                 cpu_threads,
                 accept_terms,
+                devices: device,
             };
             daemon::run_mining_loop(config).await?;
         }

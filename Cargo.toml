@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.41"
+version     = "0.1.42"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis decentralised marketplace (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -90,7 +90,7 @@ ark-grpc      = "0.8.0"
 rustls        = { version = "0.23", features = ["ring"] }
 
 # Mining
-wgpu        = { version = "24", optional = true }
+wgpu        = { version = "28", optional = true }
 rayon       = "1.10"
 base64      = "0.22"
 num-bigint  = "0.4"

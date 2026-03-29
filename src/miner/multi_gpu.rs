@@ -26,10 +26,10 @@ impl MultiGpuMiner {
             ..Default::default()
         });
 
-        let mut adapters = instance.enumerate_adapters(COMPUTE_BACKENDS);
+        let mut adapters = instance.enumerate_adapters(COMPUTE_BACKENDS).await;
         if adapters.is_empty() {
             // Fallback for environments where enumerate returns none but request_adapter may work.
-            if let Some(adapter) = instance
+            if let Ok(adapter) = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: None,
@@ -55,7 +55,6 @@ impl MultiGpuMiner {
         // Note: dedup by adapter NAME (not PCI device ID) because some cards
         // share the same device ID (e.g. RX 590 and RX 580 are both 0x67DF).
         // Different physical cards always have different names.
-        let total = adapters.len();
         let mut miners = Vec::new();
         let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -75,10 +74,6 @@ impl MultiGpuMiner {
 
             // Probe in a subprocess — survives driver segfaults.
             if !super::gpu::subprocess_probe(&identity) {
-                eprintln!(
-                    "GPU probe failed: {} ({:?}) — skipping",
-                    info.name, info.backend
-                );
                 continue;
             }
 
@@ -87,13 +82,7 @@ impl MultiGpuMiner {
                 miners.push(std::sync::Arc::new(miner));
             }
         }
-        if total > 0 && miners.len() < total {
-            eprintln!(
-                "GPU: {} adapters enumerated, {} usable",
-                total,
-                miners.len()
-            );
-        }
+        // No need to log adapter counts — internal detail.
 
         if miners.is_empty() {
             return None;
@@ -192,6 +181,9 @@ impl MinerBackend for MultiGpuMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
+        // Each GPU should get its OWN full 1M nonce work unit — not a
+        // fraction of a shared work unit.  This tells the daemon to create
+        // N midstates so each GPU mines independently at 100% capacity.
         self.miners.len().max(1)
     }
 
@@ -202,11 +194,28 @@ impl MinerBackend for MultiGpuMiner {
         difficulty: u32,
         cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
-        if midstates.is_empty() {
-            return Ok(Vec::new());
+        // Single GPU or single midstate: direct call, zero overhead.
+        if self.miners.len() <= 1 || midstates.len() <= 1 {
+            let mut out = Vec::with_capacity(midstates.len());
+            for midstate in midstates {
+                out.push(
+                    self.mine_range(
+                        midstate,
+                        nonce_table,
+                        difficulty,
+                        0,
+                        NONCE_SPACE_SIZE,
+                        cancel.clone(),
+                    )
+                    .await?,
+                );
+            }
+            return Ok(out);
         }
 
-        // Distribute midstates round-robin across GPUs (same as CUDA).
+        // Multi-GPU: each GPU gets its own full 1M nonce work unit.
+        // This is 2x faster than splitting one work unit across GPUs
+        // because each GPU runs at 100% capacity instead of 50%.
         let mut tasks = JoinSet::new();
         for (idx, midstate) in midstates.iter().enumerate() {
             let miner = self.miners[idx % self.miners.len()].clone();
@@ -235,12 +244,11 @@ impl MinerBackend for MultiGpuMiner {
                 joined.map_err(|e| anyhow::anyhow!("GPU task join error: {}", e))??;
             ordered[idx] = Some(chunk);
         }
-
-        let mut out = Vec::with_capacity(midstates.len());
-        for item in ordered {
-            out.push(item.ok_or_else(|| anyhow::anyhow!("missing GPU mining chunk result"))?);
-        }
-        Ok(out)
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(i, opt)| opt.ok_or_else(|| anyhow::anyhow!("missing GPU result {i}")))
+            .collect()
     }
 
     async fn mine_range(

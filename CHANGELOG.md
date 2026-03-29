@@ -9,6 +9,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.42] — 2026-03-29
+
+### Added
+
+- **Device selection**: `hrmw webminer list-devices` shows one entry per
+  physical GPU with simple numeric IDs.  `--device 0,1` on `webminer run/start`
+  selects specific GPUs.  Omitting `--device` uses all GPUs (backward
+  compatible).  CPU is not a device — use `--backend cpu` / `--cpu-threads`.
+- **Mixed multi-GPU**: `CompositeBackend` enables simultaneous mining across
+  CUDA + Vulkan/DX12 backends.  Work split proportionally by benchmark weight.
+  Each GPU mines its own full 1M nonce work unit independently at 100% capacity.
+
+### Changed
+
+- **Upgrade wgpu 24 to 28**: new `device_pci_bus_id` field uniquely identifies
+  physical GPUs by PCIe slot address (e.g. `0000:01:00.0`), even for identical
+  cards.  Adapters (Vulkan, DX12, Metal) for the same physical GPU are grouped
+  automatically — the user only sees devices, never adapters.
+- AMD Vulkan now works directly (wgpu 28 fixed naga shader compiler crash).
+  467 Mh/s on RX 580 (was 428 via DX12 fallback on wgpu 24).
+- CUDA panic suppression: `cudarc` panic messages when CUDA DLLs are missing
+  are now silenced.
+- Subprocess GPU probe uses adapter identity `(vendor, device, backend)` instead
+  of enumeration index — deterministic across processes for multi-GPU.
+
 ## [0.1.41] — 2026-03-29
 
 ### Fixed

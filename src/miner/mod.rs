@@ -4,6 +4,7 @@
 //! preimage prefix is padded to exactly one SHA256 block (64 bytes), the midstate
 //! is computed once, and each nonce attempt processes a single additional block.
 
+pub mod composite;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -65,6 +66,8 @@ pub struct MinerConfig {
     pub backend: BackendChoice,
     pub cpu_threads: Option<usize>,
     pub accept_terms: bool,
+    /// Specific device IDs to mine on (from `list-devices`).  `None` = all GPUs.
+    pub devices: Option<Vec<usize>>,
 }
 
 /// Result of finding a valid proof-of-work solution.
@@ -242,6 +245,245 @@ pub(crate) fn split_assignments_for_weights(
     assignments
 }
 
+/// Query CUDA device count, suppressing cudarc's panic when CUDA DLLs are missing.
+#[cfg(feature = "cuda")]
+fn cuda_device_count() -> usize {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let n = std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(0) as usize;
+    std::panic::set_hook(prev);
+    n
+}
+
+// ---------------------------------------------------------------------------
+// Unified device discovery
+// ---------------------------------------------------------------------------
+
+/// What kind of GPU device this is.  CPU is not a device — it has its own
+/// `--cpu-threads` option and is never mixed with GPU mining.
+#[derive(Debug, Clone)]
+pub enum DeviceKind {
+    #[cfg(feature = "cuda")]
+    Cuda { ordinal: usize },
+    /// One physical GPU with all its adapters (Vulkan, DX12, Metal).
+    /// The system tries adapters in order — the first that passes the
+    /// subprocess probe is used.  The user never sees adapter details.
+    #[cfg(feature = "gpu")]
+    Wgpu { adapters: Vec<gpu::AdapterIdentity> },
+}
+
+/// One entry in the device list = one physical GPU.
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub id: usize,
+    pub label: String,
+    pub kind: DeviceKind,
+}
+
+/// Enumerate all physical GPU devices across all backends.
+///
+/// Each physical GPU gets exactly one device ID, regardless of how many
+/// adapters (Vulkan, DX12, Metal) it exposes.  Adapters are grouped by
+/// GPU name and stored internally for automatic fallback.
+///
+/// Order: CUDA devices first, then wgpu devices.
+pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
+    let mut devices = Vec::new();
+    #[allow(unused_mut, unused_variables)]
+    let mut next_id = 0usize;
+
+    // 1. CUDA devices — one ordinal = one physical NVIDIA GPU.
+    #[cfg(feature = "cuda")]
+    {
+        let cuda_count = cuda_device_count();
+        for ordinal in 0..cuda_count {
+            let name = cudarc::driver::CudaContext::new(ordinal)
+                .ok()
+                .and_then(|ctx| ctx.name().ok())
+                .unwrap_or_else(|| format!("CUDA device {ordinal}"));
+            devices.push(DeviceInfo {
+                id: next_id,
+                label: format!("{name} (CUDA)"),
+                kind: DeviceKind::Cuda { ordinal },
+            });
+            next_id += 1;
+        }
+    }
+
+    // 2. wgpu — group adapters by physical device.
+    //
+    //    Primary key: `device_pci_bus_id` (e.g. "0000:01:00.0") — unique per
+    //    PCIe slot, even for identical cards.  Available on Vulkan via
+    //    VkPhysicalDevicePCIBusInfoPropertiesEXT.
+    //
+    //    Fallback (DX12/Metal or when bus ID is empty): `(vendor, device, name)`
+    //    tuple.  This correctly groups Vulkan+DX12 adapters for the same card
+    //    but cannot distinguish two identical cards (rare edge case).
+    //
+    //    Each physical device gets one entry with all its adapters stored for
+    //    automatic fallback during init.
+    #[cfg(feature = "gpu")]
+    {
+        use std::collections::BTreeMap;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: gpu::COMPUTE_BACKENDS,
+            ..Default::default()
+        });
+        let adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+
+        // Pass 1: collect all adapter info and PCI bus IDs.
+        struct AdapterEntry {
+            name: String,
+            vendor: u32,
+            device: u32,
+            pci_bus: String,
+            identity: gpu::AdapterIdentity,
+        }
+        let mut entries = Vec::new();
+        for adapter in adapters {
+            let info = adapter.get_info();
+            if info.device_type == wgpu::DeviceType::Cpu {
+                continue;
+            }
+            entries.push(AdapterEntry {
+                name: info.name.clone(),
+                vendor: info.vendor,
+                device: info.device,
+                pci_bus: info.device_pci_bus_id.trim().to_string(),
+                identity: gpu::AdapterIdentity::from_info(&info),
+            });
+        }
+
+        // Build a lookup: (vendor, device, name) → PCI bus ID from any
+        // adapter that reports one (Vulkan usually does, DX12 often doesn't).
+        let mut known_bus_ids: std::collections::HashMap<(u32, u32, String), String> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            if !e.pci_bus.is_empty() {
+                known_bus_ids
+                    .entry((e.vendor, e.device, e.name.clone()))
+                    .or_insert_with(|| e.pci_bus.clone());
+            }
+        }
+
+        // Pass 2: group by physical device key.
+        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
+            BTreeMap::new();
+        for e in entries {
+            // Use PCI bus ID if this adapter has one, or borrow from another
+            // adapter for the same (vendor, device, name) that does.
+            let bus = if !e.pci_bus.is_empty() {
+                e.pci_bus.clone()
+            } else {
+                known_bus_ids
+                    .get(&(e.vendor, e.device, e.name.clone()))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+
+            let phys_key = if !bus.is_empty() {
+                format!("pci:{bus}")
+            } else {
+                format!("dev:{}:{}:{}", e.vendor, e.device, e.name)
+            };
+
+            device_groups
+                .entry(phys_key)
+                .or_insert_with(|| (e.name.clone(), Vec::new()))
+                .1
+                .push(e.identity);
+        }
+
+        for (_phys_key, (name, adapters_for_device)) in device_groups {
+            if adapters_for_device.is_empty() {
+                continue;
+            }
+            devices.push(DeviceInfo {
+                id: next_id,
+                label: name,
+                kind: DeviceKind::Wgpu {
+                    adapters: adapters_for_device,
+                },
+            });
+            next_id += 1;
+        }
+    }
+
+    devices
+}
+
+/// Create a mining backend for specific GPU device IDs.
+pub async fn select_backend_for_devices(
+    device_ids: &[usize],
+) -> anyhow::Result<Box<dyn MinerBackend>> {
+    let all = enumerate_all_devices().await;
+
+    let mut backends: Vec<Arc<dyn MinerBackend>> = Vec::new();
+
+    for &id in device_ids {
+        let dev = all.iter().find(|d| d.id == id).ok_or_else(|| {
+            anyhow::anyhow!("device {id} not found (run `webminer list-devices`)")
+        })?;
+
+        #[allow(unreachable_code, unused_variables)]
+        let backend: Option<Arc<dyn MinerBackend>> = match &dev.kind {
+            #[cfg(feature = "cuda")]
+            DeviceKind::Cuda { ordinal } => {
+                let m = cuda::CudaMiner::try_new(*ordinal).await;
+                m.map(|m| Arc::new(m) as Arc<dyn MinerBackend>)
+            }
+            #[cfg(feature = "gpu")]
+            DeviceKind::Wgpu { adapters } => {
+                // Try each adapter for this physical GPU until one works.
+                // Order: Vulkan first, then DX12, then Metal (as enumerated).
+                let mut result: Option<(Arc<dyn MinerBackend>, String)> = None;
+                for identity in adapters {
+                    if !gpu::subprocess_probe(identity) {
+                        continue;
+                    }
+                    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                        backends: gpu::COMPUTE_BACKENDS,
+                        ..Default::default()
+                    });
+                    let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+                    if let Some(adapter) = identity.find_matching(found) {
+                        if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                            result = Some((Arc::new(m) as _, identity.backend.clone()));
+                            break;
+                        }
+                    }
+                }
+                if let Some((m, adapter_backend)) = result {
+                    println!("Device {id}: {} ({adapter_backend})", dev.label);
+                    backends.push(m);
+                } else {
+                    eprintln!("Device {id}: {} — no working adapter found", dev.label);
+                }
+                continue;
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
+
+        if let Some(b) = backend {
+            println!("Device {id}: {}", dev.label);
+            backends.push(b);
+        } else {
+            eprintln!("Device {id}: {} — failed to initialize", dev.label);
+        }
+    }
+
+    if backends.is_empty() {
+        anyhow::bail!("no devices could be initialized from --device selection");
+    }
+
+    Ok(Box::new(composite::CompositeBackend::new(backends).await))
+}
+
 /// Select the best available mining backend.
 pub async fn select_backend(
     choice: BackendChoice,
@@ -264,11 +506,7 @@ pub async fn select_backend(
                 // catch_unwind an async fn directly, so we guard just the
                 // synchronous CudaContext::device_count() call that triggers
                 // the panic.  If that succeeds, we know CUDA is loadable.
-                let cuda_ok =
-                    std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .unwrap_or(0);
+                let cuda_ok = cuda_device_count();
                 let cuda_result = if cuda_ok > 0 {
                     multi_cuda::MultiCudaMiner::try_new().await
                 } else {
@@ -298,11 +536,7 @@ pub async fn select_backend(
         BackendChoice::Auto => {
             #[cfg(feature = "cuda")]
             {
-                let cuda_ok =
-                    std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .unwrap_or(0);
+                let cuda_ok = cuda_device_count();
                 if cuda_ok > 0 {
                     if let Some(multi_cuda) = multi_cuda::MultiCudaMiner::try_new().await {
                         println!("Selected: {} (auto prefers CUDA)", multi_cuda.name());

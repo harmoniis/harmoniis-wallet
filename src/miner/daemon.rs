@@ -9,7 +9,7 @@ use webylib::SecretWebcash;
 use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-use super::{select_backend, BackendChoice, MinerConfig};
+use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
 fn default_wallet_root() -> PathBuf {
     if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
@@ -179,6 +179,10 @@ pub fn start(config: &MinerConfig) -> anyhow::Result<()> {
     if config.accept_terms {
         cmd.arg("--accept-terms");
     }
+    if let Some(ref devices) = config.devices {
+        let s: Vec<String> = devices.iter().map(|d| d.to_string()).collect();
+        cmd.arg("--device").arg(s.join(","));
+    }
 
     // Pass wallet paths
     cmd.arg("--wallet")
@@ -320,7 +324,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     std::fs::write(pid_file_path(), pid.to_string())?;
 
     // Select backend
-    let backend = select_backend(config.backend, config.cpu_threads).await?;
+    let backend = if let Some(ref devices) = config.devices {
+        select_backend_for_devices(devices).await?
+    } else {
+        select_backend(config.backend, config.cpu_threads).await?
+    };
     let chunk_size = backend.max_batch_hint();
     let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 64);
     println!("Mining setup:");
