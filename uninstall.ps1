@@ -1,7 +1,7 @@
-# uninstall.ps1 — Harmoniis Wallet uninstaller for Windows
+# uninstall.ps1 - Harmoniis Wallet uninstaller for Windows
 #
 # Removes the hrmw binary and PATH entry.
-# DOES NOT touch wallet data at ~/.harmoniis/ — your keys and funds are safe.
+# DOES NOT touch wallet data at ~/.harmoniis/ - your keys and funds are safe.
 
 $ErrorActionPreference = "Stop"
 
@@ -27,10 +27,10 @@ function Get-BinDir {
     return Join-Path $localRoot "Harmoniis\bin"
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# # Main
 
 Write-Host ""
-Write-Section "Harmoniis Wallet (hrmw) — uninstaller for Windows"
+Write-Section "Harmoniis Wallet (hrmw) - uninstaller for Windows"
 Write-Host ""
 
 $binDir = Get-BinDir
@@ -44,7 +44,7 @@ if (Test-Path $binPath) {
     if (Test-Path $oldPath) { Remove-Item $oldPath -Force }
     Write-Ok "Binary removed"
 } else {
-    Write-Warn "Binary not found at $binPath — already uninstalled?"
+    Write-Warn "Binary not found at $binPath - already uninstalled?"
 }
 
 # Remove empty bin directory.
