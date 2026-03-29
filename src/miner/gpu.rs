@@ -34,8 +34,9 @@ const RESULT_BUFFER_SIZE: u64 = (RESULT_WORDS * 4) as u64;
 
 /// Backends used for compute — Vulkan (cross-platform primary), DX12 (Windows),
 /// Metal (macOS).  OpenGL is excluded.
-pub const COMPUTE_BACKENDS: wgpu::Backends =
-    wgpu::Backends::VULKAN.union(wgpu::Backends::DX12).union(wgpu::Backends::METAL);
+pub const COMPUTE_BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN
+    .union(wgpu::Backends::DX12)
+    .union(wgpu::Backends::METAL);
 
 /// Run a GPU pipeline probe for a specific adapter index.
 ///
@@ -423,7 +424,13 @@ impl GpuMiner {
             pass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(&self.result_buffer, 0, &staging_buffer, 0, RESULT_BUFFER_SIZE);
+        encoder.copy_buffer_to_buffer(
+            &self.result_buffer,
+            0,
+            &staging_buffer,
+            0,
+            RESULT_BUFFER_SIZE,
+        );
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = staging_buffer.slice(..);

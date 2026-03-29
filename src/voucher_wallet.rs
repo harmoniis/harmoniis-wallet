@@ -104,9 +104,10 @@ impl VoucherWallet {
              )",
             params![
                 proof.public_hash,
-                i64::try_from(secret.amount_units).map_err(|_| Error::Other(
-                    anyhow::anyhow!("voucher amount {} exceeds i64 range", secret.amount_units)
-                ))?,
+                i64::try_from(secret.amount_units).map_err(|_| Error::Other(anyhow::anyhow!(
+                    "voucher amount {} exceeds i64 range",
+                    secret.amount_units
+                )))?,
                 secret.display(),
                 now,
             ],
@@ -212,9 +213,10 @@ impl VoucherWallet {
         // Phase 1: record intent BEFORE the remote call so a crash between
         // the server accepting and the local update cannot lose change value.
         {
-            let conn = self.conn.lock().map_err(|_| {
-                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
             let tx = conn.unchecked_transaction()?;
             let now = chrono::Utc::now().to_rfc3339();
             for input in &inputs {
@@ -247,9 +249,10 @@ impl VoucherWallet {
 
         // Phase 3: finalize local state.
         {
-            let conn = self.conn.lock().map_err(|_| {
-                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
             let tx = conn.unchecked_transaction()?;
             let now = chrono::Utc::now().to_rfc3339();
             if replace_result.is_ok() {
@@ -314,9 +317,10 @@ impl VoucherWallet {
 
         // Phase 1: record intent before remote call.
         {
-            let conn = self.conn.lock().map_err(|_| {
-                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
             let tx = conn.unchecked_transaction()?;
             let now = chrono::Utc::now().to_rfc3339();
             for input in &inputs {
@@ -348,9 +352,10 @@ impl VoucherWallet {
 
         // Phase 3: finalize.
         {
-            let conn = self.conn.lock().map_err(|_| {
-                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
             let tx = conn.unchecked_transaction()?;
             let now = chrono::Utc::now().to_rfc3339();
             if replace_result.is_ok() {
@@ -420,14 +425,25 @@ impl VoucherWallet {
 
         for (public_hash, secret_display, status) in &rows {
             let secret = VoucherSecret::parse(secret_display)?;
-            let is_live = client.voucher_is_live(&secret.public_proof()).await.unwrap_or(false);
+            let is_live = client
+                .voucher_is_live(&secret.public_proof())
+                .await
+                .unwrap_or(false);
 
             let new_status = match status.as_str() {
                 "pending_spend" => {
-                    if is_live { "live" } else { "spent" }
+                    if is_live {
+                        "live"
+                    } else {
+                        "spent"
+                    }
                 }
                 "pending_change" => {
-                    if is_live { "live" } else { "lost" }
+                    if is_live {
+                        "live"
+                    } else {
+                        "lost"
+                    }
                 }
                 _ => continue,
             };

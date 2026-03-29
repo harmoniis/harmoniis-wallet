@@ -8,8 +8,8 @@ use super::cuda::CudaMiner;
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
-    choose_best_result, split_assignments_for_weights, CancelFlag, MinerBackend,
-    MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
+    choose_best_result, split_assignments_for_weights, CancelFlag, MinerBackend, MiningChunkResult,
+    MiningResult, NONCE_SPACE_SIZE,
 };
 
 pub struct MultiCudaMiner {

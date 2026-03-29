@@ -264,12 +264,11 @@ pub async fn select_backend(
                 // catch_unwind an async fn directly, so we guard just the
                 // synchronous CudaContext::device_count() call that triggers
                 // the panic.  If that succeeds, we know CUDA is loadable.
-                let cuda_ok = std::panic::catch_unwind(|| {
-                    cudarc::driver::CudaContext::device_count()
-                })
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or(0);
+                let cuda_ok =
+                    std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or(0);
                 let cuda_result = if cuda_ok > 0 {
                     multi_cuda::MultiCudaMiner::try_new().await
                 } else {
@@ -299,14 +298,16 @@ pub async fn select_backend(
         BackendChoice::Auto => {
             #[cfg(feature = "cuda")]
             {
-                let cuda_result = std::panic::catch_unwind(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        multi_cuda::MultiCudaMiner::try_new()
-                    )
-                });
-                if let Ok(Some(multi_cuda)) = cuda_result {
-                    println!("Selected: {} (auto prefers CUDA)", multi_cuda.name());
-                    return Ok(Box::new(multi_cuda));
+                let cuda_ok =
+                    std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or(0);
+                if cuda_ok > 0 {
+                    if let Some(multi_cuda) = multi_cuda::MultiCudaMiner::try_new().await {
+                        println!("Selected: {} (auto prefers CUDA)", multi_cuda.name());
+                        return Ok(Box::new(multi_cuda));
+                    }
                 }
             }
 

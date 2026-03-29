@@ -7,7 +7,7 @@ use bdk_wallet::{
     bitcoin::{bip32::Xpriv, Address, Amount, FeeRate, Network, Txid},
     file_store::Store,
     template::{Bip84, Bip86},
-    ChangeSet, KeychainKind, PersistedWallet, SignOptions, TxOrdering, Wallet, WalletPersister,
+    ChangeSet, KeychainKind, SignOptions, TxOrdering, Wallet, WalletPersister,
 };
 
 use crate::{
@@ -354,7 +354,9 @@ impl DeterministicBitcoinWallet {
                         .descriptor(KeychainKind::Internal, Some($int))
                         .load_wallet_no_persist(changeset)
                         .map_err(|e| Error::Other(anyhow::anyhow!("bitcoin wallet load: {e}")))?
-                        .ok_or_else(|| Error::Other(anyhow::anyhow!("bitcoin wallet store corrupt")))?
+                        .ok_or_else(|| {
+                            Error::Other(anyhow::anyhow!("bitcoin wallet store corrupt"))
+                        })?
                 }
             }};
         }
@@ -422,9 +424,12 @@ mod tests {
 
     #[test]
     fn descriptor_kind_matches_expected_script_type() {
-        let wallet =
-            DeterministicBitcoinWallet::from_slot_seed_hex(&sample_slot_hex(), Network::Testnet, None)
-                .expect("wallet");
+        let wallet = DeterministicBitcoinWallet::from_slot_seed_hex(
+            &sample_slot_hex(),
+            Network::Testnet,
+            None,
+        )
+        .expect("wallet");
         let (taproot_external, taproot_internal) = wallet
             .descriptor_strings_for(BitcoinAddressKind::Taproot)
             .expect("taproot descriptors");
@@ -440,9 +445,12 @@ mod tests {
 
     #[test]
     fn address_kind_outputs_are_deterministic_and_distinct() {
-        let wallet =
-            DeterministicBitcoinWallet::from_slot_seed_hex(&sample_slot_hex(), Network::Testnet, None)
-                .expect("wallet");
+        let wallet = DeterministicBitcoinWallet::from_slot_seed_hex(
+            &sample_slot_hex(),
+            Network::Testnet,
+            None,
+        )
+        .expect("wallet");
 
         let taproot_a = wallet
             .receive_address_at_kind(0, BitcoinAddressKind::Taproot)

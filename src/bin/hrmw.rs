@@ -1866,7 +1866,11 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let (taproot_external, taproot_internal) =
                 btc.descriptor_strings_for(BitcoinAddressKind::Taproot)?;
             let (segwit_external, segwit_internal) =
@@ -1934,7 +1938,11 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let addr = btc.receive_address_at_kind(index, kind.into())?;
             println!("{addr}");
         }
@@ -1947,7 +1955,11 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let esplora_url = resolved_esplora_url(network, esplora);
             let snapshot = btc.sync(&esplora_url, stop_gap, parallel_requests)?;
             println!("Network:       {}", snapshot.network);
@@ -1994,7 +2006,11 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let esplora_url = resolved_esplora_url(network, esplora);
             let txid = btc.send_taproot_onchain(
                 &esplora_url,
@@ -2015,7 +2031,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Info { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let esplora_url = DeterministicBitcoinWallet::default_esplora_url(network);
             println!("Connecting to ARK ASP at {asp_url} ...");
             let ark = ArkPaymentWallet::connect(
@@ -2067,7 +2087,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Deposit { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2081,7 +2105,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Offchain { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2095,7 +2123,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Onchain { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2109,7 +2141,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Balance { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let esplora_url = DeterministicBitcoinWallet::default_esplora_url(network);
             let ark = ArkPaymentWallet::connect(
                 &btc,
@@ -2147,7 +2183,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Bitcoin(BitcoinCmd::Ark(BitcoinArkCmd::Boarding { network, asp_url })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2169,7 +2209,11 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2190,7 +2234,11 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -2211,7 +2259,11 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let destination = btc.receive_address_at_kind(index, BitcoinAddressKind::Taproot)?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
@@ -2233,7 +2285,11 @@ async fn main() -> anyhow::Result<()> {
         })) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(&wallet, network, Some(bitcoin_db_path(&wallet_path)))?;
+            let btc = DeterministicBitcoinWallet::from_master_wallet(
+                &wallet,
+                network,
+                Some(bitcoin_db_path(&wallet_path)),
+            )?;
             let ark = ArkPaymentWallet::connect(
                 &btc,
                 &asp_url,
@@ -3938,9 +3994,8 @@ mod self_update {
 
         #[cfg(not(any(unix, windows)))]
         {
-            std::fs::rename(&staging_path, &target_path).with_context(|| {
-                format!("failed to replace {}", target_path.display())
-            })?;
+            std::fs::rename(&staging_path, &target_path)
+                .with_context(|| format!("failed to replace {}", target_path.display()))?;
         }
 
         // Clean up temp directory.
