@@ -624,7 +624,11 @@ mod tests {
     }
 
     #[test]
-    fn device_key_different_physical_gpus() {
+    fn device_key_same_for_rebinned_cards() {
+        // RX 590 and RX 580 share PCI device ID 0x67DF (26591).
+        // device_key() treats them as the same model — which is correct for
+        // PCI-level identification.  Multi-GPU dedup uses adapter NAME instead
+        // to distinguish physically separate cards of the same model.
         let rx590 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
@@ -632,10 +636,10 @@ mod tests {
         };
         let rx580 = AdapterIdentity {
             vendor: 4098,
-            device: 26575,
+            device: 26591,
             backend: "vulkan".into(),
         };
-        assert_ne!(rx590.device_key(), rx580.device_key());
+        assert_eq!(rx590.device_key(), rx580.device_key());
     }
 
     #[test]
@@ -649,64 +653,29 @@ mod tests {
     }
 
     #[test]
-    fn dedup_dual_amd_gpu_scenario() {
-        // Simulate the 7-adapter scenario: RX 590 + RX 580, each on Vulkan + DX12,
-        // plus software adapters.
-        let adapters = vec![
-            AdapterIdentity {
-                vendor: 4098,
-                device: 26591,
-                backend: "vulkan".into(),
-            },
-            AdapterIdentity {
-                vendor: 4098,
-                device: 26575,
-                backend: "vulkan".into(),
-            },
-            AdapterIdentity {
-                vendor: 4098,
-                device: 26591,
-                backend: "dx12".into(),
-            },
-            AdapterIdentity {
-                vendor: 4098,
-                device: 26575,
-                backend: "dx12".into(),
-            },
-            AdapterIdentity {
-                vendor: 0,
-                device: 0,
-                backend: "vulkan".into(),
-            },
-            AdapterIdentity {
-                vendor: 0,
-                device: 0,
-                backend: "dx12".into(),
-            },
-            AdapterIdentity {
-                vendor: 4098,
-                device: 26591,
-                backend: "gl".into(),
-            },
+    fn name_dedup_allows_different_cards_with_same_device_id() {
+        // RX 590 + RX 580 share PCI device ID 0x67DF but have different names.
+        // Multi-GPU dedup by adapter name (not PCI ID) allows both.
+        let adapter_names = vec![
+            "Radeon RX 590 Series", // Vulkan
+            "Radeon RX 580 Series", // Vulkan
+            "Radeon RX 590 Series", // DX12 — same name as Vulkan, should dedup
+            "Radeon RX 580 Series", // DX12 — same name as Vulkan, should dedup
+            "Microsoft Basic Render Driver",
         ];
 
-        let mut used = std::collections::HashSet::new();
+        let mut used_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut selected = Vec::new();
-        for id in &adapters {
-            let key = id.device_key();
-            if !used.contains(&key) {
-                used.insert(key);
-                selected.push(id.clone());
+        for name in &adapter_names {
+            if !used_names.contains(name) {
+                used_names.insert(name);
+                selected.push(*name);
             }
         }
 
-        // RX 590, RX 580, and 2 unknown (Vulkan sw, DX12 sw)
-        assert_eq!(selected.len(), 4);
-
-        let discrete: Vec<_> = selected.iter().filter(|id| id.vendor != 0).collect();
-        assert_eq!(discrete.len(), 2);
-        let devices: std::collections::HashSet<u32> = discrete.iter().map(|id| id.device).collect();
-        assert!(devices.contains(&26591)); // RX 590
-        assert!(devices.contains(&26575)); // RX 580
+        // RX 590, RX 580, and Basic Render Driver = 3 unique
+        assert_eq!(selected.len(), 3);
+        assert!(selected.contains(&"Radeon RX 590 Series"));
+        assert!(selected.contains(&"Radeon RX 580 Series"));
     }
 }

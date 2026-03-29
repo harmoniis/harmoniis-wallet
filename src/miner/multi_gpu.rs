@@ -46,9 +46,18 @@ impl MultiGpuMiner {
         // the subprocess dies and we skip that adapter.  This means we do NOT
         // dedup by physical device beforehand: if Vulkan crashes for a card,
         // the DX12 adapter for the same card may still work.
+        // Probe each adapter in a subprocess — if the GPU driver segfaults
+        // during shader compilation, the subprocess dies and we skip that
+        // adapter.  We track which adapter names already have a working miner
+        // so we don't create duplicate miners for the same physical card via
+        // different backends (e.g. Vulkan + DX12).
+        //
+        // Note: dedup by adapter NAME (not PCI device ID) because some cards
+        // share the same device ID (e.g. RX 590 and RX 580 are both 0x67DF).
+        // Different physical cards always have different names.
         let total = adapters.len();
         let mut miners = Vec::new();
-        let mut used_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for adapter in adapters.into_iter() {
             let info = adapter.get_info();
@@ -56,13 +65,13 @@ impl MultiGpuMiner {
                 continue;
             }
 
-            let identity = AdapterIdentity::from_info(&info);
-
-            // Skip if we already have a working miner for this physical device.
-            let device_key = identity.device_key();
-            if used_devices.contains(&device_key) {
+            // Skip if we already have a working miner with this exact name
+            // (same physical card seen via a different backend).
+            if used_names.contains(&info.name) {
                 continue;
             }
+
+            let identity = AdapterIdentity::from_info(&info);
 
             // Probe in a subprocess — survives driver segfaults.
             if !super::gpu::subprocess_probe(&identity) {
@@ -74,7 +83,7 @@ impl MultiGpuMiner {
             }
 
             if let Some(miner) = GpuMiner::try_from_adapter(adapter).await {
-                used_devices.insert(device_key);
+                used_names.insert(info.name.clone());
                 miners.push(std::sync::Arc::new(miner));
             }
         }
