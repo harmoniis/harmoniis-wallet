@@ -1,12 +1,12 @@
-# install.ps1 — Harmoniis Wallet installer for Windows
+# install.ps1 - Harmoniis Wallet installer for Windows
 #
 # Usage:
 #   irm https://harmoniis.com/wallet/install.ps1 | iex
 #   irm https://github.com/harmoniis/harmoniis-wallet/releases/latest/download/install.ps1 | iex
 #
 # Environment variables:
-#   HRMW_VERSION   — pin to a specific version (default: latest)
-#   HRMW_BIN_DIR   — override install directory (default: LOCALAPPDATA\Harmoniis\bin)
+#   HRMW_VERSION   - pin to a specific version (default: latest)
+#   HRMW_BIN_DIR   - override install directory (default: LOCALAPPDATA\Harmoniis\bin)
 
 $ErrorActionPreference = "Stop"
 
@@ -51,6 +51,7 @@ function Add-UserPathEntry([string]$BinDir) {
     if ($userPath) {
         $entries = $userPath.Split(';') | Where-Object { $_ }
     }
+    $changed = $false
     if ($entries -notcontains $BinDir) {
         $newUserPath = if ($userPath -and $userPath.Trim().Length -gt 0) {
             "$userPath;$BinDir"
@@ -58,10 +59,32 @@ function Add-UserPathEntry([string]$BinDir) {
             $BinDir
         }
         [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+        $changed = $true
     }
+    # Update the current session so hrmw works immediately.
     $sessionEntries = $env:Path.Split(';') | Where-Object { $_ }
     if ($sessionEntries -notcontains $BinDir) {
         $env:Path = "$BinDir;$env:Path"
+    }
+    # Broadcast WM_SETTINGCHANGE so other open shells pick up the change.
+    if ($changed) {
+        try {
+            if (-not ('Win32.NativeMethods' -as [type])) {
+                Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+            }
+            $HWND_BROADCAST = [IntPtr]0xffff
+            $WM_SETTINGCHANGE = 0x1a
+            $result = [UIntPtr]::Zero
+            [Win32.NativeMethods]::SendMessageTimeout(
+                $HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero,
+                "Environment", 2, 5000, [ref]$result
+            ) | Out-Null
+        } catch { }
     }
 }
 
@@ -98,10 +121,14 @@ function Download-ReleaseArtifact([string]$Version) {
     }
 
     Write-Step "Extracting $tarball"
-    tar -xzf $tarballPath -C $tmpRoot
+    # Use Windows native tar.exe explicitly to avoid MSYS2/Git Bash tar
+    # intercepting and choking on Windows paths.
+    $tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (-not (Test-Path $tarExe)) { $tarExe = "tar" }
+    & $tarExe -xzf $tarballPath -C $tmpRoot
     $artifactRoot = Get-ChildItem $tmpRoot -Directory | Where-Object { $_.Name -like "harmoniis-wallet-*" } | Select-Object -First 1
     if (-not $artifactRoot) {
-        throw "extraction failed — no harmoniis-wallet-* directory found in tarball"
+        throw "extraction failed - no harmoniis-wallet-* directory found in tarball"
     }
     return @{
         TempRoot = $tmpRoot
@@ -109,10 +136,10 @@ function Download-ReleaseArtifact([string]$Version) {
     }
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# # Main
 
 Write-Host ""
-Write-Section "Harmoniis Wallet (hrmw) — installer for Windows"
+Write-Section "Harmoniis Wallet (hrmw) - installer for Windows"
 Write-Host ""
 
 $version = if ($env:HRMW_VERSION) { $env:HRMW_VERSION } else { Get-LatestReleaseVersion }
