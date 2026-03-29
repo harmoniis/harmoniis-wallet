@@ -57,6 +57,34 @@ hrmw webcash info
 hrmw upgrade
 ```
 
+## Uninstall
+
+**macOS / Linux / FreeBSD:**
+
+```bash
+curl -fsSL https://github.com/harmoniis/harmoniis-wallet/releases/latest/download/uninstall.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+iwr https://github.com/harmoniis/harmoniis-wallet/releases/latest/download/uninstall.ps1 -UseB | iex
+```
+
+Wallet data at `~/.harmoniis/` is **never removed** by the uninstaller.
+
+## Mining
+
+```bash
+hrmw webminer bench                     # benchmark CPU + GPU
+hrmw webminer run --accept-terms        # foreground mining
+hrmw webminer start --accept-terms      # background mining
+hrmw webminer status                    # check miner status
+hrmw webminer stop                      # stop background miner
+```
+
+GPU auto-detection: CUDA (NVIDIA) > Vulkan/DX12 (AMD/Intel) > CPU fallback.
+
 ## Contract Usage
 
 Buyer flow:

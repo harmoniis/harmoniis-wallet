@@ -13,6 +13,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **Bitcoin wallet persistence**: BDK file-store backend saves UTXO cache,
+  address indices, and sync state to `bitcoin.taproot.dat` / `bitcoin.segwit.dat`.
+  Subsequent syncs load cached state.  Fully recoverable from master key.
 - **Subprocess GPU probe**: GPU pipeline creation is tested in a child process
   before use.  If the GPU driver segfaults (known AMD Vulkan issue on Polaris),
   the adapter is skipped and the next one (e.g. DX12) is tried automatically.
@@ -28,6 +31,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Windows self-update fix**: `hrmw upgrade` on Windows now renames the running
   binary aside (`.old.exe`) before replacing it, avoiding the "access denied"
   error from the OS file lock.
+- **Interactive `--accept-terms` prompt**: `webminer run` and `webminer start`
+  now prompt the user to accept terms interactively when the flag is not passed.
+  Declining exits cleanly.
 - `uninstall.sh` (Linux/macOS/FreeBSD) and `uninstall.ps1` (Windows) — remove
   the binary and PATH entry.  Wallet data at `~/.harmoniis/` is never touched.
 
@@ -45,6 +51,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Witness secret generation upgraded from `thread_rng()` to `OsRng` (OS CSPRNG)
   for defence-in-depth; matches root key and identity key entropy source.
 - Self-update error messages now platform-appropriate (no "sudo" on Windows).
+- `install.ps1` uses Windows native `tar.exe` (avoids MSYS2 tar path conflicts)
+  and broadcasts `WM_SETTINGCHANGE` so open shells pick up PATH immediately.
+
+### Fixed
+
+- **Voucher pay/merge atomicity**: three-phase commit prevents money loss if the
+  process crashes between server acceptance and local database update.  Pending
+  operations are recovered on next wallet open via `recover_pending()`.
+- **Windows miner daemon**: `is_running()` now verifies process alive via
+  `tasklist` (was trusting stale PID file); `start()` detaches child with
+  `CREATE_NO_WINDOW | DETACHED_PROCESS`; `stop()` terminates via `taskkill`
+  (was "not implemented on this platform").
+- **CUDA panic catch**: `cudarc` panics when CUDA DLLs are missing;
+  `catch_unwind` around `CudaContext::device_count()` prevents crash on
+  AMD-only systems.  Falls through to wgpu gracefully.
+- Voucher insert amount overflow now returns error instead of silently clamping
+  to `i64::MAX`.
 
 ## [0.1.39] — 2026-03-26
 
