@@ -104,7 +104,9 @@ impl VoucherWallet {
              )",
             params![
                 proof.public_hash,
-                i64::try_from(secret.amount_units).unwrap_or(i64::MAX),
+                i64::try_from(secret.amount_units).map_err(|_| Error::Other(
+                    anyhow::anyhow!("voucher amount {} exceeds i64 range", secret.amount_units)
+                ))?,
                 secret.display(),
                 now,
             ],
@@ -206,13 +208,84 @@ impl VoucherWallet {
         } else {
             None
         };
-        client.voucher_replace(&inputs, &outputs).await?;
-        for input in &inputs {
-            self.set_status(&input.public_proof().public_hash, "spent")?;
+
+        // Phase 1: record intent BEFORE the remote call so a crash between
+        // the server accepting and the local update cannot lose change value.
+        {
+            let conn = self.conn.lock().map_err(|_| {
+                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
+            })?;
+            let tx = conn.unchecked_transaction()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            for input in &inputs {
+                tx.execute(
+                    "UPDATE voucher_outputs SET status = 'pending_spend', updated_at = ?2 WHERE public_hash = ?1",
+                    params![input.public_proof().public_hash, now],
+                )?;
+            }
+            if let Some(ref change) = change_secret {
+                let proof = change.public_proof();
+                tx.execute(
+                    "INSERT OR REPLACE INTO voucher_outputs (public_hash, amount_units, secret_display, status, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'pending_change', ?4, ?4)",
+                    params![
+                        proof.public_hash,
+                        i64::try_from(change.amount_units).map_err(|_| Error::Other(
+                            anyhow::anyhow!("voucher amount too large for i64")
+                        ))?,
+                        change.display(),
+                        now,
+                    ],
+                )?;
+            }
+            tx.commit()?;
         }
-        if let Some(change) = change_secret {
-            self.insert(change)?;
+
+        // Phase 2: remote call — if we crash here, recovery can detect
+        // pending_spend / pending_change rows and resolve them.
+        let replace_result = client.voucher_replace(&inputs, &outputs).await;
+
+        // Phase 3: finalize local state.
+        {
+            let conn = self.conn.lock().map_err(|_| {
+                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
+            })?;
+            let tx = conn.unchecked_transaction()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            if replace_result.is_ok() {
+                for input in &inputs {
+                    tx.execute(
+                        "UPDATE voucher_outputs SET status = 'spent', updated_at = ?2 WHERE public_hash = ?1",
+                        params![input.public_proof().public_hash, now],
+                    )?;
+                }
+                if change_secret.is_some() {
+                    // pending_change -> live
+                    let change = change_secret.as_ref().unwrap();
+                    tx.execute(
+                        "UPDATE voucher_outputs SET status = 'live', updated_at = ?2 WHERE public_hash = ?1",
+                        params![change.public_proof().public_hash, now],
+                    )?;
+                }
+            } else {
+                // Rollback: server rejected — restore inputs to live, remove change.
+                for input in &inputs {
+                    tx.execute(
+                        "UPDATE voucher_outputs SET status = 'live', updated_at = ?2 WHERE public_hash = ?1",
+                        params![input.public_proof().public_hash, now],
+                    )?;
+                }
+                if let Some(ref change) = change_secret {
+                    tx.execute(
+                        "DELETE FROM voucher_outputs WHERE public_hash = ?1 AND status = 'pending_change'",
+                        params![change.public_proof().public_hash],
+                    )?;
+                }
+            }
+            tx.commit()?;
         }
+
+        replace_result?;
         Ok(payment_secret)
     }
 
@@ -238,17 +311,137 @@ impl VoucherWallet {
         let inputs = live.into_iter().take(target_group).collect::<Vec<_>>();
         let total: u64 = inputs.iter().map(|secret| secret.amount_units).sum();
         let merged = VoucherSecret::generate(total);
-        client
-            .voucher_replace(&inputs, std::slice::from_ref(&merged))
-            .await?;
-        for input in &inputs {
-            self.set_status(&input.public_proof().public_hash, "spent")?;
+
+        // Phase 1: record intent before remote call.
+        {
+            let conn = self.conn.lock().map_err(|_| {
+                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
+            })?;
+            let tx = conn.unchecked_transaction()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            for input in &inputs {
+                tx.execute(
+                    "UPDATE voucher_outputs SET status = 'pending_spend', updated_at = ?2 WHERE public_hash = ?1",
+                    params![input.public_proof().public_hash, now],
+                )?;
+            }
+            let proof = merged.public_proof();
+            tx.execute(
+                "INSERT OR REPLACE INTO voucher_outputs (public_hash, amount_units, secret_display, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'pending_change', ?4, ?4)",
+                params![
+                    proof.public_hash,
+                    i64::try_from(merged.amount_units).map_err(|_| Error::Other(
+                        anyhow::anyhow!("voucher amount too large for i64")
+                    ))?,
+                    merged.display(),
+                    now,
+                ],
+            )?;
+            tx.commit()?;
         }
-        self.insert(merged.clone())?;
+
+        // Phase 2: remote call.
+        let replace_result = client
+            .voucher_replace(&inputs, std::slice::from_ref(&merged))
+            .await;
+
+        // Phase 3: finalize.
+        {
+            let conn = self.conn.lock().map_err(|_| {
+                Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned"))
+            })?;
+            let tx = conn.unchecked_transaction()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            if replace_result.is_ok() {
+                for input in &inputs {
+                    tx.execute(
+                        "UPDATE voucher_outputs SET status = 'spent', updated_at = ?2 WHERE public_hash = ?1",
+                        params![input.public_proof().public_hash, now],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE voucher_outputs SET status = 'live', updated_at = ?2 WHERE public_hash = ?1",
+                    params![merged.public_proof().public_hash, now],
+                )?;
+            } else {
+                for input in &inputs {
+                    tx.execute(
+                        "UPDATE voucher_outputs SET status = 'live', updated_at = ?2 WHERE public_hash = ?1",
+                        params![input.public_proof().public_hash, now],
+                    )?;
+                }
+                tx.execute(
+                    "DELETE FROM voucher_outputs WHERE public_hash = ?1 AND status = 'pending_change'",
+                    params![merged.public_proof().public_hash],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        replace_result?;
         Ok(format!(
             "Merged {} outputs into {} credits.",
             inputs.len(),
             merged.amount_units
+        ))
+    }
+
+    /// Recover from incomplete pay/merge operations that crashed between the
+    /// remote call and the local database update.  Checks the server for the
+    /// real status of any pending outputs and finalizes them.
+    pub async fn recover_pending(&self, client: &HarmoniisClient) -> Result<String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
+
+        // Find pending_spend inputs and pending_change outputs.
+        let mut stmt = conn.prepare(
+            "SELECT public_hash, secret_display, status FROM voucher_outputs WHERE status IN ('pending_spend', 'pending_change')",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        if rows.is_empty() {
+            return Ok("No pending voucher operations to recover.".to_string());
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut recovered = 0usize;
+
+        for (public_hash, secret_display, status) in &rows {
+            let secret = VoucherSecret::parse(secret_display)?;
+            let is_live = client.voucher_is_live(&secret.public_proof()).await.unwrap_or(false);
+
+            let new_status = match status.as_str() {
+                "pending_spend" => {
+                    if is_live { "live" } else { "spent" }
+                }
+                "pending_change" => {
+                    if is_live { "live" } else { "lost" }
+                }
+                _ => continue,
+            };
+
+            conn.execute(
+                "UPDATE voucher_outputs SET status = ?2, updated_at = ?3 WHERE public_hash = ?1",
+                params![public_hash, new_status, now],
+            )?;
+            recovered += 1;
+        }
+
+        Ok(format!(
+            "Recovered {} pending voucher operations.",
+            recovered
         ))
     }
 
