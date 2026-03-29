@@ -3,6 +3,15 @@
 // Each thread computes one SHA256 hash from a saved midstate + nonce pair,
 // then checks if it meets the difficulty target (leading zero bits).
 //
+// Optimised output mode (matches CUDA kernel):
+// - Midstate words are provided by host.
+// - Each thread evaluates one nonce candidate.
+// - Threads atomically reduce to one best packed result:
+//   output[0] = best leading-zero count (via atomicMax)
+//   output[1] = flat nonce id of the winner
+//   output[2] = unused (reserved)
+// - Host re-computes the actual hash from the winning nonce to verify.
+//
 // Layout:
 //   binding 0: nonce_table — 1000 × u32 (base64-encoded 3-digit nonces, big-endian packed)
 //   binding 1: input       — 12 × u32
@@ -11,7 +20,7 @@
 //                            input[9]     = prefix_len
 //                            input[10]    = nonce_offset
 //                            input[11]    = nonce_count
-//   binding 2: output      — 11 × u32 atomic (best_difficulty, nonce1, nonce2, hash[0..7])
+//   binding 2: output      — 3 × u32 atomic (best_difficulty, nonce_id, reserved)
 
 // SHA256 round constants
 const K = array<u32, 64>(
@@ -35,7 +44,7 @@ const K = array<u32, 64>(
 
 @group(0) @binding(0) var<storage, read> nonce_table: array<u32, 1000>;
 @group(0) @binding(1) var<storage, read> input: array<u32, 12>;  // midstate + params
-@group(0) @binding(2) var<storage, read_write> output: array<atomic<u32>, 11>;
+@group(0) @binding(2) var<storage, read_write> output: array<atomic<u32>, 3>;
 
 // SHA256 helper functions
 fn rotr(x: u32, n: u32) -> u32 {
@@ -89,15 +98,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s0 = input[0]; let s1 = input[1]; let s2 = input[2]; let s3 = input[3];
     let s4 = input[4]; let s5 = input[5]; let s6 = input[6]; let s7 = input[7];
 
-    // Build the 64-byte message block (16 × u32 words, big-endian):
-    //   word 0: nonce1 (4 base64 chars packed as big-endian u32)
-    //   word 1: nonce2
-    //   word 2: "fQ==" = 0x66513d3d
-    //   word 3: 0x80000000 (SHA256 padding bit)
-    //   words 4..13: 0x00000000
-    //   word 14: 0x00000000 (high 32 bits of 64-bit length)
-    //   word 15: 608 = 0x00000260 (total message length in bits: (64+12)*8)
-    var w: array<u32, 64>;
+    // Rolling 16-word message schedule (matches CUDA — 4x less register pressure).
+    //   word 0: nonce1, word 1: nonce2, word 2: "fQ==", word 3: 0x80 padding,
+    //   words 4..14: zeros, word 15: bit-length.
+    var w: array<u32, 16>;
     w[0] = nonce_table[nonce1_idx];
     w[1] = nonce_table[nonce2_idx];
     w[2] = 0x66513d3du;  // "fQ=="
@@ -106,19 +110,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     w[8] = 0u; w[9] = 0u; w[10] = 0u; w[11] = 0u;
     w[12] = 0u; w[13] = 0u;
     w[14] = 0u;
-    w[15] = (prefix_len + 12u) * 8u;  // total message length in bits
-
-    // Extend message schedule
-    for (var i = 16u; i < 64u; i++) {
-        w[i] = sig1(w[i - 2u]) + w[i - 7u] + sig0(w[i - 15u]) + w[i - 16u];
-    }
+    w[15] = (prefix_len + 12u) * 8u;
 
     // Compression rounds from midstate
     var a = s0; var b = s1; var c = s2; var d = s3;
     var e = s4; var f = s5; var g = s6; var h = s7;
 
     for (var i = 0u; i < 64u; i++) {
-        let t1 = h + ep1(e) + ch(e, f, g) + K[i] + w[i];
+        var wi: u32;
+        if (i < 16u) {
+            wi = w[i];
+        } else {
+            let s0v = sig0(w[(i + 1u) & 15u]);
+            let s1v = sig1(w[(i + 14u) & 15u]);
+            wi = w[i & 15u] + s0v + s1v + w[(i + 9u) & 15u];
+            w[i & 15u] = wi;
+        }
+
+        let t1 = h + ep1(e) + ch(e, f, g) + K[i] + wi;
         let t2 = ep0(a) + maj(a, b, c);
         h = g; g = f; f = e; e = d + t1;
         d = c; c = b; b = a; a = t1 + t2;
@@ -126,6 +135,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Final hash = midstate + compression output
     let h0 = s0 + a;
+
+    // Quick reject on first word (covers vast majority of candidates).
+    if (h0 != 0u) {
+        let lz = countLeadingZeros(h0);
+        if (lz < difficulty) {
+            return;
+        }
+        // difficulty <= 32 and first word has enough zeros.
+        let prev = atomicMax(&output[0], lz);
+        if (lz > prev) {
+            atomicStore(&output[1], thread_id);
+        }
+        return;
+    }
+
+    // h0 == 0 -> at least 32 leading zero bits. Count further.
     let h1 = s1 + b;
     let h2 = s2 + c;
     let h3 = s3 + d;
@@ -134,34 +159,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h6 = s6 + g;
     let h7 = s7 + h;
 
-    // Quick reject: first word must be zero for difficulty >= 32.
-    // For difficulty 28, first word must have at least 28 leading zeros.
-    // This check covers most rejections cheaply.
-    if (h0 != 0u) {
-        let lz = countLeadingZeros(h0);
-        if (lz < difficulty) {
-            return;
-        }
-        // If we get here, difficulty <= 32 and first word has enough zeros.
-        // For difficulty <= 32, count is just leading zeros of h0.
-        let zeros = lz;
-        let prev = atomicMax(&output[0], zeros);
-        if (zeros > prev) {
-            atomicStore(&output[1], nonce1_idx);
-            atomicStore(&output[2], nonce2_idx);
-            atomicStore(&output[3], h0);
-            atomicStore(&output[4], h1);
-            atomicStore(&output[5], h2);
-            atomicStore(&output[6], h3);
-            atomicStore(&output[7], h4);
-            atomicStore(&output[8], h5);
-            atomicStore(&output[9], h6);
-            atomicStore(&output[10], h7);
-        }
-        return;
-    }
-
-    // h0 == 0 → at least 32 leading zero bits. Count further.
     var zeros = 32u;
     let words = array<u32, 7>(h1, h2, h3, h4, h5, h6, h7);
     for (var i = 0u; i < 7u; i++) {
@@ -176,16 +173,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (zeros >= difficulty) {
         let prev = atomicMax(&output[0], zeros);
         if (zeros > prev) {
-            atomicStore(&output[1], nonce1_idx);
-            atomicStore(&output[2], nonce2_idx);
-            atomicStore(&output[3], h0);
-            atomicStore(&output[4], h1);
-            atomicStore(&output[5], h2);
-            atomicStore(&output[6], h3);
-            atomicStore(&output[7], h4);
-            atomicStore(&output[8], h5);
-            atomicStore(&output[9], h6);
-            atomicStore(&output[10], h7);
+            atomicStore(&output[1], thread_id);
         }
     }
 }

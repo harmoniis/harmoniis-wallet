@@ -99,7 +99,10 @@ async-trait = "0.1"
 bytemuck    = { version = "1", features = ["derive"] }
 libc        = "0.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# CUDA mining — works on any OS with an NVIDIA driver.
+# `fallback-dynamic-loading` loads libcuda/nvcuda at runtime, so the binary
+# can be compiled without the CUDA SDK and gracefully falls back to wgpu if
+# no CUDA driver is present.
 cudarc      = { version = "0.19.3", optional = true, default-features = false, features = [
     "std",
     "driver",

@@ -8,7 +8,8 @@ use super::cuda::CudaMiner;
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
-    choose_best_result, CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
+    choose_best_result, split_assignments_for_weights, CancelFlag, MinerBackend,
+    MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
 };
 
 pub struct MultiCudaMiner {
@@ -68,46 +69,6 @@ impl MultiCudaMiner {
     fn split_assignments(&self, start_nonce: u32, nonce_count: u32) -> Vec<(usize, u32, u32)> {
         split_assignments_for_weights(&self.weights, start_nonce, nonce_count)
     }
-}
-
-fn split_assignments_for_weights(
-    weights: &[f64],
-    start_nonce: u32,
-    nonce_count: u32,
-) -> Vec<(usize, u32, u32)> {
-    if weights.is_empty() {
-        return Vec::new();
-    }
-
-    let start = start_nonce.min(NONCE_SPACE_SIZE);
-    let end = start.saturating_add(nonce_count).min(NONCE_SPACE_SIZE);
-    if start >= end {
-        return Vec::new();
-    }
-
-    let total = end - start;
-    let weight_sum = weights.iter().sum::<f64>().max(1.0);
-    let mut assignments = Vec::with_capacity(weights.len());
-    let mut assigned = 0u32;
-
-    for idx in 0..weights.len() {
-        let remaining = total.saturating_sub(assigned);
-        if remaining == 0 {
-            break;
-        }
-
-        let chunk = if idx == weights.len() - 1 {
-            remaining
-        } else {
-            let ideal = ((total as f64) * (weights[idx] / weight_sum)).round() as u32;
-            ideal.clamp(1, remaining)
-        };
-
-        assignments.push((idx, start + assigned, chunk));
-        assigned = assigned.saturating_add(chunk);
-    }
-
-    assignments
 }
 
 #[async_trait]

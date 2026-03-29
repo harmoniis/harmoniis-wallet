@@ -9,6 +9,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Subprocess GPU probe**: GPU pipeline creation is tested in a child process
+  before use.  If the GPU driver crashes (known AMD Vulkan bug on Polaris), the
+  adapter is skipped and the next one (e.g. DX12) is tried automatically.
+- **CUDA on Windows**: the `cuda` feature now compiles on all platforms (was
+  Linux-only).  `cudarc` loads the NVIDIA driver at runtime via
+  `fallback-dynamic-loading`; gracefully falls back to wgpu when unavailable.
+- **Wallet key protection**: `RgbWallet::open()` now refuses to generate new
+  keys if existing key material is missing — returns `KeyMaterialMissing` error
+  instead of silently replacing the wallet.  Prevents accidental money loss from
+  metadata corruption.
+- **Windows self-update fix**: `hrmw upgrade` on Windows now renames the running
+  binary aside (`.old.exe`) before replacing it, avoiding the "access denied"
+  error from the OS file lock.
+- `uninstall.sh` (Linux/macOS/FreeBSD) and `uninstall.ps1` (Windows) — remove
+  the binary and PATH entry.  Wallet data at `~/.harmoniis/` is never touched.
+
+### Changed
+
+- **WGSL shader optimised** to match CUDA performance:
+  - Rolling 16-word message schedule (was 64-word; 4x less register pressure).
+  - Packed 3-word atomic output (was 11); host re-verifies hash from nonce,
+    eliminating a TOCTOU race condition in the shader output.
+  - Pre-allocated input/result GPU buffers (eliminates per-dispatch allocations).
+- OpenGL backend removed from wgpu enumeration — only Vulkan, DX12, and Metal
+  are used for compute.
+- `split_assignments_for_weights()` extracted to shared `miner::mod` — was
+  duplicated in `multi_gpu.rs` and `multi_cuda.rs`.
+- Self-update Unix error message improved (no longer suggests `sudo` for
+  user-scoped installs).
+
 ## [0.1.39] — 2026-03-26
 
 ### Added

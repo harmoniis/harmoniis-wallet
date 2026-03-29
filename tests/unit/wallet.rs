@@ -1,4 +1,5 @@
 use harmoniis_wallet::{
+    error::Error,
     types::{Contract, ContractStatus, ContractType, Role},
     wallet::RgbWallet,
     Identity,
@@ -415,4 +416,86 @@ fn identity_sign_and_verify() {
 
     let bad = Identity::verify(&id.public_key_hex(), "different message", &sig).unwrap();
     assert!(!bad, "wrong message should not verify");
+}
+
+// ---------------------------------------------------------------------------
+// Wallet key-material protection tests (Bug 1: prevent silent key regeneration)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_then_open_preserves_fingerprint() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("master.db");
+
+    let fingerprint_a = {
+        let w = RgbWallet::create(&db_path).unwrap();
+        w.fingerprint().unwrap()
+    };
+
+    let fingerprint_b = {
+        let w = RgbWallet::open(&db_path).unwrap();
+        w.fingerprint().unwrap()
+    };
+
+    assert_eq!(
+        fingerprint_a, fingerprint_b,
+        "opening an existing wallet must preserve identity — not regenerate keys"
+    );
+}
+
+#[test]
+fn open_nonexistent_wallet_returns_not_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("does-not-exist").join("master.db");
+    match RgbWallet::open(&db_path) {
+        Err(Error::NotFound(_)) => {} // expected
+        Err(e) => panic!("expected NotFound, got: {e}"),
+        Ok(_) => panic!("expected error for nonexistent wallet"),
+    }
+}
+
+#[test]
+fn open_wallet_with_missing_keys_returns_error_not_regeneration() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("master.db");
+
+    // Create a wallet and record its fingerprint.
+    let original_fingerprint = {
+        let w = RgbWallet::create(&db_path).unwrap();
+        w.fingerprint().unwrap()
+    };
+
+    // Corrupt the wallet by deleting the root key material.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "DELETE FROM wallet_metadata WHERE key IN ('root_mnemonic', 'root_private_key_hex')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Opening should now fail instead of silently generating new keys.
+    match RgbWallet::open(&db_path) {
+        Err(Error::KeyMaterialMissing(_)) => {} // expected
+        Err(e) => panic!("expected KeyMaterialMissing, got: {e}"),
+        Ok(_) => panic!("expected error when key material is missing, but wallet opened — keys were silently regenerated!"),
+    }
+
+    // Verify the database was NOT overwritten with new keys.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mnemonic: Option<String> = conn
+            .query_row(
+                "SELECT value FROM wallet_metadata WHERE key = 'root_mnemonic'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert!(
+            mnemonic.is_none(),
+            "key material must NOT be regenerated on failed open — wallet data would be lost. \
+             Original fingerprint was: {original_fingerprint}"
+        );
+    }
 }

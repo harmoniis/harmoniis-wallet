@@ -332,7 +332,10 @@ impl RgbWallet {
         }
     }
 
-    fn init_master_schema(conn: &Connection) -> Result<()> {
+    /// Create master-database tables and indexes (DDL only, no key
+    /// materialisation).  Safe to call on every open — all statements use
+    /// `CREATE … IF NOT EXISTS`.
+    fn init_master_tables(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             PRAGMA journal_mode=WAL;
@@ -472,7 +475,19 @@ impl RgbWallet {
                 ON payment_transaction_events(txn_id, created_at ASC);
             ",
         )?;
-        ensure_root_and_identity_materialized(conn)?;
+        Ok(())
+    }
+
+    /// Create tables **and** materialise root key material.
+    ///
+    /// `allow_generate` – when `true` a brand-new keychain is created if no
+    /// root mnemonic / entropy hex exists yet (first-time wallet creation).
+    /// When `false` the call returns `Error::KeyMaterialMissing` instead of
+    /// silently generating new keys — protecting existing wallets from
+    /// accidental key replacement.
+    fn init_master_schema(conn: &Connection, allow_generate: bool) -> Result<()> {
+        Self::init_master_tables(conn)?;
+        ensure_root_and_identity_materialized(conn, allow_generate)?;
         ensure_default_pgp_identity(conn)?;
         Ok(())
     }
@@ -660,7 +675,7 @@ impl RgbWallet {
         migrate_identity_schema_if_present(&source_conn)?;
 
         let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_tables(&master_conn)?;
 
         if table_exists(&source_conn, "wallet_metadata")? {
             let mut stmt = source_conn.prepare("SELECT key, value FROM wallet_metadata")?;
@@ -710,7 +725,7 @@ impl RgbWallet {
                 )?;
             }
         }
-        ensure_root_and_identity_materialized(&master_conn)?;
+        ensure_root_and_identity_materialized(&master_conn, false)?;
         ensure_default_pgp_identity(&master_conn)?;
         drop(master_conn);
 
@@ -764,7 +779,7 @@ impl RgbWallet {
         }
 
         let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_schema(&master_conn, allow_create)?;
         let rgb_conn = Connection::open(&paths.rgb_path)?;
         Self::init_identity_schema(&rgb_conn)?;
         Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
@@ -796,7 +811,7 @@ impl RgbWallet {
     /// Open an in-memory wallet (for tests).
     pub fn open_memory() -> Result<Self> {
         let master_conn = Connection::open_in_memory()?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_schema(&master_conn, true)?;
         let rgb_conn = Connection::open_in_memory()?;
         Self::init_identity_schema(&rgb_conn)?;
         let wallet = Self {
@@ -2423,7 +2438,16 @@ fn migrate_identity_schema_if_present(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
+/// Write a metadata value only when it differs from what is already stored,
+/// avoiding unnecessary SQLite writes on every wallet open.
+fn set_metadata_if_changed(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    if metadata_value(conn, key)?.as_deref() == Some(value) {
+        return Ok(());
+    }
+    set_metadata_value(conn, key, value)
+}
+
+fn ensure_root_and_identity_materialized(conn: &Connection, allow_generate: bool) -> Result<()> {
     let mnemonic = metadata_value(conn, META_ROOT_MNEMONIC)?
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
@@ -2434,18 +2458,25 @@ fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
         HdKeychain::from_mnemonic_words(words)?
     } else if let Some(root_hex) = entropy_hex.as_deref() {
         HdKeychain::from_entropy_hex(root_hex)?
-    } else {
+    } else if allow_generate {
         HdKeychain::generate_new()?
+    } else {
+        return Err(Error::KeyMaterialMissing(
+            "root_mnemonic / root_private_key_hex missing; \
+             refusing to generate new keys for an existing wallet \
+             — restore from backup or re-import your mnemonic"
+                .into(),
+        ));
     };
 
-    set_metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;
-    set_metadata_value(conn, META_ROOT_MNEMONIC, &keychain.mnemonic_words())?;
-    set_metadata_value(
+    set_metadata_if_changed(conn, META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;
+    set_metadata_if_changed(conn, META_ROOT_MNEMONIC, &keychain.mnemonic_words())?;
+    set_metadata_if_changed(
         conn,
         META_RGB_PRIVATE_KEY_HEX,
         &keychain.derive_slot_hex("rgb", 0)?,
     )?;
-    set_metadata_value(conn, META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V3)?;
+    set_metadata_if_changed(conn, META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V3)?;
 
     if metadata_value(conn, META_WALLET_LABEL)?.is_none() {
         set_metadata_value(conn, META_WALLET_LABEL, "default")?;

@@ -2,11 +2,15 @@
 //!
 //! Supports range-based mining over the fixed 1M nonce space using dynamic
 //! dispatch sizing and adapter capability limits.
+//!
+//! The shader outputs only (best_difficulty, nonce_id).  The host re-computes
+//! the full hash from the winning nonce to guarantee correctness — the same
+//! approach used by the CUDA backend.
 
 use async_trait::async_trait;
 use wgpu::util::DeviceExt;
 
-use super::sha256::Sha256Midstate;
+use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
 use super::work_unit::NonceTable;
 use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE};
 
@@ -23,18 +27,136 @@ const INPUT_WORDS: usize = 12;
 
 /// Result buffer words:
 /// [0] = best difficulty found (0 = no valid solution)
-/// [1] = nonce1_idx
-/// [2] = nonce2_idx
-/// [3..11] = hash (8 x u32, big-endian)
-const RESULT_WORDS: usize = 11;
+/// [1] = flat nonce id of the winner
+/// [2] = reserved
+const RESULT_WORDS: usize = 3;
 const RESULT_BUFFER_SIZE: u64 = (RESULT_WORDS * 4) as u64;
+
+/// Backends used for compute — Vulkan (cross-platform primary), DX12 (Windows),
+/// Metal (macOS).  OpenGL is excluded.
+pub const COMPUTE_BACKENDS: wgpu::Backends =
+    wgpu::Backends::VULKAN.union(wgpu::Backends::DX12).union(wgpu::Backends::METAL);
+
+/// Run a GPU pipeline probe for a specific adapter index.
+///
+/// This is called from the `--gpu-probe` subprocess.  It creates a device,
+/// compiles the WGSL shader, and builds the compute pipeline.  If the GPU
+/// driver segfaults (known AMD Vulkan bug on Polaris), the subprocess dies
+/// and the parent skips that adapter.
+pub async fn probe_adapter(adapter_idx: usize) -> anyhow::Result<()> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: COMPUTE_BACKENDS,
+        ..Default::default()
+    });
+    let adapters = instance.enumerate_adapters(COMPUTE_BACKENDS);
+    let adapter = adapters
+        .into_iter()
+        .nth(adapter_idx)
+        .ok_or_else(|| anyhow::anyhow!("adapter index {adapter_idx} out of range"))?;
+    let info = adapter.get_info();
+    eprintln!(
+        "[gpu-probe] testing adapter {adapter_idx}: {} ({:?})",
+        info.name, info.backend
+    );
+    let (device, _queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("probe"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("probe_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+    // This is the call that can segfault on buggy AMD Vulkan drivers.
+    let _pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("probe_pipeline"),
+        layout: Some(&pl),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    eprintln!("[gpu-probe] adapter {adapter_idx} OK");
+    Ok(())
+}
+
+/// Probe an adapter by spawning the current binary with `--gpu-probe`.
+/// Returns `true` if the adapter is safe to use.
+pub(crate) fn subprocess_probe(adapter_idx: usize) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let status = std::process::Command::new(exe)
+        .arg("gpu-probe")
+        .arg("--adapter-idx")
+        .arg(adapter_idx.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+    match status {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
+}
 
 pub struct GpuMiner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    nonce_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    input_buffer: wgpu::Buffer,
+    result_buffer: wgpu::Buffer,
+    nonce_words: Vec<u32>,
     adapter_name: String,
     adapter_backend: wgpu::Backend,
     max_dispatch_nonces: u32,
@@ -43,8 +165,9 @@ pub struct GpuMiner {
 impl GpuMiner {
     /// Try to initialize the default high-performance adapter.
     pub async fn try_new() -> Option<Self> {
+        let compute_backends = COMPUTE_BACKENDS;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: compute_backends,
             ..Default::default()
         });
 
@@ -182,11 +305,46 @@ impl GpuMiner {
         });
 
         let nonce_table = NonceTable::new();
-        let nonce_data = nonce_table.as_u32_slice();
+        let nonce_words = nonce_table.as_u32_slice();
         let nonce_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("nonce_table"),
-            contents: bytemuck::cast_slice(&nonce_data),
+            contents: bytemuck::cast_slice(&nonce_words),
             usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Pre-allocate persistent input and result buffers (reused every dispatch).
+        let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("input"),
+            size: (INPUT_WORDS * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("result"),
+            size: RESULT_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("miner_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: nonce_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: result_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let limits = device.limits();
@@ -200,8 +358,10 @@ impl GpuMiner {
             device,
             queue,
             pipeline,
-            bind_group_layout,
-            nonce_buffer,
+            bind_group,
+            input_buffer,
+            result_buffer,
+            nonce_words,
             adapter_name,
             adapter_backend: info.backend,
             max_dispatch_nonces,
@@ -216,65 +376,6 @@ impl GpuMiner {
         self.max_dispatch_nonces
     }
 
-    fn create_bind_group(
-        &self,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-        nonce_offset: u32,
-        nonce_count: u32,
-    ) -> (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer) {
-        let mut input_data = [0u32; INPUT_WORDS];
-        input_data[..8].copy_from_slice(midstate.state_words());
-        input_data[8] = difficulty;
-        input_data[9] = midstate.prefix_len as u32;
-        input_data[10] = nonce_offset;
-        input_data[11] = nonce_count;
-
-        let input_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("input"),
-                contents: bytemuck::cast_slice(&input_data),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-
-        let result_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("result"),
-                contents: &[0u8; RESULT_WORDS * 4],
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
-
-        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: RESULT_BUFFER_SIZE,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("miner_bind_group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.nonce_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: input_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: result_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        (bind_group, result_buffer, staging_buffer)
-    }
-
     async fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
@@ -282,8 +383,27 @@ impl GpuMiner {
         nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
-        let (bind_group, result_buffer, staging_buffer) =
-            self.create_bind_group(midstate, difficulty, nonce_offset, nonce_count);
+        // Write input params to pre-allocated buffer (no allocation).
+        let mut input_data = [0u32; INPUT_WORDS];
+        input_data[..8].copy_from_slice(midstate.state_words());
+        input_data[8] = difficulty;
+        input_data[9] = midstate.prefix_len as u32;
+        input_data[10] = nonce_offset;
+        input_data[11] = nonce_count;
+        self.queue
+            .write_buffer(&self.input_buffer, 0, bytemuck::cast_slice(&input_data));
+
+        // Clear result buffer.
+        self.queue
+            .write_buffer(&self.result_buffer, 0, &[0u8; RESULT_WORDS * 4]);
+
+        // Only the staging buffer needs per-dispatch creation (map/unmap cycle).
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging"),
+            size: RESULT_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mut encoder = self
             .device
@@ -297,13 +417,13 @@ impl GpuMiner {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &self.bind_group, &[]);
 
             let num_workgroups = nonce_count.div_ceil(WORKGROUP_SIZE);
             pass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(&result_buffer, 0, &staging_buffer, 0, RESULT_BUFFER_SIZE);
+        encoder.copy_buffer_to_buffer(&self.result_buffer, 0, &staging_buffer, 0, RESULT_BUFFER_SIZE);
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = staging_buffer.slice(..);
@@ -318,29 +438,37 @@ impl GpuMiner {
         let data = buffer_slice.get_mapped_range();
         let result_words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
 
-        let best_difficulty = result_words[0];
-        let out = if best_difficulty >= difficulty {
-            let nonce1_idx = result_words[1] as u16;
-            let nonce2_idx = result_words[2] as u16;
-
-            let mut hash = [0u8; 32];
-            for i in 0..8 {
-                hash[i * 4..(i + 1) * 4].copy_from_slice(&result_words[3 + i].to_be_bytes());
-            }
-
-            Some(MiningResult {
-                nonce1_idx,
-                nonce2_idx,
-                hash,
-                difficulty_achieved: best_difficulty,
-            })
-        } else {
-            None
-        };
+        let best_zeros = result_words[0];
+        let nonce_id = result_words[1];
 
         drop(data);
         staging_buffer.unmap();
-        Ok(out)
+
+        // Host-side re-verification (matches CUDA's best_result_from_packed):
+        // re-compute hash from the nonce to guarantee correctness.
+        if best_zeros < difficulty {
+            return Ok(None);
+        }
+        if nonce_id >= NONCE_SPACE_SIZE {
+            return Ok(None);
+        }
+
+        let n1 = (nonce_id / 1000) as usize;
+        let n2 = (nonce_id % 1000) as usize;
+        let state_words =
+            midstate.finalize_words_from_nonce_u32(self.nonce_words[n1], self.nonce_words[n2]);
+        let achieved = leading_zero_bits_words(&state_words);
+
+        if achieved < difficulty {
+            return Ok(None);
+        }
+
+        Ok(Some(MiningResult {
+            nonce1_idx: n1 as u16,
+            nonce2_idx: n2 as u16,
+            hash: state_words_to_bytes(&state_words),
+            difficulty_achieved: achieved,
+        }))
     }
 }
 

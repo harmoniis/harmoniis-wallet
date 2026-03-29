@@ -12,6 +12,8 @@ pub enum Error {
     Api { status: u16, body: String },
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("wallet key material missing: {0}")]
+    KeyMaterialMissing(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

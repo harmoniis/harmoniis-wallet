@@ -5,12 +5,12 @@
 //! is computed once, and each nonce attempt processes a single additional block.
 
 pub mod cpu;
-#[cfg(all(feature = "cuda", target_os = "linux"))]
+#[cfg(feature = "cuda")]
 pub mod cuda;
 pub mod daemon;
 #[cfg(feature = "gpu")]
 pub mod gpu;
-#[cfg(all(feature = "cuda", target_os = "linux"))]
+#[cfg(feature = "cuda")]
 pub mod multi_cuda;
 #[cfg(feature = "gpu")]
 pub mod multi_gpu;
@@ -198,6 +198,50 @@ pub fn choose_best_result(
     }
 }
 
+/// Split a nonce range across devices proportionally to their hash-rate weights.
+///
+/// Shared by both `MultiGpuMiner` and `MultiCudaMiner`.
+pub(crate) fn split_assignments_for_weights(
+    weights: &[f64],
+    start_nonce: u32,
+    nonce_count: u32,
+) -> Vec<(usize, u32, u32)> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+
+    let start = start_nonce.min(NONCE_SPACE_SIZE);
+    let end = start.saturating_add(nonce_count).min(NONCE_SPACE_SIZE);
+    if start >= end {
+        return Vec::new();
+    }
+
+    let total = end - start;
+    let weight_sum = weights.iter().sum::<f64>().max(1.0);
+
+    let mut assignments = Vec::with_capacity(weights.len());
+    let mut assigned = 0u32;
+
+    for idx in 0..weights.len() {
+        let remaining = total.saturating_sub(assigned);
+        if remaining == 0 {
+            break;
+        }
+
+        let chunk = if idx == weights.len() - 1 {
+            remaining
+        } else {
+            let ideal = ((total as f64) * (weights[idx] / weight_sum)).round() as u32;
+            ideal.clamp(1, remaining)
+        };
+
+        assignments.push((idx, start + assigned, chunk));
+        assigned = assigned.saturating_add(chunk);
+    }
+
+    assignments
+}
+
 /// Select the best available mining backend.
 pub async fn select_backend(
     choice: BackendChoice,
@@ -214,7 +258,7 @@ pub async fn select_backend(
             Ok(Box::new(miner))
         }
         BackendChoice::Gpu => {
-            #[cfg(all(feature = "cuda", target_os = "linux"))]
+            #[cfg(feature = "cuda")]
             {
                 if let Some(miner) = multi_cuda::MultiCudaMiner::try_new().await {
                     println!("Mining backend: {}", miner.name());
@@ -228,17 +272,17 @@ pub async fn select_backend(
                     return Ok(Box::new(miner));
                 }
             }
-            #[cfg(not(any(feature = "gpu", all(feature = "cuda", target_os = "linux"))))]
+            #[cfg(not(any(feature = "gpu", feature = "cuda")))]
             {
                 anyhow::bail!("GPU support not compiled (enable 'gpu' and/or 'cuda' feature)")
             }
-            #[cfg(any(feature = "gpu", all(feature = "cuda", target_os = "linux")))]
+            #[cfg(any(feature = "gpu", feature = "cuda"))]
             {
                 anyhow::bail!("GPU requested but no compatible CUDA/Vulkan GPU found")
             }
         }
         BackendChoice::Auto => {
-            #[cfg(all(feature = "cuda", target_os = "linux"))]
+            #[cfg(feature = "cuda")]
             {
                 if let Some(multi_cuda) = multi_cuda::MultiCudaMiner::try_new().await {
                     println!("Selected: {} (auto prefers CUDA)", multi_cuda.name());

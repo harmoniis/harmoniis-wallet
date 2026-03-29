@@ -3,11 +3,12 @@
 use async_trait::async_trait;
 use tokio::task::JoinSet;
 
-use super::gpu::GpuMiner;
+use super::gpu::{GpuMiner, COMPUTE_BACKENDS};
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
-    choose_best_result, CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
+    choose_best_result, split_assignments_for_weights, CancelFlag, MinerBackend,
+    MiningChunkResult, MiningResult, NONCE_SPACE_SIZE,
 };
 
 pub struct MultiGpuMiner {
@@ -21,11 +22,11 @@ pub struct MultiGpuMiner {
 impl MultiGpuMiner {
     pub async fn try_new() -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: COMPUTE_BACKENDS,
             ..Default::default()
         });
 
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        let mut adapters = instance.enumerate_adapters(COMPUTE_BACKENDS);
         if adapters.is_empty() {
             // Fallback for environments where enumerate returns none but request_adapter may work.
             if let Some(adapter) = instance
@@ -39,12 +40,52 @@ impl MultiGpuMiner {
                 adapters.push(adapter);
             }
         }
-        let mut miners = Vec::new();
 
-        for adapter in adapters {
+        // Probe each adapter in a subprocess first — if the GPU driver
+        // segfaults during shader compilation (known AMD Vulkan bug on Polaris),
+        // the subprocess dies and we skip that adapter.  This means we do NOT
+        // dedup by physical device beforehand: if Vulkan crashes for a card,
+        // the DX12 adapter for the same card may still work.
+        let total = adapters.len();
+        let mut miners = Vec::new();
+        let mut used_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (idx, adapter) in adapters.into_iter().enumerate() {
+            let info = adapter.get_info();
+            if info.device_type == wgpu::DeviceType::Cpu {
+                continue;
+            }
+
+            // Skip if we already have a working miner for this physical device.
+            let device_key = if info.vendor != 0 || info.device != 0 {
+                format!("pci:{}:{}", info.vendor, info.device)
+            } else {
+                format!("name:{}", info.name)
+            };
+            if used_devices.contains(&device_key) {
+                continue;
+            }
+
+            // Probe in a subprocess — survives driver segfaults.
+            if !super::gpu::subprocess_probe(idx) {
+                eprintln!(
+                    "GPU probe failed for adapter {idx}: {} ({:?}) — skipping",
+                    info.name, info.backend
+                );
+                continue;
+            }
+
             if let Some(miner) = GpuMiner::try_from_adapter(adapter).await {
+                used_devices.insert(device_key);
                 miners.push(std::sync::Arc::new(miner));
             }
+        }
+        if total > 0 && miners.len() < total {
+            eprintln!(
+                "GPU: {} adapters enumerated, {} usable",
+                total,
+                miners.len()
+            );
         }
 
         if miners.is_empty() {
@@ -87,47 +128,6 @@ impl MultiGpuMiner {
     fn split_assignments(&self, start_nonce: u32, nonce_count: u32) -> Vec<(usize, u32, u32)> {
         split_assignments_for_weights(&self.weights, start_nonce, nonce_count)
     }
-}
-
-fn split_assignments_for_weights(
-    weights: &[f64],
-    start_nonce: u32,
-    nonce_count: u32,
-) -> Vec<(usize, u32, u32)> {
-    if weights.is_empty() {
-        return Vec::new();
-    }
-
-    let start = start_nonce.min(NONCE_SPACE_SIZE);
-    let end = start.saturating_add(nonce_count).min(NONCE_SPACE_SIZE);
-    if start >= end {
-        return Vec::new();
-    }
-
-    let total = end - start;
-    let weight_sum = weights.iter().sum::<f64>().max(1.0);
-
-    let mut assignments = Vec::with_capacity(weights.len());
-    let mut assigned = 0u32;
-
-    for idx in 0..weights.len() {
-        let remaining = total.saturating_sub(assigned);
-        if remaining == 0 {
-            break;
-        }
-
-        let chunk = if idx == weights.len() - 1 {
-            remaining
-        } else {
-            let ideal = ((total as f64) * (weights[idx] / weight_sum)).round() as u32;
-            ideal.clamp(1, remaining)
-        };
-
-        assignments.push((idx, start + assigned, chunk));
-        assigned = assigned.saturating_add(chunk);
-    }
-
-    assignments
 }
 
 #[async_trait]

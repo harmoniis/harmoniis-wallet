@@ -199,6 +199,14 @@ enum Cmd {
     /// Upgrade hrmw to the latest release from GitHub
     #[command(alias = "self-update")]
     Upgrade,
+
+    /// Test if a GPU adapter can compile the mining shader (internal use).
+    #[command(hide = true)]
+    GpuProbe {
+        /// Adapter index from enumerate_adapters
+        #[arg(long)]
+        adapter_idx: usize,
+    },
 }
 
 // ── Identity ──────────────────────────────────────────────────────────────────
@@ -3618,6 +3626,19 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Upgrade => {
             self_update::run_upgrade().await?;
         }
+
+        // ── gpu-probe (internal) ────────────────────────────────────────────
+        Cmd::GpuProbe { adapter_idx } => {
+            #[cfg(feature = "gpu")]
+            {
+                harmoniis_wallet::miner::gpu::probe_adapter(adapter_idx).await?;
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let _ = adapter_idx;
+                anyhow::bail!("GPU support not compiled");
+            }
+        }
     }
 
     Ok(())
@@ -3677,7 +3698,32 @@ mod self_update {
         Some(rest[..end].to_string())
     }
 
+    /// Remove stale `.old` / `.old.exe` left by a previous Windows upgrade.
+    fn cleanup_old_binaries() {
+        let Ok(current_exe) = std::env::current_exe() else {
+            return;
+        };
+        for ext in &["old.exe", "old"] {
+            let old_path = current_exe.with_extension(ext);
+            if old_path.exists() {
+                match std::fs::remove_file(&old_path) {
+                    Ok(()) => println!(
+                        "Cleaned up previous update artifact: {}",
+                        old_path.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "Warning: could not remove {}: {} (non-fatal)",
+                        old_path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+    }
+
     pub async fn run_upgrade() -> anyhow::Result<()> {
+        cleanup_old_binaries();
+
         let platform = detect_platform()?;
         println!("Current version : {CURRENT_VERSION}");
         println!("Platform        : {platform}");
@@ -3784,8 +3830,7 @@ mod self_update {
         // Canonicalize to resolve symlinks so we replace the actual file.
         let target_path = std::fs::canonicalize(&current_exe).unwrap_or(current_exe);
 
-        // On Unix we can atomically rename over the target.  We first copy the
-        // new binary next to the target, then rename.
+        // Copy the new binary next to the target before swapping.
         let staging_path = target_path.with_extension("new");
         std::fs::copy(&extracted_bin, &staging_path).with_context(|| {
             format!(
@@ -3804,12 +3849,76 @@ mod self_update {
             std::fs::set_permissions(&staging_path, perms).ok();
         }
 
-        std::fs::rename(&staging_path, &target_path).with_context(|| {
-            format!(
-                "failed to replace {} — you may need to run with sudo",
-                target_path.display()
-            )
-        })?;
+        // --- Platform-specific binary swap ---
+        //
+        // Unix: atomic rename over the running binary (works because Unix
+        //       replaces the directory entry while the running process keeps
+        //       its open file descriptor).
+        //
+        // Windows: the OS locks the running .exe, so we cannot overwrite it
+        //          directly.  Instead we *rename* the running exe to .old.exe
+        //          (Windows allows renaming a locked file) and then rename the
+        //          staging binary into the now-free target name.
+        #[cfg(unix)]
+        {
+            std::fs::rename(&staging_path, &target_path).with_context(|| {
+                format!(
+                    "failed to replace {} — check write permissions \
+                     (sudo may be needed if hrmw is installed outside ~/.local/bin)",
+                    target_path.display()
+                )
+            })?;
+        }
+
+        #[cfg(windows)]
+        {
+            let old_path = target_path.with_extension("old.exe");
+
+            // Remove a leftover .old.exe from an earlier upgrade.
+            if old_path.exists() {
+                std::fs::remove_file(&old_path).with_context(|| {
+                    format!(
+                        "failed to remove previous backup {} — \
+                         is another hrmw process running?",
+                        old_path.display()
+                    )
+                })?;
+            }
+
+            // Step 1: rename the running exe out of the way.
+            std::fs::rename(&target_path, &old_path).with_context(|| {
+                format!(
+                    "failed to rename running binary {} to {} — \
+                     try closing other hrmw processes or run as Administrator",
+                    target_path.display(),
+                    old_path.display()
+                )
+            })?;
+
+            // Step 2: move the new binary into place.
+            if let Err(e) = std::fs::rename(&staging_path, &target_path) {
+                // Best-effort rollback: restore the original binary.
+                let _ = std::fs::rename(&old_path, &target_path);
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to move new binary to {} — original binary restored",
+                        target_path.display()
+                    )
+                });
+            }
+
+            println!(
+                "Note: {} will be cleaned up on next upgrade.",
+                old_path.display()
+            );
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            std::fs::rename(&staging_path, &target_path).with_context(|| {
+                format!("failed to replace {}", target_path.display())
+            })?;
+        }
 
         // Clean up temp directory.
         let _ = std::fs::remove_dir_all(&tmp_dir);
