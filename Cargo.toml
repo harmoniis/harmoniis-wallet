@@ -79,7 +79,7 @@ dirs-next   = "2"
 chrono      = { version = "0.4", features = ["serde"] }
 webylib     = "0.1.0"
 image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-bdk_wallet  = "1.2"
+bdk_wallet  = { version = "1.2", features = ["file_store"] }
 bdk_esplora = "0.20"
 
 # ARK protocol (Arkade ASP — offchain Bitcoin via VTXOs)

@@ -127,8 +127,21 @@ pub fn is_running() -> Option<u32> {
     }
     #[cfg(not(unix))]
     {
-        // On non-unix, just trust the PID file
-        Some(pid)
+        // Verify the process is actually alive via `tasklist`.
+        let alive = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false);
+        if alive {
+            Some(pid)
+        } else {
+            let _ = std::fs::remove_file(&pid_path);
+            None
+        }
     }
 }
 
@@ -177,7 +190,7 @@ pub fn start(config: &MinerConfig) -> anyhow::Result<()> {
         .stderr(log_err)
         .stdin(std::process::Stdio::null());
 
-    // Detach on unix
+    // Detach child process from parent's console/session.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -187,6 +200,13 @@ pub fn start(config: &MinerConfig) -> anyhow::Result<()> {
                 Ok(())
             });
         }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
 
     let child = cmd.spawn()?;
@@ -217,7 +237,11 @@ pub fn stop() -> anyhow::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        anyhow::bail!("stop not implemented on this platform");
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 
     // Wait for process to exit (up to 5 seconds)

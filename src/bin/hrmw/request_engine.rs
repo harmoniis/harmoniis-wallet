@@ -836,7 +836,7 @@ async fn acquire_payment(
         PaymentRail::Bitcoin => {
             let (network, asp_url, offchain_receive_address) =
                 bitcoin_ark_payment_target(&directive.rail_details)?;
-            let btc = DeterministicBitcoinWallet::from_master_wallet(wallet, network)
+            let btc = DeterministicBitcoinWallet::from_master_wallet(wallet, network, Some(crate::bitcoin_db_path(wallet_path)))
                 .map_err(anyhow::Error::from)?;
             let db = SqliteArkDb::open(&crate::bitcoin_db_path(wallet_path))
                 .map_err(anyhow::Error::from)?;
