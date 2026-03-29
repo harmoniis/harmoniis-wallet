@@ -60,6 +60,27 @@ fn bitcoin_db_path(wallet_path: &std::path::Path) -> std::path::PathBuf {
     wallet_path.with_file_name("bitcoin.db")
 }
 
+/// If `--accept-terms` was not passed on the CLI, prompt the user interactively.
+/// Returns `true` if terms were accepted, or an error if declined.
+fn prompt_accept_terms_if_needed(flag: bool) -> anyhow::Result<bool> {
+    if flag {
+        return Ok(true);
+    }
+    use std::io::{self, Write};
+    eprint!(
+        "By running the webcash miner you agree to the terms of service at https://webcash.tech.\n\
+         Accept? [y/N] "
+    );
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
+        Ok(true)
+    } else {
+        anyhow::bail!("Terms not accepted. Pass --accept-terms to skip this prompt.")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PaymentRail {
     Webcash,
@@ -3560,6 +3581,7 @@ async fn main() -> anyhow::Result<()> {
             accept_terms,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
             let webcash_wallet_path = default_webcash_wallet_path(&wallet_path);
             let backend_choice = if cpu_only {
                 BackendChoice::Cpu
@@ -3602,6 +3624,7 @@ async fn main() -> anyhow::Result<()> {
             webcash_wallet,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
+            let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
             let run_wallet = run_wallet.unwrap_or_else(|| wallet_path.clone());
             let run_webcash_wallet =
                 webcash_wallet.unwrap_or_else(|| default_webcash_wallet_path(&run_wallet));
