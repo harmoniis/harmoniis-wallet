@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use tokio::task::JoinSet;
 
-use super::gpu::{GpuMiner, COMPUTE_BACKENDS};
+use super::gpu::{AdapterIdentity, GpuMiner, COMPUTE_BACKENDS};
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
@@ -50,26 +50,24 @@ impl MultiGpuMiner {
         let mut miners = Vec::new();
         let mut used_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        for (idx, adapter) in adapters.into_iter().enumerate() {
+        for adapter in adapters.into_iter() {
             let info = adapter.get_info();
             if info.device_type == wgpu::DeviceType::Cpu {
                 continue;
             }
 
+            let identity = AdapterIdentity::from_info(&info);
+
             // Skip if we already have a working miner for this physical device.
-            let device_key = if info.vendor != 0 || info.device != 0 {
-                format!("pci:{}:{}", info.vendor, info.device)
-            } else {
-                format!("name:{}", info.name)
-            };
+            let device_key = identity.device_key();
             if used_devices.contains(&device_key) {
                 continue;
             }
 
             // Probe in a subprocess — survives driver segfaults.
-            if !super::gpu::subprocess_probe(idx) {
+            if !super::gpu::subprocess_probe(&identity) {
                 eprintln!(
-                    "GPU probe failed for adapter {idx}: {} ({:?}) — skipping",
+                    "GPU probe failed: {} ({:?}) — skipping",
                     info.name, info.backend
                 );
                 continue;

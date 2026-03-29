@@ -9,6 +9,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.41] — 2026-03-29
+
+### Fixed
+
+- **Multi-GPU mining**: the subprocess GPU probe used adapter enumeration
+  indices which are not stable across process boundaries.  With 2 physical
+  GPUs (e.g. RX 590 + RX 580), only 1 was usable.  Fixed by identifying
+  adapters by `(vendor, device, backend)` identity triple instead of index.
+  Both GPUs now mine in parallel with proportional work distribution.
+
 ## [0.1.40] — 2026-03-29
 
 ### Added

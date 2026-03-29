@@ -38,27 +38,71 @@ pub const COMPUTE_BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN
     .union(wgpu::Backends::DX12)
     .union(wgpu::Backends::METAL);
 
-/// Run a GPU pipeline probe for a specific adapter index.
+/// Identity triple that uniquely identifies a wgpu adapter across processes.
+///
+/// Unlike enumeration indices, `(vendor, device, backend)` is deterministic
+/// regardless of enumeration order — safe for subprocess probing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AdapterIdentity {
+    pub vendor: u32,
+    pub device: u32,
+    pub backend: String,
+}
+
+impl AdapterIdentity {
+    /// Extract identity from a wgpu AdapterInfo.
+    pub fn from_info(info: &wgpu::AdapterInfo) -> Self {
+        Self {
+            vendor: info.vendor,
+            device: info.device,
+            backend: format!("{:?}", info.backend).to_lowercase(),
+        }
+    }
+
+    /// Find the matching adapter from a list by identity.
+    pub fn find_matching(&self, adapters: Vec<wgpu::Adapter>) -> Option<wgpu::Adapter> {
+        adapters.into_iter().find(|a| {
+            let info = a.get_info();
+            info.vendor == self.vendor
+                && info.device == self.device
+                && format!("{:?}", info.backend).to_lowercase() == self.backend
+        })
+    }
+
+    /// Dedup key for the physical device (ignores backend).
+    ///
+    /// Two backends (Vulkan + DX12) for the same GPU produce the same key.
+    pub fn device_key(&self) -> String {
+        if self.vendor != 0 || self.device != 0 {
+            format!("pci:{}:{}", self.vendor, self.device)
+        } else {
+            format!("unknown:{}", self.backend)
+        }
+    }
+}
+
+/// Run a GPU pipeline probe for an adapter identified by vendor+device+backend.
 ///
 /// This is called from the `--gpu-probe` subprocess.  It creates a device,
 /// compiles the WGSL shader, and builds the compute pipeline.  If the GPU
 /// driver segfaults (known AMD Vulkan bug on Polaris), the subprocess dies
 /// and the parent skips that adapter.
-pub async fn probe_adapter(adapter_idx: usize) -> anyhow::Result<()> {
+pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: COMPUTE_BACKENDS,
         ..Default::default()
     });
     let adapters = instance.enumerate_adapters(COMPUTE_BACKENDS);
-    let adapter = adapters
-        .into_iter()
-        .nth(adapter_idx)
-        .ok_or_else(|| anyhow::anyhow!("adapter index {adapter_idx} out of range"))?;
+    let adapter = identity.find_matching(adapters).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no adapter matches vendor={} device={} backend={}",
+            identity.vendor,
+            identity.device,
+            identity.backend,
+        )
+    })?;
     let info = adapter.get_info();
-    eprintln!(
-        "[gpu-probe] testing adapter {adapter_idx}: {} ({:?})",
-        info.name, info.backend
-    );
+    eprintln!("[gpu-probe] testing: {} ({:?})", info.name, info.backend);
     let (device, _queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
@@ -126,21 +170,25 @@ pub async fn probe_adapter(adapter_idx: usize) -> anyhow::Result<()> {
         compilation_options: Default::default(),
         cache: None,
     });
-    eprintln!("[gpu-probe] adapter {adapter_idx} OK");
+    eprintln!("[gpu-probe] OK: {} ({:?})", info.name, info.backend);
     Ok(())
 }
 
-/// Probe an adapter by spawning the current binary with `--gpu-probe`.
+/// Probe an adapter by spawning the current binary with `gpu-probe`.
 /// Returns `true` if the adapter is safe to use.
-pub(crate) fn subprocess_probe(adapter_idx: usize) -> bool {
+pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
     };
     let status = std::process::Command::new(exe)
         .arg("gpu-probe")
-        .arg("--adapter-idx")
-        .arg(adapter_idx.to_string())
+        .arg("--vendor")
+        .arg(identity.vendor.to_string())
+        .arg("--device")
+        .arg(identity.device.to_string())
+        .arg("--backend")
+        .arg(&identity.backend)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .status();
@@ -553,5 +601,112 @@ impl MinerBackend for GpuMiner {
             attempted: (range_end - range_start) as u64,
             elapsed: started.elapsed(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdapterIdentity;
+
+    #[test]
+    fn device_key_same_physical_device_different_backends() {
+        let vulkan = AdapterIdentity {
+            vendor: 4098,
+            device: 26591,
+            backend: "vulkan".into(),
+        };
+        let dx12 = AdapterIdentity {
+            vendor: 4098,
+            device: 26591,
+            backend: "dx12".into(),
+        };
+        assert_eq!(vulkan.device_key(), dx12.device_key());
+    }
+
+    #[test]
+    fn device_key_different_physical_gpus() {
+        let rx590 = AdapterIdentity {
+            vendor: 4098,
+            device: 26591,
+            backend: "vulkan".into(),
+        };
+        let rx580 = AdapterIdentity {
+            vendor: 4098,
+            device: 26575,
+            backend: "vulkan".into(),
+        };
+        assert_ne!(rx590.device_key(), rx580.device_key());
+    }
+
+    #[test]
+    fn device_key_fallback_when_no_pci_ids() {
+        let id = AdapterIdentity {
+            vendor: 0,
+            device: 0,
+            backend: "metal".into(),
+        };
+        assert!(id.device_key().starts_with("unknown:"));
+    }
+
+    #[test]
+    fn dedup_dual_amd_gpu_scenario() {
+        // Simulate the 7-adapter scenario: RX 590 + RX 580, each on Vulkan + DX12,
+        // plus software adapters.
+        let adapters = vec![
+            AdapterIdentity {
+                vendor: 4098,
+                device: 26591,
+                backend: "vulkan".into(),
+            },
+            AdapterIdentity {
+                vendor: 4098,
+                device: 26575,
+                backend: "vulkan".into(),
+            },
+            AdapterIdentity {
+                vendor: 4098,
+                device: 26591,
+                backend: "dx12".into(),
+            },
+            AdapterIdentity {
+                vendor: 4098,
+                device: 26575,
+                backend: "dx12".into(),
+            },
+            AdapterIdentity {
+                vendor: 0,
+                device: 0,
+                backend: "vulkan".into(),
+            },
+            AdapterIdentity {
+                vendor: 0,
+                device: 0,
+                backend: "dx12".into(),
+            },
+            AdapterIdentity {
+                vendor: 4098,
+                device: 26591,
+                backend: "gl".into(),
+            },
+        ];
+
+        let mut used = std::collections::HashSet::new();
+        let mut selected = Vec::new();
+        for id in &adapters {
+            let key = id.device_key();
+            if !used.contains(&key) {
+                used.insert(key);
+                selected.push(id.clone());
+            }
+        }
+
+        // RX 590, RX 580, and 2 unknown (Vulkan sw, DX12 sw)
+        assert_eq!(selected.len(), 4);
+
+        let discrete: Vec<_> = selected.iter().filter(|id| id.vendor != 0).collect();
+        assert_eq!(discrete.len(), 2);
+        let devices: std::collections::HashSet<u32> = discrete.iter().map(|id| id.device).collect();
+        assert!(devices.contains(&26591)); // RX 590
+        assert!(devices.contains(&26575)); // RX 580
     }
 }

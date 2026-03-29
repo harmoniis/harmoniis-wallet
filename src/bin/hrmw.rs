@@ -224,9 +224,15 @@ enum Cmd {
     /// Test if a GPU adapter can compile the mining shader (internal use).
     #[command(hide = true)]
     GpuProbe {
-        /// Adapter index from enumerate_adapters
+        /// GPU vendor ID (PCI)
         #[arg(long)]
-        adapter_idx: usize,
+        vendor: u32,
+        /// GPU device ID (PCI)
+        #[arg(long)]
+        device: u32,
+        /// Backend name: vulkan, dx12, metal
+        #[arg(long)]
+        backend: String,
     },
 }
 
@@ -3707,14 +3713,23 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── gpu-probe (internal) ────────────────────────────────────────────
-        Cmd::GpuProbe { adapter_idx } => {
+        Cmd::GpuProbe {
+            vendor,
+            device,
+            backend,
+        } => {
             #[cfg(feature = "gpu")]
             {
-                harmoniis_wallet::miner::gpu::probe_adapter(adapter_idx).await?;
+                let identity = harmoniis_wallet::miner::gpu::AdapterIdentity {
+                    vendor,
+                    device,
+                    backend,
+                };
+                harmoniis_wallet::miner::gpu::probe_adapter(&identity).await?;
             }
             #[cfg(not(feature = "gpu"))]
             {
-                let _ = adapter_idx;
+                let _ = (vendor, device, backend);
                 anyhow::bail!("GPU support not compiled");
             }
         }
