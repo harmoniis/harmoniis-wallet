@@ -9,14 +9,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.40] — 2026-03-29
+
 ### Added
 
 - **Subprocess GPU probe**: GPU pipeline creation is tested in a child process
-  before use.  If the GPU driver crashes (known AMD Vulkan bug on Polaris), the
-  adapter is skipped and the next one (e.g. DX12) is tried automatically.
+  before use.  If the GPU driver segfaults (known AMD Vulkan issue on Polaris),
+  the adapter is skipped and the next one (e.g. DX12) is tried automatically.
+  RX 580 now mines at ~485 Mh/s via DX12 fallback.
 - **CUDA on Windows**: the `cuda` feature now compiles on all platforms (was
   Linux-only).  `cudarc` loads the NVIDIA driver at runtime via
   `fallback-dynamic-loading`; gracefully falls back to wgpu when unavailable.
+  Zero change to existing CUDA behaviour on Linux.
 - **Wallet key protection**: `RgbWallet::open()` now refuses to generate new
   keys if existing key material is missing — returns `KeyMaterialMissing` error
   instead of silently replacing the wallet.  Prevents accidental money loss from
@@ -38,8 +42,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   are used for compute.
 - `split_assignments_for_weights()` extracted to shared `miner::mod` — was
   duplicated in `multi_gpu.rs` and `multi_cuda.rs`.
-- Self-update Unix error message improved (no longer suggests `sudo` for
-  user-scoped installs).
+- Witness secret generation upgraded from `thread_rng()` to `OsRng` (OS CSPRNG)
+  for defence-in-depth; matches root key and identity key entropy source.
+- Self-update error messages now platform-appropriate (no "sudo" on Windows).
 
 ## [0.1.39] — 2026-03-26
 

@@ -1,11 +1,11 @@
-use rand::RngCore;
+use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 /// Generate a random 32-byte secret as 64-char lowercase hex.
-/// Matches backend arbitration.rs line 152 generation logic.
+/// Uses the OS CSPRNG directly (same entropy source as root key generation).
 pub fn generate_secret_hex() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
