@@ -1,5 +1,6 @@
 pub mod schema;
 pub mod identities;
+pub mod labeled_wallets;
 pub mod payments;
 pub mod contracts;
 pub mod snapshots;

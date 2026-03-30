@@ -13,6 +13,8 @@ use crate::error::{Error, Result};
 pub const KEY_MODEL_VERSION_V3: &str = "v3-bip32";
 pub const MAX_PGP_KEYS: u32 = 1_000;
 pub const MAX_VAULT_KEYS: u32 = 1_000;
+/// Max labeled wallets per family (webcash, bitcoin, voucher, rgb).
+pub const MAX_LABELED_WALLETS: u32 = 256;
 pub const SLOT_FAMILY_VAULT: &str = "vault";
 /// Backward-compatible alias for existing integrations.
 pub const SLOT_FAMILY_HARMONIA_VAULT: &str = "harmonia-vault";
@@ -133,28 +135,31 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
             Ok((FAMILY_ROOT, 0))
         }
         "rgb" => {
-            if index != 0 {
+            if index >= MAX_LABELED_WALLETS {
                 return Err(Error::Other(anyhow::anyhow!(
-                    "rgb family only supports index 0"
+                    "rgb wallet index out of range (max {})",
+                    MAX_LABELED_WALLETS - 1
                 )));
             }
-            Ok((FAMILY_RGB, 0))
+            Ok((FAMILY_RGB, index))
         }
         "webcash" => {
-            if index != 0 {
+            if index >= MAX_LABELED_WALLETS {
                 return Err(Error::Other(anyhow::anyhow!(
-                    "webcash family only supports index 0"
+                    "webcash wallet index out of range (max {})",
+                    MAX_LABELED_WALLETS - 1
                 )));
             }
-            Ok((FAMILY_WEBCASH, 0))
+            Ok((FAMILY_WEBCASH, index))
         }
         "bitcoin" => {
-            if index != 0 {
+            if index >= MAX_LABELED_WALLETS {
                 return Err(Error::Other(anyhow::anyhow!(
-                    "bitcoin family only supports index 0"
+                    "bitcoin wallet index out of range (max {})",
+                    MAX_LABELED_WALLETS - 1
                 )));
             }
-            Ok((FAMILY_BITCOIN, 0))
+            Ok((FAMILY_BITCOIN, index))
         }
         "pgp" => {
             if index >= MAX_PGP_KEYS {
@@ -175,12 +180,13 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
             Ok((FAMILY_HARMONIA_VAULT, index))
         }
         "voucher" => {
-            if index != 0 {
+            if index >= MAX_LABELED_WALLETS {
                 return Err(Error::Other(anyhow::anyhow!(
-                    "voucher family only supports index 0"
+                    "voucher wallet index out of range (max {})",
+                    MAX_LABELED_WALLETS - 1
                 )));
             }
-            Ok((FAMILY_VOUCHER, 0))
+            Ok((FAMILY_VOUCHER, index))
         }
         _ => Err(Error::Other(anyhow::anyhow!(
             "unknown key family '{family}'"

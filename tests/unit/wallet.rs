@@ -499,3 +499,55 @@ fn open_wallet_with_missing_keys_returns_error_not_regeneration() {
         );
     }
 }
+#[test]
+fn labeled_webcash_wallets_derive_distinct_secrets() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // Main (slot 0) and donation (slot 1) should produce different secrets
+    let (main_secret, main_idx) = wallet
+        .derive_webcash_secret_for_label("main")
+        .expect("main webcash");
+    let (donation_secret, donation_idx) = wallet
+        .derive_webcash_secret_for_label("donation")
+        .expect("donation webcash");
+
+    assert_eq!(main_idx, 0, "main should be slot 0");
+    assert_eq!(donation_idx, 1, "donation should be slot 1");
+    assert_ne!(main_secret, donation_secret, "different slots = different secrets");
+
+    // Same label returns same slot
+    let (main_again, idx_again) = wallet
+        .derive_webcash_secret_for_label("main")
+        .expect("main again");
+    assert_eq!(main_again, main_secret);
+    assert_eq!(idx_again, 0);
+
+    // List should show both
+    let wallets = wallet.list_labeled_wallets("webcash").expect("list");
+    assert!(wallets.len() >= 2);
+    assert!(wallets.iter().any(|w| w.label == "main"));
+    assert!(wallets.iter().any(|w| w.label == "donation"));
+}
+
+#[test]
+fn labeled_bitcoin_and_voucher_wallets_work() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    let (btc_main, _) = wallet.derive_bitcoin_secret_for_label("main").expect("btc main");
+    let (btc_hot, _) = wallet.derive_bitcoin_secret_for_label("hot").expect("btc hot");
+    assert_ne!(btc_main, btc_hot);
+
+    let (v_main, _) = wallet.derive_voucher_secret_for_label("main").expect("voucher main");
+    let (v_shop, _) = wallet.derive_voucher_secret_for_label("shop").expect("voucher shop");
+    assert_ne!(v_main, v_shop);
+
+    // DB filenames follow convention
+    assert_eq!(
+        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("webcash", "donation"),
+        "donation_webcash.db"
+    );
+    assert_eq!(
+        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("bitcoin", "main"),
+        "main_bitcoin.db"
+    );
+}

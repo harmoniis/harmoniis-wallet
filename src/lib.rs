@@ -35,6 +35,7 @@ pub use types::{
 };
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 pub use voucher_wallet::{VoucherStats, VoucherWallet};
+pub use wallet::labeled_wallets::LabeledWallet;
 pub use wallet::{
     NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
     PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
