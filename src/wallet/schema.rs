@@ -268,7 +268,10 @@ pub(crate) fn migrate_identity_schema_if_present(conn: &Connection) -> Result<()
     Ok(())
 }
 
-pub(crate) fn ensure_root_and_identity_materialized(conn: &Connection) -> Result<()> {
+pub(crate) fn ensure_root_and_identity_materialized(
+    conn: &Connection,
+    allow_generate: bool,
+) -> Result<()> {
     let mnemonic = metadata_value(conn, META_ROOT_MNEMONIC)?
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
@@ -279,8 +282,15 @@ pub(crate) fn ensure_root_and_identity_materialized(conn: &Connection) -> Result
         HdKeychain::from_mnemonic_words(words)?
     } else if let Some(root_hex) = entropy_hex.as_deref() {
         HdKeychain::from_entropy_hex(root_hex)?
-    } else {
+    } else if allow_generate {
         HdKeychain::generate_new()?
+    } else {
+        return Err(Error::KeyMaterialMissing(
+            "root_mnemonic / root_private_key_hex missing; \
+             refusing to generate new keys for an existing wallet \
+             — restore from backup or re-import your mnemonic"
+                .into(),
+        ));
     };
 
     set_metadata_value(conn, META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;

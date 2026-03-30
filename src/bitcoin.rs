@@ -58,6 +58,7 @@ impl Clone for DeterministicBitcoinWallet {
         Self {
             network: self.network,
             slot_seed: self.slot_seed,
+            db_path: self.db_path.clone(),
         }
     }
 }

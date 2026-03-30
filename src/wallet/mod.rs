@@ -130,7 +130,7 @@ impl WalletCore {
         }
     }
 
-    fn init_master_schema(conn: &Connection) -> Result<()> {
+    fn init_master_schema(conn: &Connection, allow_generate: bool) -> Result<()> {
         conn.execute_batch(
             "
             PRAGMA journal_mode=WAL;
@@ -270,7 +270,7 @@ impl WalletCore {
                 ON payment_transaction_events(txn_id, created_at ASC);
             ",
         )?;
-        ensure_root_and_identity_materialized(conn)?;
+        ensure_root_and_identity_materialized(conn, allow_generate)?;
         ensure_default_pgp_identity(conn)?;
         Ok(())
     }
@@ -458,7 +458,7 @@ impl WalletCore {
         migrate_identity_schema_if_present(&source_conn)?;
 
         let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_schema(&master_conn, true)?; // import always allows key generation
 
         if table_exists(&source_conn, "wallet_metadata")? {
             let mut stmt = source_conn.prepare("SELECT key, value FROM wallet_metadata")?;
@@ -508,7 +508,7 @@ impl WalletCore {
                 )?;
             }
         }
-        ensure_root_and_identity_materialized(&master_conn)?;
+        ensure_root_and_identity_materialized(&master_conn, true)?;
         ensure_default_pgp_identity(&master_conn)?;
         drop(master_conn);
 
@@ -562,7 +562,7 @@ impl WalletCore {
         }
 
         let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_schema(&master_conn, allow_create)?;
         let rgb_conn = Connection::open(&paths.rgb_path)?;
         Self::init_identity_schema(&rgb_conn)?;
         Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
@@ -594,7 +594,7 @@ impl WalletCore {
     /// Open an in-memory wallet (for tests).
     pub fn open_memory() -> Result<Self> {
         let master_conn = Connection::open_in_memory()?;
-        Self::init_master_schema(&master_conn)?;
+        Self::init_master_schema(&master_conn, true)?; // memory wallets always generate fresh keys
         let rgb_conn = Connection::open_in_memory()?;
         Self::init_identity_schema(&rgb_conn)?;
         let wallet = Self {
