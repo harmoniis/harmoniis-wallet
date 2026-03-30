@@ -475,7 +475,7 @@ impl VoucherWallet {
         )
     }
 
-    fn list_live_outputs(&self) -> Result<Vec<VoucherSecret>> {
+    pub fn list_live_outputs(&self) -> Result<Vec<VoucherSecret>> {
         let conn = self
             .conn
             .lock()

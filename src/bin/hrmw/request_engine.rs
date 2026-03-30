@@ -938,9 +938,9 @@ async fn send_request(
         if !request
             .headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("x-harmoniis-payment-rail"))
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-payment-rail"))
         {
-            builder = builder.header("X-Harmoniis-Payment-Rail", rail_name(rail));
+            builder = builder.header("X-Payment-Rail", rail_name(rail));
         }
     }
     if let Some((name, value)) = payment_header {
@@ -950,7 +950,7 @@ async fn send_request(
         builder = builder.header("X-Harmoniis-Payment-Challenge", challenge_id);
     }
     if let Some(rail) = settled_rail {
-        builder = builder.header("X-Harmoniis-Payment-Rail", rail_name(rail));
+        builder = builder.header("X-Payment-Rail", rail_name(rail));
     }
     if !request.query.is_empty() {
         builder = builder.query(&request.query);
