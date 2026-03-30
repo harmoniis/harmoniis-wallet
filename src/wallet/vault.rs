@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
-use crate::keychain::SLOT_FAMILY_VAULT;
-use crate::wallet::WalletCore;
+use super::keychain::SLOT_FAMILY_VAULT;
+use super::WalletCore;
 
 const VAULT_HKDF_SALT: &[u8] = b"harmoniis-wallet:derived-vault:v1";
 
@@ -99,7 +99,7 @@ impl VaultRootMaterial {
 #[cfg(test)]
 mod tests {
     use super::VaultRootMaterial;
-    use crate::keychain::{HdKeychain, SLOT_FAMILY_VAULT};
+    use crate::wallet::keychain::{HdKeychain, SLOT_FAMILY_VAULT};
 
     #[test]
     fn derives_domain_separated_material() {

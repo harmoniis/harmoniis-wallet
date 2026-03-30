@@ -10,10 +10,8 @@ use bdk_wallet::{
     ChangeSet, KeychainKind, SignOptions, TxOrdering, Wallet, WalletPersister,
 };
 
-use crate::{
-    error::{Error, Result},
-    wallet::RgbWallet,
-};
+use crate::error::{Error, Result};
+use super::RgbWallet;
 
 #[derive(Debug, Clone)]
 pub struct BitcoinSyncSnapshot {

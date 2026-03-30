@@ -27,7 +27,7 @@ use bdk_wallet::{KeychainKind, SignOptions, TxOrdering, Wallet as BdkWallet};
 use rand::SeedableRng;
 use rusqlite::params;
 
-use crate::bitcoin::DeterministicBitcoinWallet;
+use super::bitcoin::DeterministicBitcoinWallet;
 use crate::error::{Error, Result};
 
 /// Default Arkade ASP URL (mainnet).

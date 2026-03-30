@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::identity::Identity;
-use crate::keychain::HdKeychain;
+use super::keychain::HdKeychain;
 use crate::types::{Certificate, Contract};
 
 use super::WalletCore;

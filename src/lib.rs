@@ -1,17 +1,22 @@
 pub mod arbiter;
-pub mod ark;
-pub mod bitcoin;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod identity;
-pub mod keychain;
 pub mod marketplace;
 pub mod miner;
 pub mod types;
-pub mod vault;
-pub mod voucher_wallet;
 pub mod wallet;
+
+// These modules moved into wallet/.
+// Backward-compatible re-exports at crate root:
+pub use wallet::keychain;
+pub use wallet::vault;
+pub use wallet::bitcoin;
+pub use wallet::ark;
+pub mod voucher_wallet {
+    pub use crate::wallet::voucher::*;
+}
 
 /// Backward-compatible re-export. New code should use `marketplace` directly.
 pub mod client {

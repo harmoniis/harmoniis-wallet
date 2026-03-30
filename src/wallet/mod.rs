@@ -7,6 +7,12 @@ pub mod snapshots;
 pub mod storage;
 pub mod webcash;
 
+pub mod keychain;
+pub mod vault;
+pub mod bitcoin;
+pub mod ark;
+pub mod voucher;
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
@@ -15,10 +21,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{Error, Result},
     identity::Identity,
-    keychain::{
-        HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT,
-        SLOT_FAMILY_VAULT,
-    },
+};
+use keychain::{
+    HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT,
+    SLOT_FAMILY_VAULT,
 };
 
 use schema::{

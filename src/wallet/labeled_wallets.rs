@@ -15,7 +15,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::keychain::MAX_LABELED_WALLETS;
+use super::keychain::MAX_LABELED_WALLETS;
 
 use super::schema::canonical_label;
 use super::WalletCore;
