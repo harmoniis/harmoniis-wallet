@@ -82,8 +82,8 @@ impl WalletConfig {
     /// - `HARMONIIS_ARK_ASP_URL` — Arkade ASP URL
     /// - `HARMONIIS_ARK_BOLTZ_URL` — Boltz exchange API URL
     /// - `HARMONIIS_WEBCASH_SERVER_URL` — Webcash server URL
-    /// - `HARMONIIS_WALLET_S3_BUCKET` — S3 bucket
-    /// - `HARMONIIS_WALLET_S3_PREFIX` — S3 key prefix
+    /// - `HRMW_WALLET_S3_BUCKET` — S3 bucket
+    /// - `HRMW_WALLET_S3_PREFIX` — S3 key prefix
     /// - `HARMONIIS_MASTER_MNEMONIC_ARN` — Secrets Manager ARN
     pub fn from_env() -> Self {
         let mut config = Self::default();
@@ -119,10 +119,10 @@ impl WalletConfig {
         if let Ok(v) = std::env::var("HARMONIIS_WEBCASH_SERVER_URL") {
             config.webcash_server_url = v;
         }
-        if let Ok(v) = std::env::var("HARMONIIS_WALLET_S3_BUCKET") {
+        if let Ok(v) = std::env::var("HRMW_WALLET_S3_BUCKET") {
             config.s3_bucket = Some(v);
         }
-        if let Ok(v) = std::env::var("HARMONIIS_WALLET_S3_PREFIX") {
+        if let Ok(v) = std::env::var("HRMW_WALLET_S3_PREFIX") {
             config.s3_prefix = v;
         }
         if let Ok(v) = std::env::var("HARMONIIS_MASTER_MNEMONIC_ARN") {
