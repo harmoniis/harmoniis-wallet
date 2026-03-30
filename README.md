@@ -393,6 +393,52 @@ hrmw key import --mnemonic "word1 word2 ... word12" --force
 hrmw recover deterministic --pgp-start 0 --pgp-end 999
 ```
 
+## Module Structure
+
+```
+src/
+  lib.rs                   # public API, re-exports, backward-compat shims
+  config.rs                # WalletConfig (centralized configuration)
+  wallet/
+    mod.rs                 # WalletCore (was RgbWallet)
+    schema.rs              # SQLite schema / migrations
+    identities.rs          # PGP identity management
+    payments.rs            # payment rail logic
+    contracts.rs           # RGB contract operations
+    snapshots.rs           # JSON snapshot import/export
+    webcash.rs             # re-exports from webylib (SecretWebcash, Amount, etc.)
+    storage.rs             # S3 wallet backup (behind s3-storage feature)
+  marketplace/
+    mod.rs                 # HarmoniisClient (was client/)
+    identities.rs          # identity registration
+    posts.rs               # timeline posting
+    storage.rs             # marketplace storage helpers
+    timeline.rs            # timeline queries
+    ...
+  actors/
+    mod.rs                 # actix actor infrastructure (behind actix-actors feature)
+    wallet_actor.rs
+    webcash_actor.rs
+    payment_ledger_actor.rs
+```
+
+Backward-compatible re-exports in `lib.rs`:
+- `pub type RgbWallet = WalletCore` -- existing code continues to compile.
+- `pub mod client = marketplace` -- old import paths still work.
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `bundled-sqlite` | on | Compile SQLite from source |
+| `securities` | off | Dormant Phase 3 security types |
+| `actix-actors` | off | Actix actor wrappers for wallet, webcash, and payment ledger |
+| `s3-storage` | off | S3 wallet backup + AWS Secrets Manager integration |
+
+### Configuration
+
+`WalletConfig` centralizes runtime settings (API base URL, wallet path, network, payment rail preferences) and is threaded through constructors instead of scattered env reads.
+
 ## Build and Test
 
 ```bash

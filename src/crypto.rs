@@ -1,8 +1,8 @@
-use rand::{rngs::OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 /// Generate a random 32-byte secret as 64-char lowercase hex.
-/// Uses the OS CSPRNG directly (same entropy source as root key generation).
+/// Uses OS-provided CSPRNG for cryptographic security.
 pub fn generate_secret_hex() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);

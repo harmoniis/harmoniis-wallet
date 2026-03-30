@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
 use crate::keychain::SLOT_FAMILY_VAULT;
-use crate::wallet::RgbWallet;
+use crate::wallet::WalletCore;
 
 const VAULT_HKDF_SALT: &[u8] = b"harmoniis-wallet:derived-vault:v1";
 
@@ -25,7 +25,7 @@ pub struct VaultRootMaterial {
 }
 
 impl VaultRootMaterial {
-    pub fn from_wallet(wallet: &RgbWallet) -> Result<Self> {
+    pub fn from_wallet(wallet: &WalletCore) -> Result<Self> {
         let slot_hex = wallet.derive_vault_master_key_hex()?;
         Self::from_slot_hex(&slot_hex)
     }

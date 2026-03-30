@@ -1,6 +1,6 @@
 //! Voucher API client — health_check and replace calls.
 
-use crate::client::HarmoniisClient;
+use crate::marketplace::HarmoniisClient;
 use crate::error::Result;
 use crate::types::{VoucherProof, VoucherSecret};
 

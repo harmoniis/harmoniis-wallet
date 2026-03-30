@@ -9,100 +9,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [0.1.42] — 2026-03-29
-
-### Added
-
-- **Device selection**: `hrmw webminer list-devices` shows one entry per
-  physical GPU with simple numeric IDs.  `--device 0,1` on `webminer run/start`
-  selects specific GPUs.  Omitting `--device` uses all GPUs (backward
-  compatible).  CPU is not a device — use `--backend cpu` / `--cpu-threads`.
-- **Mixed multi-GPU**: `CompositeBackend` enables simultaneous mining across
-  CUDA + Vulkan/DX12 backends.  Work split proportionally by benchmark weight.
-  Each GPU mines its own full 1M nonce work unit independently at 100% capacity.
+## [0.2.0] — 2026-03-29
 
 ### Changed
 
-- **Upgrade wgpu 24 to 28**: new `device_pci_bus_id` field uniquely identifies
-  physical GPUs by PCIe slot address (e.g. `0000:01:00.0`), even for identical
-  cards.  Adapters (Vulkan, DX12, Metal) for the same physical GPU are grouped
-  automatically — the user only sees devices, never adapters.
-- AMD Vulkan now works directly (wgpu 28 fixed naga shader compiler crash).
-  467 Mh/s on RX 580 (was 428 via DX12 fallback on wgpu 24).
-- CUDA panic suppression: `cudarc` panic messages when CUDA DLLs are missing
-  are now silenced.
-- Subprocess GPU probe uses adapter identity `(vendor, device, backend)` instead
-  of enumeration index — deterministic across processes for multi-GPU.
-
-## [0.1.41] — 2026-03-29
-
-### Fixed
-
-- **Multi-GPU mining**: the subprocess GPU probe used adapter enumeration
-  indices which are not stable across process boundaries.  With 2 physical
-  GPUs (e.g. RX 590 + RX 580), only 1 was usable.  Fixed by identifying
-  adapters by `(vendor, device, backend)` identity triple instead of index.
-  Both GPUs now mine in parallel with proportional work distribution.
-
-## [0.1.40] — 2026-03-29
+- **Breaking module reorganization** (public API preserved via re-exports):
+  - `wallet.rs` split into `wallet/` module with focused files: `mod.rs`,
+    `schema.rs`, `identities.rs`, `payments.rs`, `contracts.rs`, `snapshots.rs`.
+  - `client/` renamed to `marketplace/` with `timeline.rs` split out from the
+    monolithic client module.
+  - Core wallet type renamed `WalletCore`; `RgbWallet` remains as a type alias.
+  - `pub mod client` shim re-exports `marketplace` for backward compatibility.
 
 ### Added
 
-- **Bitcoin wallet persistence**: BDK file-store backend saves UTXO cache,
-  address indices, and sync state to `bitcoin.taproot.dat` / `bitcoin.segwit.dat`.
-  Subsequent syncs load cached state.  Fully recoverable from master key.
-- **Subprocess GPU probe**: GPU pipeline creation is tested in a child process
-  before use.  If the GPU driver segfaults (known AMD Vulkan issue on Polaris),
-  the adapter is skipped and the next one (e.g. DX12) is tried automatically.
-  RX 580 now mines at ~485 Mh/s via DX12 fallback.
-- **CUDA on Windows**: the `cuda` feature now compiles on all platforms (was
-  Linux-only).  `cudarc` loads the NVIDIA driver at runtime via
-  `fallback-dynamic-loading`; gracefully falls back to wgpu when unavailable.
-  Zero change to existing CUDA behaviour on Linux.
-- **Wallet key protection**: `RgbWallet::open()` now refuses to generate new
-  keys if existing key material is missing — returns `KeyMaterialMissing` error
-  instead of silently replacing the wallet.  Prevents accidental money loss from
-  metadata corruption.
-- **Windows self-update fix**: `hrmw upgrade` on Windows now renames the running
-  binary aside (`.old.exe`) before replacing it, avoiding the "access denied"
-  error from the OS file lock.
-- **Interactive `--accept-terms` prompt**: `webminer run` and `webminer start`
-  now prompt the user to accept terms interactively when the flag is not passed.
-  Declining exits cleanly.
-- `uninstall.sh` (Linux/macOS/FreeBSD) and `uninstall.ps1` (Windows) — remove
-  the binary and PATH entry.  Wallet data at `~/.harmoniis/` is never touched.
-
-### Changed
-
-- **WGSL shader optimised** to match CUDA performance:
-  - Rolling 16-word message schedule (was 64-word; 4x less register pressure).
-  - Packed 3-word atomic output (was 11); host re-verifies hash from nonce,
-    eliminating a TOCTOU race condition in the shader output.
-  - Pre-allocated input/result GPU buffers (eliminates per-dispatch allocations).
-- OpenGL backend removed from wgpu enumeration — only Vulkan, DX12, and Metal
-  are used for compute.
-- `split_assignments_for_weights()` extracted to shared `miner::mod` — was
-  duplicated in `multi_gpu.rs` and `multi_cuda.rs`.
-- Witness secret generation upgraded from `thread_rng()` to `OsRng` (OS CSPRNG)
-  for defence-in-depth; matches root key and identity key entropy source.
-- Self-update error messages now platform-appropriate (no "sudo" on Windows).
-- `install.ps1` uses Windows native `tar.exe` (avoids MSYS2 tar path conflicts)
-  and broadcasts `WM_SETTINGCHANGE` so open shells pick up PATH immediately.
-
-### Fixed
-
-- **Voucher pay/merge atomicity**: three-phase commit prevents money loss if the
-  process crashes between server acceptance and local database update.  Pending
-  operations are recovered on next wallet open via `recover_pending()`.
-- **Windows miner daemon**: `is_running()` now verifies process alive via
-  `tasklist` (was trusting stale PID file); `start()` detaches child with
-  `CREATE_NO_WINDOW | DETACHED_PROCESS`; `stop()` terminates via `taskkill`
-  (was "not implemented on this platform").
-- **CUDA panic catch**: `cudarc` panics when CUDA DLLs are missing;
-  `catch_unwind` around `CudaContext::device_count()` prevents crash on
-  AMD-only systems.  Falls through to wgpu gracefully.
-- Voucher insert amount overflow now returns error instead of silently clamping
-  to `i64::MAX`.
+- New `config.rs` with `WalletConfig` for centralized runtime configuration
+  (API base, wallet path, network, payment rail preferences).
+- New `wallet/webcash.rs` re-exporting webylib types (`SecretWebcash`, `Amount`,
+  `PublicWebcash`, etc.) so downstream crates no longer need a direct webylib
+  dependency.
+- New `actors/` module behind `actix-actors` feature flag with `WalletActor`,
+  `WebcashActor`, and `PaymentLedgerActor`.
+- New `wallet/storage.rs` behind `s3-storage` feature flag for S3 wallet backup
+  and AWS Secrets Manager integration.
 
 ## [0.1.39] — 2026-03-26
 
@@ -466,7 +395,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.39...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.39...v0.2.0
 [0.1.39]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.39
 [0.1.12]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.12
 [0.1.11]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.11

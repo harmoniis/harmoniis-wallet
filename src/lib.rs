@@ -1,16 +1,25 @@
 pub mod arbiter;
 pub mod ark;
 pub mod bitcoin;
-pub mod client;
+pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod identity;
 pub mod keychain;
+pub mod marketplace;
 pub mod miner;
 pub mod types;
 pub mod vault;
 pub mod voucher_wallet;
 pub mod wallet;
+
+/// Backward-compatible re-export. New code should use `marketplace` directly.
+pub mod client {
+    pub use crate::marketplace::*;
+}
+
+#[cfg(feature = "actix-actors")]
+pub mod actors;
 
 // Securities module — DORMANT. Compiled only when feature = "securities" is set.
 // Do NOT enable in production until Phase 3 is released.
@@ -31,6 +40,11 @@ pub use wallet::{
     PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
     PaymentTransactionRecord, PaymentTransactionUpdate, PgpIdentityRecord, PgpIdentitySnapshot,
     RgbWallet, WalletSlotRecord, WalletSnapshot,
+};
+
+// Webcash types re-exported from webylib (single dependency for consumers).
+pub use wallet::webcash::{
+    Amount as WebcashAmount, PublicWebcash, SecretWebcash, WebcashServerClient, WebcashWallet,
 };
 
 #[cfg(feature = "securities")]

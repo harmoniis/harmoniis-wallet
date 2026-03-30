@@ -3,40 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{
-    client::{apply_payment_header, HarmoniisClient, PaymentSecret},
-    error::{Error, Result},
-};
+use crate::error::{Error, Result};
 
-// ── Request types ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterRequest {
-    pub nickname: String,
-    pub pgp_public_key: String, // hex Ed25519 pubkey (backend accepts this field name)
-    pub signature: String,      // sign("register:{nickname}")
-    pub about: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteIdentityRequest {
-    pub fingerprint: String,
-    pub signature: String, // sign("delete_identity:{fingerprint}")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DonationClaimRequest {
-    pub pgp_public_key: String,
-    pub signature: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DonationClaimResponse {
-    pub status: String,
-    #[serde(default)]
-    pub secret: Option<String>,
-    pub message: Option<String>,
-}
+use super::{apply_payment_header, HarmoniisClient, PaymentSecret};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostAttachment {
@@ -50,35 +19,6 @@ pub struct PostAttachment {
     pub url: Option<String>,
     #[serde(default)]
     pub is_public: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoragePresignRequest {
-    pub fingerprint: String,
-    pub file_path: String,
-    pub content_type: String,
-    pub is_public: bool,
-    pub signature: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoragePresignResponse {
-    pub presigned_url: String,
-    pub s3_key: String,
-    pub public_url: Option<String>,
-    pub expires_in: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileUpdateRequest {
-    pub fingerprint: String,
-    pub signature: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub about: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skills: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_picture: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,8 +78,8 @@ pub struct PublishPostRequest {
     pub author_fingerprint: String,
     pub author_nick: String,
     pub content: String,
-    pub post_type: String,             // "bid" | "service_offer" | "general"
-    pub witness_proof: Option<String>, // for bids
+    pub post_type: String,
+    pub witness_proof: Option<String>,
     pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
@@ -148,7 +88,7 @@ pub struct PublishPostRequest {
     pub attachments: Vec<PostAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_metadata: Option<PostActivityMetadata>,
-    pub signature: String, // sign("post:{content}")
+    pub signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_terms: Option<bool>,
 }
@@ -158,21 +98,21 @@ pub struct RatePostRequest {
     pub post_id: String,
     pub actor_fingerprint: String,
     pub vote: String,
-    pub signature: String, // sign("vote:{post_id}:{vote}")
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletePostRequest {
     pub post_id: String,
     pub author_fingerprint: String,
-    pub signature: String, // sign("delete_post:{post_id}")
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePostRequest {
     pub post_id: String,
     pub author_fingerprint: String,
-    pub signature: String, // sign("update_post:{post_id}")
+    pub signature: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,71 +123,13 @@ pub struct UpdatePostRequest {
     pub activity_metadata: Option<PostActivityMetadata>,
 }
 
-// ── Client methods ────────────────────────────────────────────────────────────
-
 impl HarmoniisClient {
-    /// `POST /api/v1/donations`
-    /// Returns `{ status: donated|no_donation, secret?, message? }`.
-    pub async fn claim_donation(
-        &self,
-        req: &DonationClaimRequest,
-    ) -> Result<DonationClaimResponse> {
-        let resp = self
-            .http
-            .post(self.url("donations"))
-            .json(req)
-            .send()
-            .await?;
-        let resp = Self::check_status(resp).await?;
-        Ok(resp.json().await?)
-    }
-
-    pub async fn register_identity(&self, req: &RegisterRequest, webcash: &str) -> Result<String> {
-        self.register_identity_with_payment(req, PaymentSecret::Webcash(webcash))
-            .await
-    }
-
-    /// `POST /api/v1/identity`
-    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
-    /// Returns the fingerprint.
-    pub async fn register_identity_with_payment(
-        &self,
-        req: &RegisterRequest,
-        payment: PaymentSecret<'_>,
-    ) -> Result<String> {
-        let resp = self.http.post(self.url("identity"));
-        let resp = apply_payment_header(resp, payment).json(req).send().await?;
-        let resp = Self::check_status(resp).await?;
-        let body: serde_json::Value = resp.json().await?;
-        let fp = body
-            .get("fingerprint")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::InvalidFormat("missing fingerprint in register response".into()))?
-            .to_string();
-        Ok(fp)
-    }
-
-    /// `POST /api/v1/identity/delete`
-    /// Requires author signature for `delete_identity:{fingerprint}`.
-    pub async fn delete_identity(&self, req: &DeleteIdentityRequest) -> Result<()> {
-        let resp = self
-            .http
-            .post(self.url("identity/delete"))
-            .json(req)
-            .send()
-            .await?;
-        Self::check_status(resp).await?;
-        Ok(())
-    }
-
     pub async fn publish_post(&self, req: &PublishPostRequest, webcash: &str) -> Result<String> {
         self.publish_post_with_payment(req, PaymentSecret::Webcash(webcash))
             .await
     }
 
     /// `POST /api/v1/timeline`
-    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
-    /// Returns the post ID.
     pub async fn publish_post_with_payment(
         &self,
         req: &PublishPostRequest,
@@ -271,7 +153,6 @@ impl HarmoniisClient {
     }
 
     /// `POST /api/v1/profiles/rate`
-    /// Requires a payment header (`X-Webcash-Secret` or `X-Bitcoin-Secret`).
     pub async fn rate_post_with_payment(
         &self,
         req: &RatePostRequest,
@@ -316,21 +197,7 @@ impl HarmoniisClient {
         Ok(())
     }
 
-    /// `GET /api/v1/profile?fingerprint={fp}`
-    /// Returns the profile JSON (includes `public_key` field).
-    pub async fn get_profile(&self, fingerprint: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .get(self.url("profile"))
-            .query(&[("fingerprint", fingerprint)])
-            .send()
-            .await?;
-        let resp = Self::check_status(resp).await?;
-        Ok(resp.json().await?)
-    }
-
     /// `GET /api/v1/posts/{post_id}`
-    /// Returns `{ post: {...}, author_profile: {...} }`.
     pub async fn get_post(&self, post_id: &str) -> Result<serde_json::Value> {
         let resp = self
             .http
@@ -341,70 +208,7 @@ impl HarmoniisClient {
         Ok(resp.json().await?)
     }
 
-    /// `POST /api/v1/storage/presign`
-    pub async fn storage_presign(
-        &self,
-        req: &StoragePresignRequest,
-    ) -> Result<StoragePresignResponse> {
-        let resp = self
-            .http
-            .post(self.url("storage/presign"))
-            .json(req)
-            .send()
-            .await?;
-        let resp = Self::check_status(resp).await?;
-        Ok(resp.json().await?)
-    }
-
-    /// Upload bytes to an S3 presigned PUT URL.
-    pub async fn upload_presigned_bytes(
-        &self,
-        presigned_url: &str,
-        bytes: Vec<u8>,
-        content_type: &str,
-    ) -> Result<()> {
-        let resp = self
-            .http
-            .put(presigned_url)
-            .header("Content-Type", content_type)
-            .body(bytes)
-            .send()
-            .await?;
-        let status = resp.status().as_u16();
-        if (200..300).contains(&status) {
-            Ok(())
-        } else {
-            let body = resp.text().await.unwrap_or_default();
-            Err(Error::Api { status, body })
-        }
-    }
-
-    /// `POST /api/v1/profile/update`
-    pub async fn update_profile_picture(
-        &self,
-        fingerprint: &str,
-        profile_picture: &str,
-        signature: &str,
-    ) -> Result<()> {
-        let req = ProfileUpdateRequest {
-            fingerprint: fingerprint.to_string(),
-            signature: signature.to_string(),
-            about: None,
-            skills: None,
-            profile_picture: Some(profile_picture.to_string()),
-        };
-        let resp = self
-            .http
-            .post(self.url("profile/update"))
-            .json(&req)
-            .send()
-            .await?;
-        Self::check_status(resp).await?;
-        Ok(())
-    }
-
-    /// `POST /api/v1/timeline` with an encrypted payload for private messaging.
-    /// The `encrypted_payload` field carries the new witness secret for the seller.
+    /// `POST /api/v1/timeline` with encrypted payload for private messaging.
     pub async fn publish_encrypted_reply(
         &self,
         author_fingerprint: &str,
@@ -427,8 +231,6 @@ impl HarmoniisClient {
         .await
     }
 
-    /// `POST /api/v1/timeline` with an encrypted payload for private messaging.
-    /// The `encrypted_payload` field carries the new witness secret for the seller.
     pub async fn publish_encrypted_reply_with_payment(
         &self,
         author_fingerprint: &str,

@@ -28,11 +28,37 @@ const FAMILY_PGP: u32 = 4;
 const FAMILY_HARMONIA_VAULT: u32 = 5;
 const FAMILY_VOUCHER: u32 = 6;
 
-#[derive(Debug, Clone)]
 pub struct HdKeychain {
     mnemonic: Mnemonic,
     entropy: Vec<u8>,
     master_xpriv: Xpriv,
+}
+
+impl std::fmt::Debug for HdKeychain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HdKeychain")
+            .field("entropy", &"[redacted]")
+            .field("mnemonic", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Clone for HdKeychain {
+    fn clone(&self) -> Self {
+        Self {
+            mnemonic: Mnemonic::from_str(&self.mnemonic.to_string())
+                .expect("re-parsing known-valid mnemonic"),
+            entropy: self.entropy.clone(),
+            master_xpriv: self.master_xpriv,
+        }
+    }
+}
+
+impl Drop for HdKeychain {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.entropy.zeroize();
+    }
 }
 
 impl HdKeychain {

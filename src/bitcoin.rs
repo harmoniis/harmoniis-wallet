@@ -35,7 +35,6 @@ pub struct BitcoinSyncSnapshot {
     pub total_sats: u64,
 }
 
-#[derive(Debug, Clone)]
 pub struct DeterministicBitcoinWallet {
     network: Network,
     slot_seed: [u8; 32],
@@ -43,6 +42,31 @@ pub struct DeterministicBitcoinWallet {
     /// address indices, and sync state are stored locally.  When `None` the
     /// wallet is memory-only (full Esplora rescan every time).
     db_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for DeterministicBitcoinWallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeterministicBitcoinWallet")
+            .field("network", &self.network)
+            .field("slot_seed", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Clone for DeterministicBitcoinWallet {
+    fn clone(&self) -> Self {
+        Self {
+            network: self.network,
+            slot_seed: self.slot_seed,
+        }
+    }
+}
+
+impl Drop for DeterministicBitcoinWallet {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.slot_seed.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

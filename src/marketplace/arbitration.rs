@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{x25519, EphemeralSecret, PublicKey};
 
 use crate::{
-    client::{apply_payment_header, HarmoniisClient, PaymentSecret},
+    marketplace::{apply_payment_header, HarmoniisClient, PaymentSecret},
     crypto::sha256_bytes,
     error::{Error, Result},
     types::{WitnessProof, WitnessSecret},
