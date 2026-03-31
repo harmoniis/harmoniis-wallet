@@ -594,7 +594,7 @@ async fn recover_or_log_loss(
             }
         }
         AcquiredPayment::Voucher { secret, .. } => {
-            let voucher_client = HarmoniisClient::new(service_base_url);
+            let voucher_client = HarmoniisClient::new_direct(service_base_url);
             let voucher_wallet = open_voucher_wallet(wallet_path, wallet)?;
             if voucher_wallet
                 .reinsert_if_live(&voucher_client, secret)
@@ -820,7 +820,7 @@ async fn acquire_payment(
             })
         }
         PaymentRail::Voucher => {
-            let client = HarmoniisClient::new(service_base_url);
+            let client = HarmoniisClient::new_direct(service_base_url);
             let amount_units = directive.required_amount.parse::<u64>().with_context(|| {
                 format!("invalid voucher amount '{}'", directive.required_amount)
             })?;
