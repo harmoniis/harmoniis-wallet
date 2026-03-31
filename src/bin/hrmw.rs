@@ -371,8 +371,8 @@ enum BitcoinCmd {
         /// Esplora base URL (defaults per network)
         #[arg(long)]
         esplora: Option<String>,
-        /// Target fee rate in sat/vB
-        #[arg(long, default_value_t = 2)]
+        /// Target fee rate in sat/vB (default 10 for reasonable mainnet confirmation)
+        #[arg(long, default_value_t = 10)]
         fee_rate_sat_vb: u64,
         /// Gap limit used for full scan
         #[arg(long, default_value_t = 20)]
