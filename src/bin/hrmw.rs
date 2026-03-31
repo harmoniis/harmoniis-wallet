@@ -1831,7 +1831,14 @@ async fn main() -> anyhow::Result<()> {
                         "Voucher wallet: {}",
                         default_voucher_wallet_path(&wallet_path).display()
                     );
-                    println!("Balance:        {} credits", stats.balance_units);
+                    let whole = stats.balance_units / 100_000_000;
+                    let frac = stats.balance_units % 100_000_000;
+                    if frac == 0 {
+                        println!("Balance:        {} credits", whole);
+                    } else {
+                        let frac_str = format!("{:08}", frac).trim_end_matches('0').to_string();
+                        println!("Balance:        {}.{} credits", whole, frac_str);
+                    }
                     println!("Live outputs:   {}", stats.unspent_outputs);
                     println!("Total outputs:  {}", stats.total_outputs);
                     println!("Spent outputs:  {}", stats.spent_outputs);
@@ -1845,7 +1852,10 @@ async fn main() -> anyhow::Result<()> {
                         "Inserted voucher into {}",
                         default_voucher_wallet_path(&wallet_path).display()
                     );
-                    println!("Balance: {} credits", stats.balance_units);
+                    let w = stats.balance_units / 100_000_000;
+                    let f = stats.balance_units % 100_000_000;
+                    if f == 0 { println!("Balance: {} credits", w); }
+                    else { println!("Balance: {}.{} credits", w, format!("{:08}", f).trim_end_matches('0')); }
                 }
                 VoucherCmd::Pay { amount, memo } => {
                     let parsed: f64 = amount.parse()
