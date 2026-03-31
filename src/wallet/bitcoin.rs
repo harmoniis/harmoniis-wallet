@@ -253,9 +253,21 @@ impl DeterministicBitcoinWallet {
             ))
         })?;
 
-        let (mut wallet, mut conn) = self.open_wallet(BitcoinAddressKind::Taproot)?;
-        let client = esplora_client::Builder::new(esplora_url).build_blocking();
+        // Always create a fresh wallet with the xprv to ensure we can sign.
+        // The BDK persisted changeset may not retain the private key material.
+        let xprv = Xpriv::new_master(self.network, &self.slot_seed)
+            .context("failed to create BIP32 master for spend")
+            .map_err(Error::Other)?;
+        let mut wallet = bdk_wallet::Wallet::create(
+            Bip86(xprv, KeychainKind::External),
+            Bip86(xprv, KeychainKind::Internal),
+        )
+        .network(self.network)
+        .create_wallet_no_persist()
+        .context("failed to create signing wallet")
+        .map_err(Error::Other)?;
 
+        let client = esplora_client::Builder::new(esplora_url).build_blocking();
         let request = wallet.start_full_scan().build();
         let response = client
             .full_scan(request, stop_gap.max(1), parallel_requests.max(1))
@@ -282,8 +294,14 @@ impl DeterministicBitcoinWallet {
             )
             .map_err(|e| Error::Other(anyhow::anyhow!("sign tx failed: {e}")))?;
         if !finalized {
+            // Diagnose: log which inputs were not signed
+            let unsigned_count = psbt.inputs.iter().enumerate()
+                .filter(|(_, input)| input.final_script_witness.is_none() && input.tap_key_sig.is_none())
+                .count();
+            let total_inputs = psbt.inputs.len();
             return Err(Error::Other(anyhow::anyhow!(
-                "transaction did not finalize"
+                "transaction did not finalize: {unsigned_count}/{total_inputs} inputs unsigned. \
+                 Check that the wallet's key derivation matches the UTXOs' scriptPubKey."
             )));
         }
 
@@ -295,7 +313,7 @@ impl DeterministicBitcoinWallet {
             .broadcast(&tx)
             .map_err(|e| Error::Other(anyhow::anyhow!("broadcast failed: {e}")))?;
 
-        Self::persist_wallet(&mut wallet, &mut conn)?;
+        // Fresh wallet (no persistence needed — UTXOs are re-scanned each time)
 
         Ok(txid)
     }
