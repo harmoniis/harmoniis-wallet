@@ -388,7 +388,7 @@ impl VoucherWallet {
         Ok(format!(
             "Merged {} outputs into {} credits.",
             inputs.len(),
-            merged.amount_units
+            crate::types::voucher_format_decimal(merged.amount_units)
         ))
     }
 
@@ -530,7 +530,9 @@ fn select_inputs(live: &[VoucherSecret], amount_units: u64) -> Result<(Vec<Vouch
     }
     if total < amount_units {
         return Err(Error::Other(anyhow::anyhow!(
-            "insufficient voucher balance: need {amount_units} credits, have {total}"
+            "insufficient voucher balance: need {} credits, have {}",
+            crate::types::voucher_format_decimal(amount_units),
+            crate::types::voucher_format_decimal(total)
         )));
     }
     Ok((inputs, total))

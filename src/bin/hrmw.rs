@@ -509,9 +509,9 @@ enum VoucherCmd {
     },
     /// Create a spend token from the local wallet
     Pay {
-        /// Amount in credits (integer)
+        /// Amount in credits (e.g. 1, 0.5, 0.00000001)
         #[arg(long)]
-        amount: u64,
+        amount: String,
         /// Optional memo
         #[arg(long, default_value = "hrmw voucher payment")]
         memo: String,
@@ -1848,7 +1848,17 @@ async fn main() -> anyhow::Result<()> {
                     println!("Balance: {} credits", stats.balance_units);
                 }
                 VoucherCmd::Pay { amount, memo } => {
-                    let output = voucher_wallet.pay(&client, amount, &memo).await?;
+                    let parsed: f64 = amount.parse()
+                        .map_err(|_| anyhow::anyhow!("invalid amount: '{amount}'"))?;
+                    if parsed <= 0.0 {
+                        anyhow::bail!("amount must be positive");
+                    }
+                    // Convert to atomic units (8 decimal places, like webcash wats)
+                    let amount_units = (parsed * 100_000_000.0).round() as u64;
+                    if amount_units == 0 {
+                        anyhow::bail!("amount too small — minimum 0.00000001 credits");
+                    }
+                    let output = voucher_wallet.pay(&client, amount_units, &memo).await?;
                     println!("Voucher payment:");
                     println!("{}", output.display());
                 }

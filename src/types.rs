@@ -432,6 +432,70 @@ impl StablecashProof {
     }
 }
 
+// ── Voucher decimal helpers ──────────────────────────────────────────────────
+
+/// 1 credit = 100,000,000 atomic units (same as webcash: 1 webcash = 100,000,000 wats).
+const VOUCHER_ATOMIC_PER_CREDIT: u64 = 100_000_000;
+
+/// Parse a decimal amount string (integer or fractional, up to 8 decimal places)
+/// into atomic units. Returns error if invalid or more than 8 decimal places.
+///
+/// Examples: "5" -> 500_000_000, "0.5" -> 50_000_000, "0.00000001" -> 1
+fn voucher_parse_decimal(amount_str: &str) -> Result<u64> {
+    if let Some(dot_pos) = amount_str.find('.') {
+        let int_part = &amount_str[..dot_pos];
+        let frac_part = &amount_str[dot_pos + 1..];
+        if frac_part.is_empty() {
+            return Err(Error::InvalidFormat(format!(
+                "trailing dot with no decimals: {amount_str}"
+            )));
+        }
+        if frac_part.len() > 8 {
+            return Err(Error::InvalidFormat(format!(
+                "too many decimal places (max 8): {amount_str}"
+            )));
+        }
+        let int_val: u64 = if int_part.is_empty() {
+            0
+        } else {
+            int_part.parse().map_err(|_| {
+                Error::InvalidFormat(format!("invalid integer part: {amount_str}"))
+            })?
+        };
+        let padded = format!("{:0<8}", frac_part);
+        let frac_val: u64 = padded.parse().map_err(|_| {
+            Error::InvalidFormat(format!("invalid fractional part: {amount_str}"))
+        })?;
+        let total = int_val
+            .checked_mul(VOUCHER_ATOMIC_PER_CREDIT)
+            .and_then(|v| v.checked_add(frac_val))
+            .ok_or_else(|| Error::InvalidFormat(format!("amount overflow: {amount_str}")))?;
+        Ok(total)
+    } else {
+        let int_val: u64 = amount_str
+            .parse()
+            .map_err(|_| Error::InvalidFormat(format!("invalid amount: {amount_str}")))?;
+        int_val
+            .checked_mul(VOUCHER_ATOMIC_PER_CREDIT)
+            .ok_or_else(|| Error::InvalidFormat(format!("amount overflow: {amount_str}")))
+    }
+}
+
+/// Format atomic units as a clean decimal string.
+/// No trailing zeros for whole numbers: 500_000_000 -> "5", not "5.00000000".
+/// Fractional: 50_000_000 -> "0.5", 1 -> "0.00000001".
+pub fn voucher_format_decimal(atomic: u64) -> String {
+    let whole = atomic / VOUCHER_ATOMIC_PER_CREDIT;
+    let frac = atomic % VOUCHER_ATOMIC_PER_CREDIT;
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        let frac_str = format!("{:08}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{whole}.{trimmed}")
+    }
+}
+
 // ── VoucherSecret ────────────────────────────────────────────────────────────
 
 /// Prepaid credit bearer token — split/merge via replace endpoint.
@@ -439,7 +503,8 @@ impl StablecashProof {
 /// Wire format: `v{amount}:secret:{hex64}`
 /// Proof format: `v{amount}:public:{sha256_hex64}`
 ///
-/// Amount is in integer credits (1 credit = $1).
+/// Amount is in atomic units (1 credit = 100,000,000 atomic units).
+/// Supports 8 decimal places: `v0.00000001:secret:{hex}` = 1 atomic unit.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct VoucherSecret {
     pub amount_units: u64,
@@ -448,6 +513,7 @@ pub struct VoucherSecret {
 
 impl VoucherSecret {
     /// Generate a fresh random Voucher secret.
+    /// `amount_units` is in atomic units.
     pub fn generate(amount_units: u64) -> Self {
         Self {
             amount_units,
@@ -456,6 +522,8 @@ impl VoucherSecret {
     }
 
     /// Parse from `v{amount}:secret:{hex64}`.
+    /// Amount can be integer ("5") or decimal ("0.5", "0.00000001").
+    /// Internally stored as atomic units.
     pub fn parse(s: &str) -> Result<Self> {
         if !s.starts_with('v') {
             return Err(Error::InvalidFormat(format!(
@@ -468,9 +536,7 @@ impl VoucherSecret {
             .find(mid)
             .ok_or_else(|| Error::InvalidFormat(format!("missing ':secret:' in: {s}")))?;
         let amount_str = &rest[..sep];
-        let amount_units: u64 = amount_str
-            .parse()
-            .map_err(|_| Error::InvalidFormat(format!("invalid amount in: {s}")))?;
+        let amount_units = voucher_parse_decimal(amount_str)?;
         let hex_value = &rest[sep + mid.len()..];
         if hex_value.len() != 64 || !hex_value.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(Error::InvalidFormat(format!(
@@ -484,8 +550,18 @@ impl VoucherSecret {
     }
 
     /// Serialize to wire format: `v{amount}:secret:{hex64}`
+    /// Amount displayed as clean decimal (no trailing zeros for whole credits).
     pub fn display(&self) -> String {
-        format!("v{}:secret:{}", self.amount_units, self.hex_value)
+        format!(
+            "v{}:secret:{}",
+            voucher_format_decimal(self.amount_units),
+            self.hex_value
+        )
+    }
+
+    /// Amount as a human-readable decimal string.
+    pub fn display_amount(&self) -> String {
+        voucher_format_decimal(self.amount_units)
     }
 
     /// Compute the public proof.
@@ -506,12 +582,14 @@ impl std::fmt::Debug for VoucherSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VoucherSecret")
             .field("amount_units", &self.amount_units)
+            .field("amount_display", &voucher_format_decimal(self.amount_units))
             .field("hex_value", &"[redacted]")
             .finish()
     }
 }
 
 /// Voucher public proof — `v{amount}:public:{sha256_hex64}`
+/// Amount is in atomic units (1 credit = 100,000,000 atomic units).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoucherProof {
     pub amount_units: u64,
@@ -530,9 +608,7 @@ impl VoucherProof {
         let sep = rest
             .find(mid)
             .ok_or_else(|| Error::InvalidFormat(format!("missing ':public:' in: {s}")))?;
-        let amount_units: u64 = rest[..sep]
-            .parse()
-            .map_err(|_| Error::InvalidFormat(format!("invalid amount in: {s}")))?;
+        let amount_units = voucher_parse_decimal(&rest[..sep])?;
         let public_hash = &rest[sep + mid.len()..];
         if public_hash.len() != 64 {
             return Err(Error::InvalidFormat(format!(
@@ -546,7 +622,11 @@ impl VoucherProof {
     }
 
     pub fn display(&self) -> String {
-        format!("v{}:public:{}", self.amount_units, self.public_hash)
+        format!(
+            "v{}:public:{}",
+            voucher_format_decimal(self.amount_units),
+            self.public_hash
+        )
     }
 }
 
