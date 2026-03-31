@@ -255,8 +255,7 @@ enum WebcashCmd {
     },
     /// Create a spend token from the local wallet
     Pay {
-        /// Amount in webcash decimal (e.g. 0.3)
-        #[arg(long)]
+        /// Amount in webcash decimal (e.g. 0.3, 1.5, 0.00000001)
         amount: String,
         /// Optional memo
         #[arg(long, default_value = "hrmw payment")]
@@ -510,7 +509,6 @@ enum VoucherCmd {
     /// Create a spend token from the local wallet
     Pay {
         /// Amount in credits (e.g. 1, 0.5, 0.00000001)
-        #[arg(long)]
         amount: String,
         /// Optional memo
         #[arg(long, default_value = "hrmw voucher payment")]
