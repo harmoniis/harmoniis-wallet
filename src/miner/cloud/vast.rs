@@ -201,7 +201,7 @@ impl VastClient {
         Ok(candidates)
     }
 
-    /// Create an instance from an offer ID.
+    /// Create an instance from an offer ID using the popular CUDA template.
     pub async fn create_instance(&self, offer_id: u64, onstart_script: &str) -> Result<u64> {
         let body = json!({
             "client_id": "me",

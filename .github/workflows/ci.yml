@@ -119,11 +119,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native builds — GPU enabled
+          # Native builds — GPU + CUDA enabled on Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
-            features: bundled-sqlite,gpu
+            features: bundled-sqlite,gpu,cuda
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64

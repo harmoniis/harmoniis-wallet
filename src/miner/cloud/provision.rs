@@ -209,6 +209,36 @@ pub async fn start(state: &InstanceState) -> Result<()> {
         "mkdir -p /root/.harmoniis/wallet",
     );
 
+    // Verify CUDA / GPU availability
+    println!("Checking GPU availability...");
+    match ssh::ssh_exec(&state.ssh_host, state.ssh_port, "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1") {
+        Ok(output) => {
+            println!("GPUs detected:");
+            for line in output.trim().lines() {
+                println!("  {line}");
+            }
+        }
+        Err(_) => {
+            println!("WARNING: nvidia-smi not available — GPUs may not be accessible.");
+            println!("  The miner may fall back to CPU. Check instance GPU setup.");
+        }
+    }
+
+    // Also check what hrmw sees
+    match ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        &format!("{REMOTE_HRMW} webminer list-devices 2>&1"),
+    ) {
+        Ok(output) => {
+            println!("hrmw GPU detection:");
+            for line in output.trim().lines() {
+                println!("  {line}");
+            }
+        }
+        Err(e) => println!("hrmw device detection failed: {e}"),
+    }
+
     // Start the miner
     let cmd =
         format!("{REMOTE_HRMW} webminer run --accept-terms --webcash-wallet {REMOTE_WALLET_PATH}");
@@ -389,7 +419,7 @@ pub fn info(label: &str) {
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    for i in 0..60 {
+    for i in 0..120 {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         match client.get_instance(instance_id).await {
             Ok(instance) if instance.is_running() => return Ok(instance),
@@ -406,7 +436,7 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             }
         }
     }
-    anyhow::bail!("Instance did not start within 10 minutes")
+    anyhow::bail!("Instance did not start within 20 minutes")
 }
 
 async fn wait_for_ssh(host: &str, port: u16) -> Result<()> {
