@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::error::{Error, Result};
 use super::keychain::SLOT_FAMILY_VAULT;
 use super::WalletCore;
+use crate::error::{Error, Result};
 
 const VAULT_HKDF_SALT: &[u8] = b"harmoniis-wallet:derived-vault:v1";
 

@@ -45,8 +45,9 @@ mod media;
 mod request_engine;
 use cli_support::{
     build_activity_metadata, build_post_attachments, check_master_in_password_manager,
-    default_voucher_wallet_path, default_webcash_wallet_path, extract_webcash_token, make_client,
-    next_contract_id, now_utc, open_or_create_wallet, open_voucher_wallet, open_webcash_wallet,
+    default_voucher_wallet_path, default_webcash_wallet_path, extract_webcash_token,
+    labeled_webcash_wallet_path, make_client, next_contract_id, now_utc,
+    open_labeled_webcash_wallet, open_or_create_wallet, open_voucher_wallet, open_webcash_wallet,
     parse_amount_to_units, parse_keywords_csv, remove_master_from_password_manager,
     resolve_wallet_path, store_master_in_password_manager, write_recovery_sidecar,
 };
@@ -247,11 +248,18 @@ enum DonationCmd {
 #[derive(Subcommand)]
 enum WebcashCmd {
     /// Show Webcash balance and output counts
-    Info,
+    Info {
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Insert a secret webcash token into the local wallet
     Insert {
         /// Webcash secret token: e<amount>:secret:<hex>
         secret: String,
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Create a spend token from the local wallet
     Pay {
@@ -260,18 +268,31 @@ enum WebcashCmd {
         /// Optional memo
         #[arg(long, default_value = "hrmw payment")]
         memo: String,
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Verify unspent outputs against the Webcash server
-    Check,
+    Check {
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Recover wallet outputs from deterministic master secret
     Recover {
         #[arg(long, default_value_t = 20)]
         gap_limit: usize,
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Consolidate many outputs into fewer outputs
     Merge {
         #[arg(long, default_value_t = 20)]
         group: usize,
+        /// Use a labeled sub-wallet (e.g. "mining") instead of the default
+        #[arg(long)]
+        label: Option<String>,
     },
 }
 
@@ -1065,6 +1086,44 @@ enum WebminerCmd {
         #[arg(long, name = "webcash-wallet")]
         webcash_wallet: Option<PathBuf>,
     },
+    /// Cloud mining on Vast.ai GPU instances
+    Cloud {
+        #[command(subcommand)]
+        cmd: CloudCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CloudCmd {
+    /// Search for GPU offers and provision a Vast.ai instance
+    Deploy {
+        /// Label for the mining wallet (e.g. "mining", "vast01")
+        #[arg(long, default_value = "mining")]
+        label: String,
+        /// Use a specific Vast.ai offer ID instead of auto-selecting
+        #[arg(long)]
+        machine: Option<u64>,
+    },
+    /// Start the miner on a deployed instance
+    Start,
+    /// Stop the miner (keeps instance running)
+    Stop,
+    /// Stop miner, download wallet, destroy instance
+    Destroy,
+    /// Show remote miner status and wallet balance
+    Status,
+    /// Show local mining wallet info
+    Info {
+        /// Label for the mining wallet
+        #[arg(long, default_value = "mining")]
+        label: String,
+    },
+    /// Set Vast.ai API key
+    #[command(name = "set-api-key")]
+    SetApiKey {
+        /// Your Vast.ai API key
+        key: String,
+    },
 }
 
 fn benchmark_status_line(measured_mhs: f64, target_mhs: f64) -> &'static str {
@@ -1741,24 +1800,34 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── webcash ───────────────────────────────────────────────────────────
-        Cmd::Webcash(WebcashCmd::Info) => {
+        Cmd::Webcash(WebcashCmd::Info { label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             let balance = webcash_wallet.balance().await?;
             let stats = webcash_wallet.stats().await?;
-            println!(
-                "Webcash wallet: {}",
-                default_webcash_wallet_path(&wallet_path).display()
-            );
+            let path = if let Some(lbl) = &label {
+                labeled_webcash_wallet_path(&wallet_path, lbl)
+            } else {
+                default_webcash_wallet_path(&wallet_path)
+            };
+            println!("Webcash wallet: {}", path.display());
             println!("Balance:        {}", balance);
             println!("Unspent:        {}", stats.unspent_webcash);
             println!("Total outputs:  {}", stats.total_webcash);
             println!("Spent outputs:  {}", stats.spent_webcash);
         }
 
-        Cmd::Webcash(WebcashCmd::Insert { secret }) => {
+        Cmd::Webcash(WebcashCmd::Insert { secret, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             let parsed = SecretWebcash::parse(&secret)
                 .map_err(|e| anyhow::anyhow!("invalid webcash secret format: {e}"))?;
             webcash_wallet
@@ -1766,16 +1835,26 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("failed to insert webcash")?;
             let balance = webcash_wallet.balance().await?;
-            println!(
-                "Inserted webcash into {}",
-                default_webcash_wallet_path(&wallet_path).display()
-            );
+            let path = if let Some(lbl) = &label {
+                labeled_webcash_wallet_path(&wallet_path, lbl)
+            } else {
+                default_webcash_wallet_path(&wallet_path)
+            };
+            println!("Inserted webcash into {}", path.display());
             println!("Balance: {balance}");
         }
 
-        Cmd::Webcash(WebcashCmd::Pay { amount, memo }) => {
+        Cmd::Webcash(WebcashCmd::Pay {
+            amount,
+            memo,
+            label,
+        }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             let parsed_amount = WebcashAmount::from_str(&amount)
                 .with_context(|| format!("invalid webcash amount '{amount}'"))?;
             let output = webcash_wallet
@@ -1787,9 +1866,13 @@ async fn main() -> anyhow::Result<()> {
             println!("{token}");
         }
 
-        Cmd::Webcash(WebcashCmd::Check) => {
+        Cmd::Webcash(WebcashCmd::Check { label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             webcash_wallet
                 .check()
                 .await
@@ -1797,9 +1880,13 @@ async fn main() -> anyhow::Result<()> {
             println!("Webcash check passed.");
         }
 
-        Cmd::Webcash(WebcashCmd::Recover { gap_limit }) => {
+        Cmd::Webcash(WebcashCmd::Recover { gap_limit, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             let summary = webcash_wallet
                 .recover_from_wallet(gap_limit)
                 .await
@@ -1807,9 +1894,13 @@ async fn main() -> anyhow::Result<()> {
             println!("{summary}");
         }
 
-        Cmd::Webcash(WebcashCmd::Merge { group }) => {
+        Cmd::Webcash(WebcashCmd::Merge { group, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = if let Some(lbl) = &label {
+                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
+            } else {
+                open_webcash_wallet(&wallet_path, &wallet).await?
+            };
             let summary = webcash_wallet
                 .merge(group)
                 .await
@@ -1852,11 +1943,19 @@ async fn main() -> anyhow::Result<()> {
                     );
                     let w = stats.balance_units / 100_000_000;
                     let f = stats.balance_units % 100_000_000;
-                    if f == 0 { println!("Balance: {} credits", w); }
-                    else { println!("Balance: {}.{} credits", w, format!("{:08}", f).trim_end_matches('0')); }
+                    if f == 0 {
+                        println!("Balance: {} credits", w);
+                    } else {
+                        println!(
+                            "Balance: {}.{} credits",
+                            w,
+                            format!("{:08}", f).trim_end_matches('0')
+                        );
+                    }
                 }
                 VoucherCmd::Pay { amount, memo } => {
-                    let parsed: f64 = amount.parse()
+                    let parsed: f64 = amount
+                        .parse()
                         .map_err(|_| anyhow::anyhow!("invalid amount: '{amount}'"))?;
                     if parsed <= 0.0 {
                         anyhow::bail!("amount must be positive");
@@ -3747,6 +3846,65 @@ async fn main() -> anyhow::Result<()> {
                 devices: device,
             };
             daemon::run_mining_loop(config).await?;
+        }
+        Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
+            use harmoniis_wallet::miner::cloud::{config as cloud_config, provision};
+
+            match cloud_cmd {
+                CloudCmd::Deploy { label, machine } => {
+                    // Derive the isolated mining wallet
+                    let wallet = open_or_create_wallet(&wallet_path)?;
+                    let _webcash_wallet =
+                        open_labeled_webcash_wallet(&wallet_path, &wallet, &label).await?;
+                    let db_path = labeled_webcash_wallet_path(&wallet_path, &label);
+                    println!("Mining wallet: {}", db_path.display());
+
+                    provision::deploy(&label, machine, &db_path).await?;
+                }
+                CloudCmd::Start => {
+                    let state = cloud_config::load_state()?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No deployed instance. Run `hrmw webminer cloud deploy` first."
+                        )
+                    })?;
+                    provision::start(&state).await?;
+                }
+                CloudCmd::Stop => {
+                    let state = cloud_config::load_state()?
+                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
+                    provision::stop(&state).await?;
+                }
+                CloudCmd::Destroy => {
+                    let state = cloud_config::load_state()?
+                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
+                    let db_path = labeled_webcash_wallet_path(&wallet_path, &state.label);
+                    provision::destroy(&state, &db_path).await?;
+
+                    // Recover locally
+                    let wallet = open_or_create_wallet(&wallet_path)?;
+                    let webcash_wallet =
+                        open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
+                    let summary = webcash_wallet
+                        .recover_from_wallet(20)
+                        .await
+                        .context("webcash recovery after destroy")?;
+                    println!("{summary}");
+                }
+                CloudCmd::Status => {
+                    let state = cloud_config::load_state()?
+                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
+                    provision::status(&state).await?;
+                }
+                CloudCmd::Info { label } => {
+                    provision::info(&label);
+                }
+                CloudCmd::SetApiKey { key } => {
+                    let mut cfg = cloud_config::load_config()?;
+                    cfg.vast_api_key = Some(key);
+                    cloud_config::save_config(&cfg)?;
+                    println!("Vast.ai API key saved.");
+                }
+            }
         }
 
         // ── upgrade / self-update ────────────────────────────────────────────

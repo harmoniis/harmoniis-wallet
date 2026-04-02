@@ -458,14 +458,14 @@ fn voucher_parse_decimal(amount_str: &str) -> Result<u64> {
         let int_val: u64 = if int_part.is_empty() {
             0
         } else {
-            int_part.parse().map_err(|_| {
-                Error::InvalidFormat(format!("invalid integer part: {amount_str}"))
-            })?
+            int_part
+                .parse()
+                .map_err(|_| Error::InvalidFormat(format!("invalid integer part: {amount_str}")))?
         };
         let padded = format!("{:0<8}", frac_part);
-        let frac_val: u64 = padded.parse().map_err(|_| {
-            Error::InvalidFormat(format!("invalid fractional part: {amount_str}"))
-        })?;
+        let frac_val: u64 = padded
+            .parse()
+            .map_err(|_| Error::InvalidFormat(format!("invalid fractional part: {amount_str}")))?;
         let total = int_val
             .checked_mul(VOUCHER_ATOMIC_PER_CREDIT)
             .and_then(|v| v.checked_add(frac_val))

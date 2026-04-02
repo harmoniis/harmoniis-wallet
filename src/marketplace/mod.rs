@@ -101,9 +101,7 @@ impl HarmoniisClient {
         } else {
             80
         };
-        let mut builder = reqwest::Client::builder()
-            .timeout(timeout)
-            .no_proxy();
+        let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
         if let Ok(overrides) = std::env::var("HRMW_RESOLVE") {
             for entry in overrides.split(',') {
                 let e = entry.trim();

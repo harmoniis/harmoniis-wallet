@@ -1,9 +1,9 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use super::WalletCore;
 use crate::crypto::generate_secret_hex;
 use crate::error::{Error, Result};
-use super::WalletCore;
 
 // ── Payment structs ──────────────────────────────────────────────────────────
 

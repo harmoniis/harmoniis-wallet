@@ -3,8 +3,8 @@ use rusqlite::params;
 use crate::error::{Error, Result};
 use crate::types::{Certificate, Contract};
 
-use super::WalletCore;
 use super::schema::row_to_contract;
+use super::WalletCore;
 
 impl WalletCore {
     // ── Contracts ─────────────────────────────────────────────────────────────

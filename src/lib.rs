@@ -10,10 +10,10 @@ pub mod wallet;
 
 // These modules moved into wallet/.
 // Backward-compatible re-exports at crate root:
+pub use wallet::ark;
+pub use wallet::bitcoin;
 pub use wallet::keychain;
 pub use wallet::vault;
-pub use wallet::bitcoin;
-pub use wallet::ark;
 pub mod voucher_wallet {
     pub use crate::wallet::voucher::*;
 }

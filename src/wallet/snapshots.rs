@@ -1,13 +1,13 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use super::keychain::HdKeychain;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
-use super::keychain::HdKeychain;
 use crate::types::{Certificate, Contract};
 
-use super::WalletCore;
 use super::schema::canonical_label;
+use super::WalletCore;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PgpIdentitySnapshot {
@@ -52,10 +52,19 @@ impl std::fmt::Debug for WalletSnapshot {
             .field("root_private_key_hex", &"[redacted]")
             .field("root_mnemonic", &"[redacted]")
             .field("wallet_label", &self.wallet_label)
-            .field("pgp_identities", &format!("[{} keys]", self.pgp_identities.len()))
+            .field(
+                "pgp_identities",
+                &format!("[{} keys]", self.pgp_identities.len()),
+            )
             .field("nickname", &self.nickname)
-            .field("contracts", &format!("[{} contracts]", self.contracts.len()))
-            .field("certificates", &format!("[{} certs]", self.certificates.len()))
+            .field(
+                "contracts",
+                &format!("[{} contracts]", self.contracts.len()),
+            )
+            .field(
+                "certificates",
+                &format!("[{} certs]", self.certificates.len()),
+            )
             .finish()
     }
 }

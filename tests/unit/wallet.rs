@@ -513,7 +513,10 @@ fn labeled_webcash_wallets_derive_distinct_secrets() {
 
     assert_eq!(main_idx, 0, "main should be slot 0");
     assert_eq!(donation_idx, 1, "donation should be slot 1");
-    assert_ne!(main_secret, donation_secret, "different slots = different secrets");
+    assert_ne!(
+        main_secret, donation_secret,
+        "different slots = different secrets"
+    );
 
     // Same label returns same slot
     let (main_again, idx_again) = wallet
@@ -533,12 +536,20 @@ fn labeled_webcash_wallets_derive_distinct_secrets() {
 fn labeled_bitcoin_and_voucher_wallets_work() {
     let wallet = RgbWallet::open_memory().expect("memory wallet");
 
-    let (btc_main, _) = wallet.derive_bitcoin_secret_for_label("main").expect("btc main");
-    let (btc_hot, _) = wallet.derive_bitcoin_secret_for_label("hot").expect("btc hot");
+    let (btc_main, _) = wallet
+        .derive_bitcoin_secret_for_label("main")
+        .expect("btc main");
+    let (btc_hot, _) = wallet
+        .derive_bitcoin_secret_for_label("hot")
+        .expect("btc hot");
     assert_ne!(btc_main, btc_hot);
 
-    let (v_main, _) = wallet.derive_voucher_secret_for_label("main").expect("voucher main");
-    let (v_shop, _) = wallet.derive_voucher_secret_for_label("shop").expect("voucher shop");
+    let (v_main, _) = wallet
+        .derive_voucher_secret_for_label("main")
+        .expect("voucher main");
+    let (v_shop, _) = wallet
+        .derive_voucher_secret_for_label("shop")
+        .expect("voucher shop");
     assert_ne!(v_main, v_shop);
 
     // DB filenames follow convention

@@ -66,7 +66,8 @@ pub struct CreateSpend {
 impl Handler<SyncWallet> for BitcoinActor {
     type Result = Result<BitcoinSyncSnapshot>;
     fn handle(&mut self, msg: SyncWallet, _ctx: &mut SyncContext<Self>) -> Self::Result {
-        self.wallet.sync(&msg.esplora_url, msg.stop_gap, msg.parallel)
+        self.wallet
+            .sync(&msg.esplora_url, msg.stop_gap, msg.parallel)
     }
 }
 

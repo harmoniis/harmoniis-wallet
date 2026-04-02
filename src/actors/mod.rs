@@ -5,9 +5,9 @@
 //!
 //! Requires the `actix-actors` feature flag.
 
+pub mod ark_actor;
+pub mod bitcoin_actor;
+pub mod payment_ledger_actor;
+pub mod voucher_actor;
 pub mod wallet_actor;
 pub mod webcash_actor;
-pub mod payment_ledger_actor;
-pub mod bitcoin_actor;
-pub mod ark_actor;
-pub mod voucher_actor;

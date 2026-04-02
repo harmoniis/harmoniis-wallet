@@ -4,6 +4,7 @@
 //! preimage prefix is padded to exactly one SHA256 block (64 bytes), the midstate
 //! is computed once, and each nonce attempt processes a single additional block.
 
+pub mod cloud;
 pub mod composite;
 pub mod cpu;
 #[cfg(feature = "cuda")]

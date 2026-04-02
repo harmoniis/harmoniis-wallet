@@ -84,9 +84,11 @@ pub struct PayHarmoniis {
 impl Handler<Connect> for ArkActor {
     type Result = Result<()>;
     fn handle(&mut self, msg: Connect, _ctx: &mut SyncContext<Self>) -> Self::Result {
-        let wallet = self
-            .rt
-            .block_on(ArkPaymentWallet::connect(&msg.btc_wallet, &msg.asp_url, msg.db))?;
+        let wallet = self.rt.block_on(ArkPaymentWallet::connect(
+            &msg.btc_wallet,
+            &msg.asp_url,
+            msg.db,
+        ))?;
         self.wallet = Some(wallet);
         Ok(())
     }

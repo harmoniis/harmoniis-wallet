@@ -10,8 +10,8 @@ use bdk_wallet::{
     ChangeSet, KeychainKind, SignOptions, TxOrdering, Wallet, WalletPersister,
 };
 
-use crate::error::{Error, Result};
 use super::RgbWallet;
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct BitcoinSyncSnapshot {
@@ -295,8 +295,13 @@ impl DeterministicBitcoinWallet {
             .map_err(|e| Error::Other(anyhow::anyhow!("sign tx failed: {e}")))?;
         if !finalized {
             // Diagnose: log which inputs were not signed
-            let unsigned_count = psbt.inputs.iter().enumerate()
-                .filter(|(_, input)| input.final_script_witness.is_none() && input.tap_key_sig.is_none())
+            let unsigned_count = psbt
+                .inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, input)| {
+                    input.final_script_witness.is_none() && input.tap_key_sig.is_none()
+                })
                 .count();
             let total_inputs = psbt.inputs.len();
             return Err(Error::Other(anyhow::anyhow!(

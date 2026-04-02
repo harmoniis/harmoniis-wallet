@@ -442,7 +442,11 @@ pub(crate) fn canonical_label(label: &str) -> Result<String> {
     Ok(canonical.to_string())
 }
 
-pub(crate) fn ensure_columns(conn: &Connection, table: &str, required: &[(&str, &str)]) -> Result<()> {
+pub(crate) fn ensure_columns(
+    conn: &Connection,
+    table: &str,
+    required: &[(&str, &str)],
+) -> Result<()> {
     let existing = current_columns(conn, table)?;
     for (name, ddl) in required {
         if existing.contains(*name) {

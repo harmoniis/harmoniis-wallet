@@ -14,8 +14,8 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
 use super::keychain::MAX_LABELED_WALLETS;
+use crate::error::{Error, Result};
 
 use super::schema::canonical_label;
 use super::WalletCore;
@@ -80,8 +80,7 @@ impl WalletCore {
                     format!("{family}-{slot_index}")
                 }
             });
-            let db_filename =
-                db_rel_path.unwrap_or_else(|| format!("{}_{}.db", label, family));
+            let db_filename = db_rel_path.unwrap_or_else(|| format!("{}_{}.db", label, family));
             Ok(LabeledWallet {
                 family,
                 label,
@@ -122,9 +121,9 @@ impl WalletCore {
         }
 
         // Find the next available slot index for this family
-        let mut next_stmt = self.master_conn.prepare(
-            "SELECT COALESCE(MAX(slot_index), -1) FROM wallet_slots WHERE family = ?1",
-        )?;
+        let mut next_stmt = self
+            .master_conn
+            .prepare("SELECT COALESCE(MAX(slot_index), -1) FROM wallet_slots WHERE family = ?1")?;
         let max_idx: i64 = next_stmt.query_row(params![family], |row| row.get(0))?;
         let next = (max_idx + 1).max(1) as u32; // slot 0 reserved for main
         if next >= MAX_LABELED_WALLETS {

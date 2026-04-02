@@ -1,16 +1,16 @@
-pub mod schema;
+pub mod contracts;
 pub mod identities;
 pub mod labeled_wallets;
 pub mod payments;
-pub mod contracts;
+pub mod schema;
 pub mod snapshots;
 pub mod storage;
 pub mod webcash;
 
+pub mod ark;
+pub mod bitcoin;
 pub mod keychain;
 pub mod vault;
-pub mod bitcoin;
-pub mod ark;
 pub mod voucher;
 
 use std::path::{Path, PathBuf};
@@ -23,24 +23,22 @@ use crate::{
     identity::Identity,
 };
 use keychain::{
-    HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT,
-    SLOT_FAMILY_VAULT,
+    HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT, SLOT_FAMILY_VAULT,
 };
 
 use schema::{
-    canonical_label, ensure_root_and_identity_materialized, ensure_default_pgp_identity,
+    canonical_label, ensure_default_pgp_identity, ensure_root_and_identity_materialized,
     metadata_value, migrate_identity_schema_if_present, migrate_rgb_state, same_path,
-    set_metadata_value, table_exists,
-    META_KEY_MODEL_VERSION, META_RGB_PRIVATE_KEY_HEX, META_ROOT_MNEMONIC,
-    META_ROOT_PRIVATE_KEY_HEX, META_WALLET_LABEL,
+    set_metadata_value, table_exists, META_KEY_MODEL_VERSION, META_RGB_PRIVATE_KEY_HEX,
+    META_ROOT_MNEMONIC, META_ROOT_PRIVATE_KEY_HEX, META_WALLET_LABEL,
 };
 
 // Re-export submodule types for backward compatibility.
 pub use identities::PgpIdentityRecord;
 pub use payments::{
     NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
-    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord,
-    PaymentTransactionEventRecord, PaymentTransactionRecord, PaymentTransactionUpdate,
+    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
+    PaymentTransactionRecord, PaymentTransactionUpdate,
 };
 pub use snapshots::{PgpIdentitySnapshot, WalletSnapshot};
 

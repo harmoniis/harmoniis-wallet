@@ -100,7 +100,9 @@ mod s3_impl {
             match self.download_db(key_name).await? {
                 Some(bytes) => {
                     let value = serde_json::from_slice(&bytes).map_err(|e| {
-                        Error::Other(anyhow::anyhow!("JSON deserialize failed for {key_name}: {e}"))
+                        Error::Other(anyhow::anyhow!(
+                            "JSON deserialize failed for {key_name}: {e}"
+                        ))
                     })?;
                     Ok(Some(value))
                 }
@@ -110,17 +112,15 @@ mod s3_impl {
 
         /// Sync a local directory of wallet databases to S3.
         pub async fn sync_to_s3(&self, wallet_dir: &std::path::Path) -> Result<()> {
-            let db_files = [
-                "master.db",
-                "rgb.db",
-                "bitcoin.db",
-                "voucher.db",
-            ];
+            let db_files = ["master.db", "rgb.db", "bitcoin.db", "voucher.db"];
             for db_name in &db_files {
                 let local_path = wallet_dir.join(db_name);
                 if local_path.exists() {
                     let data = std::fs::read(&local_path).map_err(|e| {
-                        Error::Other(anyhow::anyhow!("failed to read {}: {e}", local_path.display()))
+                        Error::Other(anyhow::anyhow!(
+                            "failed to read {}: {e}",
+                            local_path.display()
+                        ))
                     })?;
                     self.upload_db(db_name, data).await?;
                 }
@@ -136,12 +136,7 @@ mod s3_impl {
                     wallet_dir.display()
                 ))
             })?;
-            let db_files = [
-                "master.db",
-                "rgb.db",
-                "bitcoin.db",
-                "voucher.db",
-            ];
+            let db_files = ["master.db", "rgb.db", "bitcoin.db", "voucher.db"];
             for db_name in &db_files {
                 if let Some(data) = self.download_db(db_name).await? {
                     let local_path = wallet_dir.join(db_name);

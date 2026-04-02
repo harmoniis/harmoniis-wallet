@@ -579,6 +579,36 @@ pub fn default_webcash_wallet_path(master_wallet_path: &Path) -> PathBuf {
     base_dir.join("webcash.db")
 }
 
+pub fn labeled_webcash_wallet_path(master_wallet_path: &Path, label: &str) -> PathBuf {
+    let base_dir = master_wallet_path
+        .parent()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base_dir.join(format!("{label}_webcash.db"))
+}
+
+pub async fn open_labeled_webcash_wallet(
+    master_wallet_path: &Path,
+    wallet: &RgbWallet,
+    label: &str,
+) -> anyhow::Result<WebcashWallet> {
+    let (secret, _index) = wallet
+        .derive_webcash_secret_for_label(label)
+        .context("failed to derive labeled webcash wallet")?;
+    let webcash_path = labeled_webcash_wallet_path(master_wallet_path, label);
+    let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
+        format!(
+            "failed to open labeled webcash wallet at {}",
+            webcash_path.display()
+        )
+    })?;
+    webcash_wallet
+        .store_master_secret(&secret)
+        .await
+        .context("failed to store labeled webcash master secret")?;
+    Ok(webcash_wallet)
+}
+
 pub fn default_voucher_wallet_path(master_wallet_path: &Path) -> PathBuf {
     let base_dir = master_wallet_path
         .parent()

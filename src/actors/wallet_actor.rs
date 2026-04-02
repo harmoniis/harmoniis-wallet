@@ -362,11 +362,7 @@ impl Handler<DeriveVaultIdentityForIndex> for WalletActor {
 
 impl Handler<EnsureVaultIdentityIndex> for WalletActor {
     type Result = Result<WalletSlotRecord>;
-    fn handle(
-        &mut self,
-        msg: EnsureVaultIdentityIndex,
-        _ctx: &mut Context<Self>,
-    ) -> Self::Result {
+    fn handle(&mut self, msg: EnsureVaultIdentityIndex, _ctx: &mut Context<Self>) -> Self::Result {
         self.wallet
             .ensure_vault_identity_index(msg.key_index, msg.label.as_deref())
     }

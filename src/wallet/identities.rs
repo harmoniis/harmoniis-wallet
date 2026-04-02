@@ -1,10 +1,10 @@
-use rusqlite::params;
-use serde::{Deserialize, Serialize};
+use super::schema::canonical_label;
+use super::WalletCore;
+use super::MAX_PGP_KEYS;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
-use super::WalletCore;
-use super::schema::canonical_label;
-use super::MAX_PGP_KEYS;
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PgpIdentityRecord {

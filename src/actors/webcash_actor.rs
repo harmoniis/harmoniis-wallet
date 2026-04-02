@@ -184,9 +184,7 @@ impl Handler<FlushIfDirty> for WebcashActor {
         if !self.dirty {
             return None;
         }
-        self.wallet
-            .as_ref()
-            .and_then(|w| w.export_snapshot().ok())
+        self.wallet.as_ref().and_then(|w| w.export_snapshot().ok())
     }
 }
 
