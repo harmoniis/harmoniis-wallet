@@ -3921,24 +3921,33 @@ async fn main() -> anyhow::Result<()> {
 
                     if labeled_balance != "0" && !labeled_balance.is_empty() {
                         println!("Transferring to main wallet...");
-                        let payment = labeled_wc
+                        match labeled_wc
                             .pay(
                                 WebcashAmount::from_str(&labeled_balance.to_string())?,
                                 "cloud-mining-collect",
                             )
                             .await
-                            .context("failed to pay from mining wallet")?;
-                        let token = extract_webcash_token(&payment)?;
-                        let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
-                        let parsed = SecretWebcash::parse(&token)
-                            .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
-                        main_wc
-                            .insert(parsed)
-                            .await
-                            .context("failed to insert into main wallet")?;
-                        let main_balance = main_wc.balance().await?;
-                        println!("Transferred {labeled_balance} webcash to main wallet.");
-                        println!("Main wallet balance: {main_balance}");
+                        {
+                            Ok(payment) => {
+                                let token = extract_webcash_token(&payment)?;
+                                let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
+                                let parsed = SecretWebcash::parse(&token)
+                                    .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                                main_wc
+                                    .insert(parsed)
+                                    .await
+                                    .context("failed to insert into main wallet")?;
+                                let main_balance = main_wc.balance().await?;
+                                println!("Transferred {labeled_balance} webcash to main wallet.");
+                                println!("Main wallet balance: {main_balance}");
+                            }
+                            Err(e) => {
+                                println!("Transfer skipped (already transferred?): {e}");
+                                let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
+                                let main_balance = main_wc.balance().await?;
+                                println!("Main wallet balance: {main_balance}");
+                            }
+                        }
                     } else {
                         println!("No webcash mined — nothing to transfer.");
                     }
