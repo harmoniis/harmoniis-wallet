@@ -15,7 +15,7 @@ pub struct CloudConfig {
 }
 
 fn default_label() -> String {
-    "mining".to_string()
+    "cloudminer".to_string()
 }
 
 /// Persisted state for a running cloud mining instance.

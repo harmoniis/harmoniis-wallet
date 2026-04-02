@@ -427,7 +427,8 @@ pub fn info(label: &str) {
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    for i in 0..120 {
+    // 5 minutes max — if the instance doesn't start, destroy it to stop charges.
+    for i in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         match client.get_instance(instance_id).await {
             Ok(instance) if instance.is_running() => return Ok(instance),
@@ -439,12 +440,18 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             }
             Err(e) => {
                 if i > 5 {
+                    // Destroy to stop charges before bailing.
+                    let _ = client.destroy_instance(instance_id).await;
                     return Err(e);
                 }
             }
         }
     }
-    anyhow::bail!("Instance did not start within 20 minutes")
+    // Auto-destroy to stop charges.
+    println!("Instance did not start in 5 minutes — destroying to stop charges...");
+    let _ = client.destroy_instance(instance_id).await;
+    config::clear_state()?;
+    anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 
 async fn wait_for_ssh(host: &str, port: u16) -> Result<()> {

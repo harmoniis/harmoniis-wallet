@@ -1098,7 +1098,7 @@ enum CloudCmd {
     /// Search for GPU offers and provision a Vast.ai instance
     Deploy {
         /// Label for the mining wallet (e.g. "mining", "vast01")
-        #[arg(long, default_value = "mining")]
+        #[arg(long, default_value = "cloudminer")]
         label: String,
         /// Use a specific Vast.ai offer ID instead of auto-selecting
         #[arg(long)]
@@ -1115,7 +1115,7 @@ enum CloudCmd {
     /// Show local mining wallet info
     Info {
         /// Label for the mining wallet
-        #[arg(long, default_value = "mining")]
+        #[arg(long, default_value = "cloudminer")]
         label: String,
     },
     /// Set Vast.ai API key
@@ -3853,8 +3853,16 @@ async fn main() -> anyhow::Result<()> {
 
             match cloud_cmd {
                 CloudCmd::Deploy { label, machine } => {
-                    // Derive the isolated mining wallet
-                    let wallet = open_or_create_wallet(&wallet_path)?;
+                    // Open existing wallet — do NOT create a new one.
+                    // The user must have run `hrmw setup` first.
+                    if !wallet_path.exists() {
+                        anyhow::bail!(
+                            "Wallet not found at {}. Run `hrmw setup` first.",
+                            wallet_path.display()
+                        );
+                    }
+                    let wallet = RgbWallet::open(&wallet_path)
+                        .context("Failed to open wallet. Run `hrmw setup` first.")?;
                     let _webcash_wallet =
                         open_labeled_webcash_wallet(&wallet_path, &wallet, &label).await?;
                     let db_path = labeled_webcash_wallet_path(&wallet_path, &label);
