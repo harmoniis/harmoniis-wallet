@@ -211,7 +211,11 @@ pub async fn start(state: &InstanceState) -> Result<()> {
 
     // Verify CUDA / GPU availability
     println!("Checking GPU availability...");
-    match ssh::ssh_exec(&state.ssh_host, state.ssh_port, "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1") {
+    match ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1",
+    ) {
         Ok(output) => {
             println!("GPUs detected:");
             for line in output.trim().lines() {
