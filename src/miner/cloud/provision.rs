@@ -13,8 +13,20 @@ const REMOTE_HRMW: &str = "/root/.local/bin/hrmw";
 /// The onstart script that runs when the Vast.ai instance boots.
 /// Installs hrmw from the install script.
 fn onstart_script() -> String {
-    "#!/bin/bash\ncurl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh"
-        .to_string()
+    r#"#!/bin/bash
+set -e
+mkdir -p /root/.harmoniis/wallet /root/.local/bin
+# Try install script first, fallback to direct download
+curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh || {
+  apt-get update -qq && apt-get install -yqq wget
+  wget -q -O /tmp/hrmw.tar.gz "https://github.com/harmoniis/harmoniis-wallet/releases/latest/download/harmoniis-wallet-linux-x86_64.tar.gz" || \
+  wget -q -O /tmp/hrmw.tar.gz "https://github.com/harmoniis/harmoniis-wallet/releases/download/v0.1.44/harmoniis-wallet-0.1.44-linux-x86_64.tar.gz"
+  tar xzf /tmp/hrmw.tar.gz -C /tmp/
+  cp /tmp/harmoniis-wallet-*/bin/hrmw /root/.local/bin/hrmw
+  chmod +x /root/.local/bin/hrmw
+}
+"#
+    .to_string()
 }
 
 /// Print the top offers table and let the user select.
@@ -190,55 +202,92 @@ pub async fn start(state: &InstanceState) -> Result<()> {
         println!();
     }
 
+    // Ensure the miner's data directory exists on the remote
+    let _ = ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        "mkdir -p /root/.harmoniis/wallet",
+    );
+
     // Start the miner
     let cmd =
         format!("{REMOTE_HRMW} webminer run --accept-terms --webcash-wallet {REMOTE_WALLET_PATH}");
     ssh::ssh_exec_background(&state.ssh_host, state.ssh_port, &cmd)?;
 
-    println!("Miner started.");
+    // Verify the miner actually started
+    println!("Verifying miner process...");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let check = ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        "pgrep -a hrmw || echo 'NOT_RUNNING'",
+    )?;
+    if check.contains("NOT_RUNNING") {
+        let log = ssh::ssh_exec(
+            &state.ssh_host,
+            state.ssh_port,
+            "cat /root/miner.log 2>/dev/null || echo 'No log'",
+        )
+        .unwrap_or_default();
+        anyhow::bail!("Miner failed to start. Remote log:\n{log}");
+    }
+
+    // Show first few lines of miner output
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    if let Ok(log) = ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        "head -20 /root/miner.log 2>/dev/null",
+    ) {
+        println!();
+        println!("Miner output:");
+        for line in log.lines() {
+            println!("  {line}");
+        }
+    }
+
+    println!();
+    println!("Miner started and verified.");
     println!("  Check status: hrmw webminer cloud status");
     println!("  Stop mining:  hrmw webminer cloud stop");
 
     Ok(())
 }
 
-/// Stop mining on the remote instance.
-pub async fn stop(state: &InstanceState) -> Result<()> {
+/// Stop mining on the remote instance and download the wallet.
+pub async fn stop_and_download(state: &InstanceState, local_wallet_path: &Path) -> Result<()> {
     println!("Stopping miner on instance {}...", state.instance_id);
     let _ = ssh::ssh_exec(
         &state.ssh_host,
         state.ssh_port,
         "pkill -f 'hrmw webminer' || pkill -f '.local/bin/hrmw' || true",
     );
+    // Wait for process to exit and wallet to flush
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     println!("Miner stopped.");
+
+    // Download the wallet with mined webcash
+    println!("Downloading mining wallet...");
+    ssh::scp_download(
+        &state.ssh_host,
+        state.ssh_port,
+        REMOTE_WALLET_PATH,
+        local_wallet_path,
+    )
+    .context("Failed to download mining wallet from remote")?;
+    println!("Wallet downloaded to {}", local_wallet_path.display());
+
     Ok(())
 }
 
-/// Download the remote wallet and destroy the instance.
+/// Stop miner, download wallet, destroy instance.
 pub async fn destroy(state: &InstanceState, local_wallet_path: &Path) -> Result<()> {
     let cfg = config::load_config()?;
     let api_key = config::resolve_api_key(&cfg)?;
     let client = VastClient::new(&api_key);
 
-    // Stop the miner first
-    println!("Stopping miner...");
-    let _ = ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        "pkill -f 'hrmw webminer' || pkill -f '.local/bin/hrmw' || true",
-    );
-
-    // Download the wallet with mined webcash
-    println!("Downloading mining wallet...");
-    match ssh::scp_download(
-        &state.ssh_host,
-        state.ssh_port,
-        REMOTE_WALLET_PATH,
-        local_wallet_path,
-    ) {
-        Ok(()) => println!("Wallet downloaded to {}", local_wallet_path.display()),
-        Err(e) => eprintln!("Warning: wallet download failed: {e}. Mined webcash can be recovered with `hrmw webcash recover --label {}`", state.label),
-    }
+    // Stop and download wallet
+    stop_and_download(state, local_wallet_path).await?;
 
     // Destroy the instance
     println!("Destroying instance {}...", state.instance_id);
@@ -246,14 +295,7 @@ pub async fn destroy(state: &InstanceState, local_wallet_path: &Path) -> Result<
 
     // Clear state
     config::clear_state()?;
-
     println!("Instance destroyed.");
-    println!();
-    println!("Check balance: hrmw webcash info --label {}", state.label);
-    println!(
-        "Recover outputs: hrmw webcash recover --label {}",
-        state.label
-    );
 
     Ok(())
 }
@@ -278,34 +320,54 @@ pub async fn status(state: &InstanceState) -> Result<()> {
     println!("  Started:  {}", state.started_at);
     println!();
 
-    // Remote miner status
+    // Check if miner process is running
     match ssh::ssh_exec(
         &state.ssh_host,
         state.ssh_port,
-        &format!("{REMOTE_HRMW} webminer status"),
+        "pgrep -a hrmw || echo 'NOT_RUNNING'",
     ) {
         Ok(output) => {
-            println!("Remote miner:");
-            for line in output.lines() {
-                println!("  {line}");
+            if output.contains("NOT_RUNNING") {
+                println!("Remote miner: NOT RUNNING");
+            } else {
+                println!("Remote miner: RUNNING");
+                for line in output.lines() {
+                    println!("  PID: {line}");
+                }
             }
         }
-        Err(e) => println!("Remote miner status unavailable: {e}"),
+        Err(e) => println!("Process check unavailable: {e}"),
     }
 
     println!();
 
-    // Remote wallet balance
-    let info_cmd =
-        format!("{REMOTE_HRMW} webcash info 2>/dev/null || echo 'Wallet not accessible'");
-    match ssh::ssh_exec(&state.ssh_host, state.ssh_port, &info_cmd) {
+    // Show miner log tail (contains live hashrate, solutions, difficulty)
+    match ssh::ssh_exec(
+        &state.ssh_host,
+        state.ssh_port,
+        "tail -15 /root/miner.log 2>/dev/null || echo 'No miner log'",
+    ) {
         Ok(output) => {
-            println!("Remote wallet:");
+            println!("Miner log (last 15 lines):");
             for line in output.lines() {
                 println!("  {line}");
             }
         }
-        Err(e) => println!("Remote wallet info unavailable: {e}"),
+        Err(e) => println!("Miner log unavailable: {e}"),
+    }
+
+    println!();
+
+    // Remote wallet balance via sqlite3 (works without our custom --label flag)
+    let balance_cmd = format!(
+        "sqlite3 {REMOTE_WALLET_PATH} \"SELECT COALESCE(SUM(amount), 0) FROM webcash WHERE spent = 0;\" 2>/dev/null || echo '0'"
+    );
+    match ssh::ssh_exec(&state.ssh_host, state.ssh_port, &balance_cmd) {
+        Ok(output) => {
+            let raw = output.trim();
+            println!("Remote mining wallet balance: {raw} wats");
+        }
+        Err(e) => println!("Remote wallet balance unavailable: {e}"),
     }
 
     Ok(())

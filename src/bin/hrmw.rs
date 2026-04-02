@@ -3872,7 +3872,39 @@ async fn main() -> anyhow::Result<()> {
                 CloudCmd::Stop => {
                     let state = cloud_config::load_state()?
                         .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
-                    provision::stop(&state).await?;
+                    let db_path = labeled_webcash_wallet_path(&wallet_path, &state.label);
+                    provision::stop_and_download(&state, &db_path).await?;
+
+                    // Transfer mined webcash from labeled wallet → main wallet
+                    let wallet = open_or_create_wallet(&wallet_path)?;
+                    let labeled_wc =
+                        open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
+                    let labeled_balance = labeled_wc.balance().await?;
+                    println!("Mining wallet balance: {labeled_balance}");
+
+                    if labeled_balance != "0" && !labeled_balance.is_empty() {
+                        println!("Transferring to main wallet...");
+                        let payment = labeled_wc
+                            .pay(
+                                WebcashAmount::from_str(&labeled_balance.to_string())?,
+                                "cloud-mining-collect",
+                            )
+                            .await
+                            .context("failed to pay from mining wallet")?;
+                        let token = extract_webcash_token(&payment)?;
+                        let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
+                        let parsed = SecretWebcash::parse(&token)
+                            .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                        main_wc
+                            .insert(parsed)
+                            .await
+                            .context("failed to insert into main wallet")?;
+                        let main_balance = main_wc.balance().await?;
+                        println!("Transferred {labeled_balance} webcash to main wallet.");
+                        println!("Main wallet balance: {main_balance}");
+                    } else {
+                        println!("No webcash mined yet — nothing to transfer.");
+                    }
                 }
                 CloudCmd::Destroy => {
                     let state = cloud_config::load_state()?
@@ -3880,15 +3912,36 @@ async fn main() -> anyhow::Result<()> {
                     let db_path = labeled_webcash_wallet_path(&wallet_path, &state.label);
                     provision::destroy(&state, &db_path).await?;
 
-                    // Recover locally
+                    // Transfer mined webcash from labeled wallet → main wallet
                     let wallet = open_or_create_wallet(&wallet_path)?;
-                    let webcash_wallet =
+                    let labeled_wc =
                         open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
-                    let summary = webcash_wallet
-                        .recover_from_wallet(20)
-                        .await
-                        .context("webcash recovery after destroy")?;
-                    println!("{summary}");
+                    let labeled_balance = labeled_wc.balance().await?;
+                    println!("Mining wallet balance: {labeled_balance}");
+
+                    if labeled_balance != "0" && !labeled_balance.is_empty() {
+                        println!("Transferring to main wallet...");
+                        let payment = labeled_wc
+                            .pay(
+                                WebcashAmount::from_str(&labeled_balance.to_string())?,
+                                "cloud-mining-collect",
+                            )
+                            .await
+                            .context("failed to pay from mining wallet")?;
+                        let token = extract_webcash_token(&payment)?;
+                        let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
+                        let parsed = SecretWebcash::parse(&token)
+                            .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                        main_wc
+                            .insert(parsed)
+                            .await
+                            .context("failed to insert into main wallet")?;
+                        let main_balance = main_wc.balance().await?;
+                        println!("Transferred {labeled_balance} webcash to main wallet.");
+                        println!("Main wallet balance: {main_balance}");
+                    } else {
+                        println!("No webcash mined — nothing to transfer.");
+                    }
                 }
                 CloudCmd::Status => {
                     let state = cloud_config::load_state()?
