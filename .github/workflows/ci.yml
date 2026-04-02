@@ -119,12 +119,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — GPU + CUDA
-          - os: ubuntu-latest
+          # Linux — GPU + CUDA (built on Ubuntu 20.04 for max GLIBC compat)
+          - os: ubuntu-20.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             features: bundled-sqlite,gpu,cuda
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-20.04
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
             features: bundled-sqlite,gpu,cuda
