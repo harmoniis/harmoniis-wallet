@@ -205,7 +205,8 @@ impl VastClient {
     pub async fn create_instance(&self, offer_id: u64, onstart_script: &str) -> Result<u64> {
         let body = json!({
             "client_id": "me",
-            "image": "nvidia/cuda:12.6.3-devel-ubuntu24.04",
+            "image": "nvidia/cuda:12.0.1-devel-ubuntu20.04",
+            "template_hash_id": "fd2e982e4facaf7b2918006939d1e06e",
             "disk": 16,
             "label": "hrmw-cloud-mining",
             "onstart": onstart_script,

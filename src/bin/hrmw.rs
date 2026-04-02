@@ -1095,22 +1095,20 @@ enum WebminerCmd {
 
 #[derive(Subcommand, Debug)]
 enum CloudCmd {
-    /// Search for GPU offers and provision a Vast.ai instance
-    Deploy {
-        /// Label for the mining wallet (e.g. "mining", "vast01")
+    /// Provision a Vast.ai GPU instance and start mining
+    Start {
+        /// Label for the mining wallet
         #[arg(long, default_value = "cloudminer")]
         label: String,
         /// Use a specific Vast.ai offer ID instead of auto-selecting
         #[arg(long)]
         machine: Option<u64>,
     },
-    /// Start the miner on a deployed instance
-    Start,
-    /// Stop the miner (keeps instance running)
+    /// Stop miner, recover mined webcash, transfer to main wallet (instance keeps running)
     Stop,
-    /// Stop miner, download wallet, destroy instance
+    /// Destroy the Vast.ai instance (stops charges)
     Destroy,
-    /// Show remote miner status and wallet balance
+    /// Show remote miner status
     Status,
     /// Show local mining wallet info
     Info {
@@ -3851,43 +3849,45 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
             use harmoniis_wallet::miner::cloud::{config as cloud_config, provision};
 
-            match cloud_cmd {
-                CloudCmd::Deploy { label, machine } => {
-                    // Open existing wallet — do NOT create a new one.
-                    // The user must have run `hrmw setup` first.
-                    if !wallet_path.exists() {
-                        anyhow::bail!(
-                            "Wallet not found at {}. Run `hrmw setup` first.",
-                            wallet_path.display()
-                        );
-                    }
-                    let wallet = RgbWallet::open(&wallet_path)
-                        .context("Failed to open wallet. Run `hrmw setup` first.")?;
-                    let _webcash_wallet =
-                        open_labeled_webcash_wallet(&wallet_path, &wallet, &label).await?;
-                    let db_path = labeled_webcash_wallet_path(&wallet_path, &label);
-                    println!("Mining wallet: {}", db_path.display());
+            // Open existing wallet — required for vault SSH key derivation.
+            if !wallet_path.exists() {
+                anyhow::bail!(
+                    "Wallet not found at {}. Run `hrmw setup` first.",
+                    wallet_path.display()
+                );
+            }
+            let wallet = RgbWallet::open(&wallet_path)
+                .context("Failed to open wallet. Run `hrmw setup` first.")?;
 
-                    provision::deploy(&label, machine, &db_path).await?;
-                }
-                CloudCmd::Start => {
-                    let state = cloud_config::load_state()?.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "No deployed instance. Run `hrmw webminer cloud deploy` first."
-                        )
-                    })?;
-                    provision::start(&state).await?;
+            // Derive SSH key from vault (deterministic, same key every time)
+            let ssh_key = harmoniis_wallet::miner::cloud::ssh::derive_ssh_keypair(&wallet)?;
+
+            match cloud_cmd {
+                CloudCmd::Start { label, machine } => {
+                    // Derive the labeled webcash wallet
+                    let _wc = open_labeled_webcash_wallet(&wallet_path, &wallet, &label).await?;
+                    let db_path = labeled_webcash_wallet_path(&wallet_path, &label);
+
+                    provision::start(&label, machine, &db_path, &ssh_key).await?;
                 }
                 CloudCmd::Stop => {
                     let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
-                    let db_path = labeled_webcash_wallet_path(&wallet_path, &state.label);
-                    provision::stop_and_download(&state, &db_path).await?;
+                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
 
-                    // Transfer mined webcash from labeled wallet → main wallet
-                    let wallet = open_or_create_wallet(&wallet_path)?;
+                    // Stop the remote miner
+                    provision::stop(&state, &ssh_key).await?;
+
+                    // Recover mined webcash locally (no SCP — deterministic secret)
+                    println!("Recovering mined webcash...");
                     let labeled_wc =
                         open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
+                    let recovery = labeled_wc
+                        .recover_from_wallet(50)
+                        .await
+                        .context("webcash recovery failed")?;
+                    println!("{recovery}");
+
+                    // Transfer recovered balance to main wallet
                     let labeled_balance = labeled_wc.balance().await?;
                     println!("Mining wallet balance: {labeled_balance}");
 
@@ -3895,7 +3895,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("Transferring to main wallet...");
                         let payment = labeled_wc
                             .pay(
-                                WebcashAmount::from_str(&labeled_balance.to_string())?,
+                                WebcashAmount::from_str(&labeled_balance)?,
                                 "cloud-mining-collect",
                             )
                             .await
@@ -3912,59 +3912,18 @@ async fn main() -> anyhow::Result<()> {
                         println!("Transferred {labeled_balance} webcash to main wallet.");
                         println!("Main wallet balance: {main_balance}");
                     } else {
-                        println!("No webcash mined yet — nothing to transfer.");
+                        println!("No webcash mined yet.");
                     }
                 }
                 CloudCmd::Destroy => {
                     let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
-                    let db_path = labeled_webcash_wallet_path(&wallet_path, &state.label);
-                    provision::destroy(&state, &db_path).await?;
-
-                    // Transfer mined webcash from labeled wallet → main wallet
-                    let wallet = open_or_create_wallet(&wallet_path)?;
-                    let labeled_wc =
-                        open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
-                    let labeled_balance = labeled_wc.balance().await?;
-                    println!("Mining wallet balance: {labeled_balance}");
-
-                    if labeled_balance != "0" && !labeled_balance.is_empty() {
-                        println!("Transferring to main wallet...");
-                        match labeled_wc
-                            .pay(
-                                WebcashAmount::from_str(&labeled_balance.to_string())?,
-                                "cloud-mining-collect",
-                            )
-                            .await
-                        {
-                            Ok(payment) => {
-                                let token = extract_webcash_token(&payment)?;
-                                let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
-                                let parsed = SecretWebcash::parse(&token)
-                                    .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
-                                main_wc
-                                    .insert(parsed)
-                                    .await
-                                    .context("failed to insert into main wallet")?;
-                                let main_balance = main_wc.balance().await?;
-                                println!("Transferred {labeled_balance} webcash to main wallet.");
-                                println!("Main wallet balance: {main_balance}");
-                            }
-                            Err(e) => {
-                                println!("Transfer skipped (already transferred?): {e}");
-                                let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
-                                let main_balance = main_wc.balance().await?;
-                                println!("Main wallet balance: {main_balance}");
-                            }
-                        }
-                    } else {
-                        println!("No webcash mined — nothing to transfer.");
-                    }
+                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
+                    provision::destroy(&state).await?;
                 }
                 CloudCmd::Status => {
                     let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No deployed instance."))?;
-                    provision::status(&state).await?;
+                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
+                    provision::status(&state, &ssh_key).await?;
                 }
                 CloudCmd::Info { label } => {
                     provision::info(&label);

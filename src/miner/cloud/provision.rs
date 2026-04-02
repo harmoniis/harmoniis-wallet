@@ -1,4 +1,9 @@
-//! Cloud mining orchestration — deploy, start, stop, destroy, status, info.
+//! Cloud mining orchestration — start, stop, destroy, status, info.
+//!
+//! Security model:
+//! - SSH key derived from wallet vault (namespace "vast-ssh") — deterministic, no files
+//! - Only a derived labeled webcash wallet goes to the cloud
+//! - Recovery uses the local deterministic secret — no SCP download needed
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -7,27 +12,8 @@ use super::config::{self, InstanceState};
 use super::ssh;
 use super::vast::VastClient;
 
-const REMOTE_WALLET_PATH: &str = "/root/mining_webcash.db";
 const REMOTE_HRMW: &str = "/root/.local/bin/hrmw";
-
-/// The onstart script that runs when the Vast.ai instance boots.
-/// Installs hrmw from the install script.
-fn onstart_script() -> String {
-    r#"#!/bin/bash
-set -e
-mkdir -p /root/.harmoniis/wallet /root/.local/bin
-# Try install script first, fallback to direct download
-curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh || {
-  apt-get update -qq && apt-get install -yqq wget
-  wget -q -O /tmp/hrmw.tar.gz "https://github.com/harmoniis/harmoniis-wallet/releases/latest/download/harmoniis-wallet-linux-x86_64.tar.gz" || \
-  wget -q -O /tmp/hrmw.tar.gz "https://github.com/harmoniis/harmoniis-wallet/releases/download/v0.1.44/harmoniis-wallet-0.1.44-linux-x86_64.tar.gz"
-  tar xzf /tmp/hrmw.tar.gz -C /tmp/
-  cp /tmp/harmoniis-wallet-*/bin/hrmw /root/.local/bin/hrmw
-  chmod +x /root/.local/bin/hrmw
-}
-"#
-    .to_string()
-}
+const REMOTE_WALLET: &str = "/root/cloudminer_webcash.db";
 
 /// Print the top offers table and let the user select.
 pub fn print_offers_table(offers: &[super::vast::Offer]) {
@@ -52,7 +38,7 @@ pub fn print_offers_table(offers: &[super::vast::Offer]) {
     println!();
 }
 
-/// Prompt user to select an offer (1-indexed). Returns the selected offer.
+/// Prompt user to select an offer.
 pub fn prompt_offer_selection(offers: &[super::vast::Offer]) -> Result<&super::vast::Offer> {
     if offers.is_empty() {
         anyhow::bail!("No GPU offers found matching criteria");
@@ -82,68 +68,119 @@ pub fn prompt_offer_selection(offers: &[super::vast::Offer]) -> Result<&super::v
 
     offers
         .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("selection {idx} out of range"))
+        .ok_or_else(|| anyhow::anyhow!("selection out of range"))
 }
 
-/// Deploy: search for offers, let user pick, create instance.
-pub async fn deploy(
+/// Full cloud mining start: search → select → provision → install → mine.
+///
+/// Called by `hrmw webminer cloud start`. Does everything in one flow.
+pub async fn start(
     label: &str,
     machine_id: Option<u64>,
     wallet_db_path: &Path,
+    ssh_key: &ed25519_dalek::SigningKey,
 ) -> Result<InstanceState> {
     let cfg = config::load_config()?;
     let api_key = config::resolve_api_key(&cfg)?;
     let client = VastClient::new(&api_key);
 
-    // Ensure SSH key exists and is uploaded
-    println!("Ensuring SSH key...");
-    let pubkey = ssh::ensure_ssh_key()?;
+    // 1. Upload SSH key to Vast.ai account
+    println!("[1/6] Uploading SSH key to Vast.ai...");
+    let pubkey = ssh::ssh_public_key_string(ssh_key);
     client.upload_ssh_key(&pubkey).await?;
 
-    // Select offer
+    // 2. Select offer
     let offer_id = if let Some(id) = machine_id {
-        println!("Using specified machine: {id}");
+        println!("[2/6] Using specified machine: {id}");
         id
     } else {
-        println!("Searching for best GPU offers...");
+        println!("[2/6] Searching for best GPU offers...");
         let offers = client.find_best_offers().await?;
         if offers.is_empty() {
-            anyhow::bail!("No GPU offers found. Check Vast.ai availability and your filters.");
+            anyhow::bail!("No GPU offers found. Check Vast.ai availability.");
         }
         print_offers_table(&offers);
         let selected = prompt_offer_selection(&offers)?;
         println!(
-            "Selected: {}x {} (${:.2}/hr, {:.1} TFLOPS, {:.1} FLOPS/$)",
+            "  Selected: {}x {} (${:.2}/hr, {:.1} TFLOPS)",
             selected.num_gpus,
             selected.gpu_name,
             selected.dph_total,
-            selected.tflops(),
-            selected.flops_per_dollar()
+            selected.tflops()
         );
         selected.id
     };
 
-    // Create instance
-    println!("Creating instance...");
-    let instance_id = client.create_instance(offer_id, &onstart_script()).await?;
-    println!("Instance created: {instance_id}");
+    // 3. Create instance
+    println!("[3/6] Creating instance...");
+    let onstart = "#!/bin/bash\nset -e\nmkdir -p /root/.harmoniis/wallet /root/.local/bin\ncurl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh";
+    let instance_id = client.create_instance(offer_id, onstart).await?;
+    println!("  Instance: {instance_id}");
 
-    // Wait for running
-    println!("Waiting for instance to start (this may take a few minutes)...");
+    // 4. Wait for running (5 min max, auto-destroy if stuck)
+    println!("[4/6] Waiting for instance to start...");
     let instance = wait_for_running(&client, instance_id).await?;
     let (ssh_host, ssh_port) = instance
         .ssh_connection()
-        .ok_or_else(|| anyhow::anyhow!("Instance has no SSH connection info"))?;
-    println!("Instance running: ssh root@{ssh_host} -p {ssh_port}");
+        .ok_or_else(|| anyhow::anyhow!("No SSH connection info"))?;
+    println!("  SSH: root@{ssh_host}:{ssh_port}");
 
-    // Wait for SSH to be ready
-    println!("Waiting for SSH...");
-    wait_for_ssh(&ssh_host, ssh_port).await?;
+    // Wait for SSH to accept connections
+    wait_for_ssh(ssh_key, &ssh_host, ssh_port).await?;
 
-    // Upload the isolated webcash wallet
-    println!("Uploading mining wallet...");
-    ssh::scp_upload(wallet_db_path, &ssh_host, ssh_port, REMOTE_WALLET_PATH)?;
-    println!("Wallet uploaded to {REMOTE_WALLET_PATH}");
+    // 5. Wait for hrmw install + verify CUDA
+    println!("[5/6] Waiting for hrmw install...");
+    wait_for_hrmw(ssh_key, &ssh_host, ssh_port).await?;
+
+    // Verify GPUs
+    match ssh::exec(
+        ssh_key,
+        &ssh_host,
+        ssh_port,
+        &format!("{REMOTE_HRMW} webminer list-devices"),
+    ) {
+        Ok(output) => {
+            for line in output.trim().lines() {
+                println!("  {line}");
+            }
+        }
+        Err(_) => println!("  GPU detection unavailable"),
+    }
+
+    // Upload the labeled webcash wallet
+    println!("  Uploading mining wallet...");
+    upload_file(ssh_key, &ssh_host, ssh_port, wallet_db_path, REMOTE_WALLET)?;
+
+    // 6. Start mining
+    println!("[6/6] Starting miner...");
+    let _ = ssh::exec(
+        ssh_key,
+        &ssh_host,
+        ssh_port,
+        "mkdir -p /root/.harmoniis/wallet",
+    );
+    let cmd = format!("{REMOTE_HRMW} webminer run --accept-terms --webcash-wallet {REMOTE_WALLET}");
+    ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
+
+    // Verify miner started
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    let check = ssh::exec(ssh_key, &ssh_host, ssh_port, "pgrep -a hrmw")?;
+    if check.trim().is_empty() {
+        let log =
+            ssh::exec(ssh_key, &ssh_host, ssh_port, "cat /root/miner.log").unwrap_or_default();
+        // Auto-destroy on failure
+        let _ = client.destroy_instance(instance_id).await;
+        config::clear_state()?;
+        anyhow::bail!("Miner failed to start. Instance destroyed.\n{log}");
+    }
+
+    // Show initial miner output
+    if let Ok(log) = ssh::exec(ssh_key, &ssh_host, ssh_port, "head -25 /root/miner.log") {
+        println!();
+        for line in log.trim().lines() {
+            println!("  {line}");
+        }
+    }
 
     // Save state
     let state = InstanceState {
@@ -160,191 +197,57 @@ pub async fn deploy(
     config::save_state(&state)?;
 
     println!();
-    println!("Cloud mining instance deployed.");
-    println!("  Instance: {instance_id}");
+    println!("Mining started.");
     println!("  GPU: {}x {}", state.num_gpus, state.gpu_name);
     println!("  Cost: ${:.2}/hr", state.cost_per_hour);
-    println!();
-    println!("Next: hrmw webminer cloud start");
+    println!("  Status: hrmw webminer cloud status");
+    println!("  Stop:   hrmw webminer cloud stop");
 
     Ok(state)
 }
 
-/// Start mining on a deployed instance.
-pub async fn start(state: &InstanceState) -> Result<()> {
-    println!(
-        "Starting miner on instance {} ({})...",
-        state.instance_id, state.ssh_host
-    );
-
-    // Wait a bit for hrmw install from onstart to complete
-    let hrmw_check = ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        &format!("test -x {REMOTE_HRMW} && echo 'FOUND' || echo 'NOT_FOUND'"),
-    )?;
-    if hrmw_check.contains("NOT_FOUND") {
-        println!("hrmw not yet installed, waiting for onstart script...");
-        for _ in 0..30 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let check = ssh::ssh_exec(
-                &state.ssh_host,
-                state.ssh_port,
-                &format!("test -x {REMOTE_HRMW} && echo 'FOUND' || echo 'NOT_FOUND'"),
-            )?;
-            if !check.contains("NOT_FOUND") {
-                break;
-            }
-            print!(".");
-            use std::io::Write;
-            std::io::stdout().flush()?;
-        }
-        println!();
-    }
-
-    // Ensure the miner's data directory exists on the remote
-    let _ = ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        "mkdir -p /root/.harmoniis/wallet",
-    );
-
-    // Verify CUDA / GPU availability
-    println!("Checking GPU availability...");
-    match ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1",
-    ) {
-        Ok(output) => {
-            println!("GPUs detected:");
-            for line in output.trim().lines() {
-                println!("  {line}");
-            }
-        }
-        Err(_) => {
-            println!("WARNING: nvidia-smi not available — GPUs may not be accessible.");
-            println!("  The miner may fall back to CPU. Check instance GPU setup.");
-        }
-    }
-
-    // Also check what hrmw sees
-    match ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        &format!("{REMOTE_HRMW} webminer list-devices 2>&1"),
-    ) {
-        Ok(output) => {
-            println!("hrmw GPU detection:");
-            for line in output.trim().lines() {
-                println!("  {line}");
-            }
-        }
-        Err(e) => println!("hrmw device detection failed: {e}"),
-    }
-
-    // Start the miner
-    let cmd =
-        format!("{REMOTE_HRMW} webminer run --accept-terms --webcash-wallet {REMOTE_WALLET_PATH}");
-    ssh::ssh_exec_background(&state.ssh_host, state.ssh_port, &cmd)?;
-
-    // Verify the miner actually started
-    println!("Verifying miner process...");
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    let check = ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        "pgrep -a hrmw || echo 'NOT_RUNNING'",
-    )?;
-    if check.contains("NOT_RUNNING") {
-        let log = ssh::ssh_exec(
-            &state.ssh_host,
-            state.ssh_port,
-            "cat /root/miner.log 2>/dev/null || echo 'No log'",
-        )
-        .unwrap_or_default();
-        anyhow::bail!("Miner failed to start. Remote log:\n{log}");
-    }
-
-    // Show first few lines of miner output
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    if let Ok(log) = ssh::ssh_exec(
-        &state.ssh_host,
-        state.ssh_port,
-        "head -20 /root/miner.log 2>/dev/null",
-    ) {
-        println!();
-        println!("Miner output:");
-        for line in log.lines() {
-            println!("  {line}");
-        }
-    }
-
-    println!();
-    println!("Miner started and verified.");
-    println!("  Check status: hrmw webminer cloud status");
-    println!("  Stop mining:  hrmw webminer cloud stop");
-
-    Ok(())
-}
-
-/// Stop mining on the remote instance and download the wallet.
-pub async fn stop_and_download(state: &InstanceState, local_wallet_path: &Path) -> Result<()> {
+/// Stop mining and recover locally. Instance keeps running (charges continue).
+pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) -> Result<()> {
     println!("Stopping miner on instance {}...", state.instance_id);
-    let _ = ssh::ssh_exec(
+    let _ = ssh::exec(
+        ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "pkill -f 'hrmw webminer' || pkill -f '.local/bin/hrmw' || true",
+        "kill $(pgrep hrmw) 2>/dev/null || true",
     );
-    // Wait for process to exit and wallet to flush
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     println!("Miner stopped.");
     println!();
-    println!("⚠  Instance is still running and Vast.ai is still charging.");
-    println!("   Use `hrmw webminer cloud destroy` to stop charges.");
+    println!("Recovering mined webcash locally...");
+    // Recovery happens in the CLI handler (needs wallet objects).
+    // This function just stops the remote process.
     println!();
-
-    // Download the wallet with mined webcash
-    println!("Downloading mining wallet...");
-    ssh::scp_download(
-        &state.ssh_host,
-        state.ssh_port,
-        REMOTE_WALLET_PATH,
-        local_wallet_path,
-    )
-    .context("Failed to download mining wallet from remote")?;
-    println!("Wallet downloaded to {}", local_wallet_path.display());
+    println!("WARNING: Instance is still running. Vast.ai is still charging.");
+    println!("  Use `hrmw webminer cloud destroy` to stop charges.");
 
     Ok(())
 }
 
-/// Stop miner, download wallet, destroy instance.
-pub async fn destroy(state: &InstanceState, local_wallet_path: &Path) -> Result<()> {
+/// Destroy the instance. Stops charges.
+pub async fn destroy(state: &InstanceState) -> Result<()> {
     let cfg = config::load_config()?;
     let api_key = config::resolve_api_key(&cfg)?;
     let client = VastClient::new(&api_key);
 
-    // Stop and download wallet
-    stop_and_download(state, local_wallet_path).await?;
-
-    // Destroy the instance
     println!("Destroying instance {}...", state.instance_id);
     client.destroy_instance(state.instance_id).await?;
-
-    // Clear state
     config::clear_state()?;
-    println!("Instance destroyed.");
+    println!("Instance destroyed. Charges stopped.");
 
     Ok(())
 }
 
-/// Get remote miner status and wallet info.
-pub async fn status(state: &InstanceState) -> Result<()> {
+/// Show remote miner status.
+pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) -> Result<()> {
     let cfg = config::load_config()?;
     let api_key = config::resolve_api_key(&cfg)?;
     let client = VastClient::new(&api_key);
 
-    // Instance info from Vast.ai
     let instance = client.get_instance(state.instance_id).await?;
 
     println!("Cloud Mining Status");
@@ -358,54 +261,30 @@ pub async fn status(state: &InstanceState) -> Result<()> {
     println!("  Started:  {}", state.started_at);
     println!();
 
-    // Check if miner process is running
-    match ssh::ssh_exec(
+    // Check miner process
+    match ssh::exec(
+        ssh_key,
         &state.ssh_host,
         state.ssh_port,
         "pgrep -a hrmw || echo 'NOT_RUNNING'",
     ) {
-        Ok(output) => {
-            if output.contains("NOT_RUNNING") {
-                println!("Remote miner: NOT RUNNING");
-            } else {
-                println!("Remote miner: RUNNING");
-                for line in output.lines() {
-                    println!("  PID: {line}");
-                }
-            }
-        }
-        Err(e) => println!("Process check unavailable: {e}"),
+        Ok(output) if output.contains("NOT_RUNNING") => println!("Miner: NOT RUNNING"),
+        Ok(_) => println!("Miner: RUNNING"),
+        Err(e) => println!("Miner check: {e}"),
     }
 
-    println!();
-
-    // Show miner log tail (contains live hashrate, solutions, difficulty)
-    match ssh::ssh_exec(
+    // Show miner log tail
+    if let Ok(log) = ssh::exec(
+        ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "tail -15 /root/miner.log 2>/dev/null || echo 'No miner log'",
+        "tail -10 /root/miner.log 2>/dev/null",
     ) {
-        Ok(output) => {
-            println!("Miner log (last 15 lines):");
-            for line in output.lines() {
-                println!("  {line}");
-            }
+        println!();
+        println!("Last 10 lines:");
+        for line in log.trim().lines() {
+            println!("  {line}");
         }
-        Err(e) => println!("Miner log unavailable: {e}"),
-    }
-
-    println!();
-
-    // Remote wallet balance via sqlite3 (works without our custom --label flag)
-    let balance_cmd = format!(
-        "sqlite3 {REMOTE_WALLET_PATH} \"SELECT COALESCE(SUM(amount), 0) FROM webcash WHERE spent = 0;\" 2>/dev/null || echo '0'"
-    );
-    match ssh::ssh_exec(&state.ssh_host, state.ssh_port, &balance_cmd) {
-        Ok(output) => {
-            let raw = output.trim();
-            println!("Remote mining wallet balance: {raw} wats");
-        }
-        Err(e) => println!("Remote wallet balance unavailable: {e}"),
     }
 
     Ok(())
@@ -414,52 +293,106 @@ pub async fn status(state: &InstanceState) -> Result<()> {
 /// Show local mining wallet info.
 pub fn info(label: &str) {
     println!("Mining label: {label}");
-    println!("Use `hrmw webcash info --label {label}` to see local balance.");
+    println!("Wallet: {label}_webcash.db");
+    println!("Check balance: hrmw webcash info --label {label}");
+    println!("Recover mined: hrmw webcash recover --label {label}");
     if let Ok(Some(state)) = config::load_state() {
         println!();
         println!("Active instance: {}", state.instance_id);
         println!("  GPU: {}x {}", state.num_gpus, state.gpu_name);
         println!("  Cost: ${:.2}/hr", state.cost_per_hour);
-        println!("  Started: {}", state.started_at);
     } else {
         println!("No active cloud mining instance.");
     }
 }
 
+// ── Internal helpers ──────────────────────────────────────────────────────
+
+/// Upload a file to remote via SCP.
+fn upload_file(
+    ssh_key: &ed25519_dalek::SigningKey,
+    host: &str,
+    port: u16,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<()> {
+    let key_file = ssh::write_temp_key_file(ssh_key)?;
+    let status = std::process::Command::new("scp")
+        .args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-i",
+            &key_file.to_string_lossy(),
+            "-P",
+            &port.to_string(),
+            &local_path.to_string_lossy(),
+            &format!("root@{host}:{remote_path}"),
+        ])
+        .status()
+        .context("scp failed")?;
+    if !status.success() {
+        anyhow::bail!("SCP upload failed");
+    }
+    Ok(())
+}
+
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    // 5 minutes max — if the instance doesn't start, destroy it to stop charges.
     for i in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         match client.get_instance(instance_id).await {
-            Ok(instance) if instance.is_running() => return Ok(instance),
-            Ok(instance) => {
-                let status = instance.actual_status.as_deref().unwrap_or("unknown");
+            Ok(inst) if inst.is_running() => return Ok(inst),
+            Ok(inst) => {
+                let s = inst.actual_status.as_deref().unwrap_or("unknown");
                 if i % 3 == 0 {
-                    println!("  Status: {status}...");
+                    println!("  Status: {s}...");
                 }
             }
-            Err(e) => {
-                if i > 5 {
-                    // Destroy to stop charges before bailing.
-                    let _ = client.destroy_instance(instance_id).await;
-                    return Err(e);
-                }
+            Err(e) if i > 5 => {
+                let _ = client.destroy_instance(instance_id).await;
+                return Err(e);
             }
+            Err(_) => {}
         }
     }
-    // Auto-destroy to stop charges.
-    println!("Instance did not start in 5 minutes — destroying to stop charges...");
+    println!("  Instance did not start in 5 minutes — destroying...");
     let _ = client.destroy_instance(instance_id).await;
     config::clear_state()?;
     anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 
-async fn wait_for_ssh(host: &str, port: u16) -> Result<()> {
+async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
     for _ in 0..30 {
-        match ssh::ssh_exec(host, port, "echo ok") {
-            Ok(out) if out.contains("ok") => return Ok(()),
-            _ => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+        if let Ok(out) = ssh::exec(ssh_key, host, port, "echo ok") {
+            if out.contains("ok") {
+                return Ok(());
+            }
         }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
     anyhow::bail!("SSH not ready after 2.5 minutes")
+}
+
+async fn wait_for_hrmw(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
+    for i in 0..60 {
+        if let Ok(out) = ssh::exec(
+            ssh_key,
+            host,
+            port,
+            &format!("test -x {REMOTE_HRMW} && {REMOTE_HRMW} --version || echo NOT_READY"),
+        ) {
+            if !out.contains("NOT_READY") {
+                println!("  {}", out.trim());
+                return Ok(());
+            }
+        }
+        if i % 6 == 0 && i > 0 {
+            println!("  Still installing...");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    anyhow::bail!("hrmw install timed out after 5 minutes")
 }
