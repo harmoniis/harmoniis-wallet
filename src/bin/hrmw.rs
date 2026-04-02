@@ -1204,7 +1204,8 @@ async fn run_webminer_benchmarks(
         #[cfg(feature = "gpu")]
         if !gpu_reported {
             use harmoniis_wallet::miner::multi_gpu::MultiGpuMiner;
-            if let Some(gpu) = MultiGpuMiner::try_new().await {
+            let wgpu_miners = harmoniis_wallet::miner::init_wgpu_miners_from_devices().await;
+            if let Some(gpu) = MultiGpuMiner::from_miners(wgpu_miners).await {
                 let gpu_hps = gpu.benchmark().await?;
                 let gpu_mhs = gpu_hps / 1_000_000.0;
                 let gpu_status = benchmark_status_line(gpu_mhs, gpu_target_mhs);

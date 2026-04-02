@@ -1,9 +1,9 @@
 //! Cloud mining orchestration — deploy, start, stop, destroy, status, info.
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::config::{self, CloudConfig, InstanceState};
+use super::config::{self, InstanceState};
 use super::ssh;
 use super::vast::VastClient;
 
@@ -299,6 +299,10 @@ pub async fn stop_and_download(state: &InstanceState, local_wallet_path: &Path) 
     // Wait for process to exit and wallet to flush
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     println!("Miner stopped.");
+    println!();
+    println!("⚠  Instance is still running and Vast.ai is still charging.");
+    println!("   Use `hrmw webminer cloud destroy` to stop charges.");
+    println!();
 
     // Download the wallet with mined webcash
     println!("Downloading mining wallet...");

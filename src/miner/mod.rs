@@ -485,6 +485,42 @@ pub async fn select_backend_for_devices(
     Ok(Box::new(composite::CompositeBackend::new(backends).await))
 }
 
+/// Initialize wgpu GPU miners from the unified device list.
+///
+/// Uses `enumerate_all_devices()` to discover physical GPUs (PCI bus ID
+/// dedup), then probes and initializes each wgpu device.  This is the single
+/// source of truth for wgpu adapter discovery — `multi_gpu.rs` no longer has
+/// its own enumeration logic.
+#[cfg(feature = "gpu")]
+pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
+    let devices = enumerate_all_devices().await;
+    let mut miners = Vec::new();
+
+    for dev in &devices {
+        #[allow(irrefutable_let_patterns)]
+        if let DeviceKind::Wgpu { adapters } = &dev.kind {
+            // Try each adapter backend (Vulkan → DX12 → Metal) until one works.
+            for identity in adapters {
+                if !gpu::subprocess_probe(identity) {
+                    continue;
+                }
+                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                    backends: gpu::COMPUTE_BACKENDS,
+                    ..Default::default()
+                });
+                let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+                if let Some(adapter) = identity.find_matching(found) {
+                    if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                        miners.push(miner);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    miners
+}
+
 /// Select the best available mining backend.
 pub async fn select_backend(
     choice: BackendChoice,
@@ -503,24 +539,18 @@ pub async fn select_backend(
         BackendChoice::Gpu => {
             #[cfg(feature = "cuda")]
             {
-                // cudarc panics if CUDA DLLs are not found.  We cannot
-                // catch_unwind an async fn directly, so we guard just the
-                // synchronous CudaContext::device_count() call that triggers
-                // the panic.  If that succeeds, we know CUDA is loadable.
                 let cuda_ok = cuda_device_count();
-                let cuda_result = if cuda_ok > 0 {
-                    multi_cuda::MultiCudaMiner::try_new().await
-                } else {
-                    None
-                };
-                if let Some(miner) = cuda_result {
-                    println!("Mining backend: {}", miner.name());
-                    return Ok(Box::new(miner));
+                if cuda_ok > 0 {
+                    if let Some(miner) = multi_cuda::MultiCudaMiner::try_new().await {
+                        println!("Mining backend: {}", miner.name());
+                        return Ok(Box::new(miner));
+                    }
                 }
             }
             #[cfg(feature = "gpu")]
             {
-                if let Some(miner) = multi_gpu::MultiGpuMiner::try_new().await {
+                let gpu_miners = init_wgpu_miners_from_devices().await;
+                if let Some(miner) = multi_gpu::MultiGpuMiner::from_miners(gpu_miners).await {
                     println!("Mining backend: {}", miner.name());
                     return Ok(Box::new(miner));
                 }
@@ -548,7 +578,8 @@ pub async fn select_backend(
 
             #[cfg(feature = "gpu")]
             {
-                if let Some(multi_gpu) = multi_gpu::MultiGpuMiner::try_new().await {
+                let gpu_miners = init_wgpu_miners_from_devices().await;
+                if let Some(multi_gpu) = multi_gpu::MultiGpuMiner::from_miners(gpu_miners).await {
                     println!(
                         "Selected: {} (auto fallback: Vulkan/wgpu)",
                         multi_gpu.name()

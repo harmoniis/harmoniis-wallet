@@ -173,12 +173,19 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
 
 /// Probe an adapter by spawning the current binary with `gpu-probe`.
 /// Returns `true` if the adapter is safe to use.
+/// Timeout for the subprocess GPU probe.
+///
+/// If a driver hangs during shader compilation (observed on some NVIDIA
+/// Pascal + wgpu 28 combinations), the probe is killed and the next
+/// adapter backend (e.g., DX12) is tried instead.
+const PROBE_TIMEOUT_SECS: u64 = 30;
+
 pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let status = std::process::Command::new(exe)
+    let mut child = match std::process::Command::new(exe)
         .arg("gpu-probe")
         .arg("--vendor")
         .arg(identity.vendor.to_string())
@@ -188,10 +195,28 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
         .arg(&identity.backend)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(s) => s.success(),
-        Err(_) => false,
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Poll with timeout — kill the probe if the driver hangs.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(PROBE_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Timed out — driver hang. Silently skip to next backend.
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
     }
 }
 

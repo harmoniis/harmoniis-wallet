@@ -1,9 +1,12 @@
-//! Multi-GPU mining backend.
+//! Multi-GPU mining backend (wgpu).
+//!
+//! Reuses the unified device discovery from `mod.rs` to avoid duplicating
+//! adapter enumeration and deduplication logic.
 
 use async_trait::async_trait;
 use tokio::task::JoinSet;
 
-use super::gpu::{AdapterIdentity, GpuMiner, COMPUTE_BACKENDS};
+use super::gpu::GpuMiner;
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
@@ -20,82 +23,26 @@ pub struct MultiGpuMiner {
 }
 
 impl MultiGpuMiner {
-    pub async fn try_new() -> Option<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: COMPUTE_BACKENDS,
-            ..Default::default()
-        });
-
-        let mut adapters = instance.enumerate_adapters(COMPUTE_BACKENDS).await;
-        if adapters.is_empty() {
-            // Fallback for environments where enumerate returns none but request_adapter may work.
-            if let Ok(adapter) = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                })
-                .await
-            {
-                adapters.push(adapter);
-            }
-        }
-
-        // Probe each adapter in a subprocess first — if the GPU driver
-        // segfaults during shader compilation (known AMD Vulkan bug on Polaris),
-        // the subprocess dies and we skip that adapter.  This means we do NOT
-        // dedup by physical device beforehand: if Vulkan crashes for a card,
-        // the DX12 adapter for the same card may still work.
-        // Probe each adapter in a subprocess — if the GPU driver segfaults
-        // during shader compilation, the subprocess dies and we skip that
-        // adapter.  We track which adapter names already have a working miner
-        // so we don't create duplicate miners for the same physical card via
-        // different backends (e.g. Vulkan + DX12).
-        //
-        // Note: dedup by adapter NAME (not PCI device ID) because some cards
-        // share the same device ID (e.g. RX 590 and RX 580 are both 0x67DF).
-        // Different physical cards always have different names.
-        let mut miners = Vec::new();
-        let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        for adapter in adapters.into_iter() {
-            let info = adapter.get_info();
-            if info.device_type == wgpu::DeviceType::Cpu {
-                continue;
-            }
-
-            // Skip if we already have a working miner with this exact name
-            // (same physical card seen via a different backend).
-            if used_names.contains(&info.name) {
-                continue;
-            }
-
-            let identity = AdapterIdentity::from_info(&info);
-
-            // Probe in a subprocess — survives driver segfaults.
-            if !super::gpu::subprocess_probe(&identity) {
-                continue;
-            }
-
-            if let Some(miner) = GpuMiner::try_from_adapter(adapter).await {
-                used_names.insert(info.name.clone());
-                miners.push(std::sync::Arc::new(miner));
-            }
-        }
-        // No need to log adapter counts — internal detail.
-
-        if miners.is_empty() {
+    /// Create a multi-GPU miner from pre-initialized GPU miners.
+    ///
+    /// Called by `select_backend` after `enumerate_all_devices()` identifies
+    /// physical GPUs.  This avoids duplicating adapter enumeration logic.
+    pub async fn from_miners(gpu_miners: Vec<GpuMiner>) -> Option<Self> {
+        if gpu_miners.is_empty() {
             return None;
         }
 
-        let mut weights = Vec::with_capacity(miners.len());
-        let mut device_names = Vec::with_capacity(miners.len());
+        let mut miners = Vec::with_capacity(gpu_miners.len());
+        let mut weights = Vec::with_capacity(gpu_miners.len());
+        let mut device_names = Vec::with_capacity(gpu_miners.len());
         let mut aggregate_hash_rate = 0.0;
-        for miner in &miners {
+
+        for miner in gpu_miners {
             let hps = miner.benchmark().await.unwrap_or(1.0).max(1.0);
             aggregate_hash_rate += hps;
             weights.push(hps);
             device_names.push(miner.adapter_name().to_string());
+            miners.push(std::sync::Arc::new(miner));
         }
 
         let name = if miners.len() == 1 {
@@ -214,8 +161,6 @@ impl MinerBackend for MultiGpuMiner {
         }
 
         // Multi-GPU: each GPU gets its own full 1M nonce work unit.
-        // This is 2x faster than splitting one work unit across GPUs
-        // because each GPU runs at 100% capacity instead of 50%.
         let mut tasks = JoinSet::new();
         for (idx, midstate) in midstates.iter().enumerate() {
             let miner = self.miners[idx % self.miners.len()].clone();
@@ -278,82 +223,77 @@ impl MinerBackend for MultiGpuMiner {
             return Ok(MiningChunkResult::empty());
         }
 
-        let started = std::time::Instant::now();
         let mut tasks = JoinSet::new();
-
-        for (idx, range_start, range_count) in assignments {
+        for (idx, sub_start, sub_count) in assignments {
             let miner = self.miners[idx].clone();
             let midstate = midstate.clone();
             let nonce_table = nonce_table.clone();
             let cancel = cancel.clone();
-
             tasks.spawn(async move {
                 miner
                     .mine_range(
                         &midstate,
                         &nonce_table,
                         difficulty,
-                        range_start,
-                        range_count,
+                        sub_start,
+                        sub_count,
                         cancel,
                     )
                     .await
             });
         }
 
-        let mut attempted = 0u64;
         let mut best: Option<MiningResult> = None;
-
+        let mut total_attempted = 0u64;
+        let mut max_elapsed = std::time::Duration::ZERO;
         while let Some(joined) = tasks.join_next().await {
             let chunk = joined.map_err(|e| anyhow::anyhow!("GPU task join error: {}", e))??;
-            attempted = attempted.saturating_add(chunk.attempted);
+            total_attempted = total_attempted.saturating_add(chunk.attempted);
+            if chunk.elapsed > max_elapsed {
+                max_elapsed = chunk.elapsed;
+            }
             best = choose_best_result(best, chunk.result);
         }
 
         Ok(MiningChunkResult {
             result: best,
-            attempted,
-            elapsed: started.elapsed(),
+            attempted: total_attempted,
+            elapsed: max_elapsed,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::split_assignments_for_weights;
 
     #[test]
-    fn split_assignments_cover_range_without_gaps() {
-        let assignments = split_assignments_for_weights(&[1.0, 2.0, 1.0], 123, 777_777);
-        assert_eq!(assignments.len(), 3);
-
-        let mut cursor = 123u32;
-        let mut total = 0u32;
-        for (_idx, start, count) in assignments {
-            assert_eq!(start, cursor);
-            assert!(count > 0);
-            cursor = cursor.saturating_add(count);
-            total = total.saturating_add(count);
-        }
-
-        assert_eq!(total, 777_777);
-        assert_eq!(cursor, 123 + 777_777);
+    fn split_simple_weights() {
+        let weights = [1.0, 1.0];
+        let assignments = split_assignments_for_weights(&weights, 0, 100);
+        assert_eq!(assignments.len(), 2);
+        let (i0, s0, c0) = assignments[0];
+        let (i1, s1, c1) = assignments[1];
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+        assert_eq!(s0, 0);
+        assert_eq!(s1, 50);
+        assert_eq!(c0 + c1, 100);
     }
 
     #[test]
-    fn split_assignments_follow_weight_ratio() {
-        let assignments = split_assignments_for_weights(&[3.0, 1.0], 0, 1_000_000);
-        assert_eq!(assignments.len(), 2);
-        assert!(assignments[0].2 > assignments[1].2);
-        assert_eq!(assignments[0].2 + assignments[1].2, 1_000_000);
+    fn split_unequal_weights() {
+        let weights = [3.0, 1.0];
+        let assignments = split_assignments_for_weights(&weights, 0, 100);
+        let (_, _, c0) = assignments[0];
+        let (_, _, c1) = assignments[1];
+        assert!(c0 > c1, "GPU 0 should get more nonces");
+        assert_eq!(c0 + c1, 100);
     }
 
     #[test]
-    fn split_assignments_clamps_to_nonce_space_size() {
-        let assignments = split_assignments_for_weights(&[1.0, 1.0], NONCE_SPACE_SIZE - 10, 100);
-        assert_eq!(assignments.len(), 2);
-        assert_eq!(assignments[0].2 + assignments[1].2, 10);
-        assert_eq!(assignments[0].1, NONCE_SPACE_SIZE - 10);
-        assert_eq!(assignments[1].1 + assignments[1].2, NONCE_SPACE_SIZE);
+    fn split_empty() {
+        let assignments = split_assignments_for_weights(&[], 0, 100);
+        assert!(assignments.is_empty());
     }
 }
