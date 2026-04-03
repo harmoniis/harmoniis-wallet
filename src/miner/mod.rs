@@ -16,6 +16,8 @@ pub mod gpu;
 pub mod multi_cuda;
 #[cfg(feature = "gpu")]
 pub mod multi_gpu;
+#[cfg(feature = "cuda")]
+pub mod persistent_cuda;
 pub mod protocol;
 pub mod sha256;
 pub mod simd_cpu;

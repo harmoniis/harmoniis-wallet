@@ -46,9 +46,10 @@ const META_NICKNAME: &str = "nickname";
 
 pub const MAX_PGP_KEYS: u32 = 1_000;
 const MASTER_DB_FILENAME: &str = "master.db";
-const RGB_DB_FILENAME: &str = "rgb.db";
-const VOUCHER_DB_FILENAME: &str = "voucher.db";
-const WALLET_DB_FILENAME: &str = "wallet.db";
+/// Legacy filenames from before the `{label}_{family}.db` convention.
+/// Kept only for backward-compatible opening/migration of old wallets.
+const LEGACY_RGB_DB: &str = "rgb.db";
+const LEGACY_WALLET_DB: &str = "wallet.db";
 const RGB_SHARD_DIR: &str = "identities";
 
 /// SQLite-backed Harmoniis wallet.
@@ -100,18 +101,30 @@ impl WalletCore {
             .unwrap_or_else(|| PathBuf::from("."));
         let master_path = if file_name.eq_ignore_ascii_case(MASTER_DB_FILENAME) {
             normalized.clone()
-        } else if file_name.eq_ignore_ascii_case(RGB_DB_FILENAME)
-            || file_name.eq_ignore_ascii_case(WALLET_DB_FILENAME)
+        } else if file_name.eq_ignore_ascii_case(LEGACY_RGB_DB)
+            || file_name.eq_ignore_ascii_case("main_rgb.db")
+            || file_name.eq_ignore_ascii_case(LEGACY_WALLET_DB)
         {
             base_dir.join(MASTER_DB_FILENAME)
         } else {
             normalized.clone()
         };
+        // Canonical RGB path: main_rgb.db.  Fall back to legacy rgb.db
+        // for existing wallets that haven't migrated yet.
+        let canonical_rgb = base_dir.join("main_rgb.db");
+        let legacy_rgb = base_dir.join(LEGACY_RGB_DB);
+        let rgb_path = if canonical_rgb.exists() {
+            canonical_rgb
+        } else if legacy_rgb.exists() {
+            legacy_rgb
+        } else {
+            canonical_rgb
+        };
         Ok(WalletDiskPaths {
             base_dir: base_dir.clone(),
             master_path,
-            rgb_path: base_dir.join(RGB_DB_FILENAME),
-            wallet_migration_path: base_dir.join(WALLET_DB_FILENAME),
+            rgb_path,
+            wallet_migration_path: base_dir.join(LEGACY_WALLET_DB),
         })
     }
 
@@ -356,35 +369,49 @@ impl WalletCore {
         let bitcoin_hex = self.derive_slot_hex("bitcoin", 0)?;
         let vault_hex = self.derive_slot_hex(SLOT_FAMILY_VAULT, 0)?;
 
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('rgb', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='rgb' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='rgb' AND slot_index=0), ?2), ?2)",
-            params![rgb_hex, now],
+        // Slot-0 entries for wallet families: label is always "main",
+        // db_rel_path follows the canonical {label}_{family}.db convention.
+        // root and vault slot 0 are internal (no label / no db file).
+        Self::upsert_slot_0(
+            &self.master_conn,
+            "rgb",
+            &rgb_hex,
+            Some("main_rgb.db"),
+            Some("main"),
+            &now,
         )?;
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('webcash', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='webcash' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='webcash' AND slot_index=0), ?2), ?2)",
-            params![webcash_hex, now],
+        Self::upsert_slot_0(
+            &self.master_conn,
+            "webcash",
+            &webcash_hex,
+            Some("main_webcash.db"),
+            Some("main"),
+            &now,
         )?;
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('bitcoin', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='bitcoin' AND slot_index=0), ?2), ?2)",
-            params![bitcoin_hex, now],
+        Self::upsert_slot_0(
+            &self.master_conn,
+            "bitcoin",
+            &bitcoin_hex,
+            Some("main_bitcoin.db"),
+            Some("main"),
+            &now,
         )?;
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('voucher', 0, ?1, ?2, (SELECT label FROM wallet_slots WHERE family='voucher' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='voucher' AND slot_index=0), ?3), ?3)",
-            params![voucher_hex, Some(VOUCHER_DB_FILENAME.to_string()), now],
+        Self::upsert_slot_0(
+            &self.master_conn,
+            "voucher",
+            &voucher_hex,
+            Some("main_voucher.db"),
+            Some("main"),
+            &now,
         )?;
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES ('root', 0, ?1, NULL, (SELECT label FROM wallet_slots WHERE family='root' AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family='root' AND slot_index=0), ?2), ?2)",
-            params![root_hex, now],
-        )?;
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES (?1, 0, ?2, NULL, (SELECT label FROM wallet_slots WHERE family=?1 AND slot_index=0), COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=0), ?3), ?3)",
-            params![SLOT_FAMILY_VAULT, vault_hex, now],
+        Self::upsert_slot_0(&self.master_conn, "root", &root_hex, None, None, &now)?;
+        Self::upsert_slot_0(
+            &self.master_conn,
+            SLOT_FAMILY_VAULT,
+            &vault_hex,
+            None,
+            None,
+            &now,
         )?;
 
         let mut vault_stmt = self.master_conn.prepare(
@@ -440,7 +467,7 @@ impl WalletCore {
                 params![
                     i64::from(key_index),
                     public_key_hex,
-                    Some(RGB_DB_FILENAME.to_string()),
+                    Option::<String>::None,
                     label,
                     now
                 ],
@@ -871,6 +898,25 @@ impl WalletCore {
             candidate = format!("{desired}-{suffix}");
             suffix = suffix.saturating_add(1);
         }
+    }
+
+    /// Upsert a slot-0 entry in wallet_slots, preserving created_at.
+    fn upsert_slot_0(
+        conn: &Connection,
+        family: &str,
+        descriptor: &str,
+        db_rel_path: Option<&str>,
+        label: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT OR REPLACE INTO wallet_slots
+                (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
+             VALUES (?1, 0, ?2, ?3, ?4,
+                COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=0), ?5), ?5)",
+            params![family, descriptor, db_rel_path, label, now],
+        )?;
+        Ok(())
     }
 
     // ── Wallet metadata ──────────────────────────────────────────────────────

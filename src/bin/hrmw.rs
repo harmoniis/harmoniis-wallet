@@ -45,11 +45,11 @@ mod media;
 mod request_engine;
 use cli_support::{
     build_activity_metadata, build_post_attachments, check_master_in_password_manager,
-    default_voucher_wallet_path, default_webcash_wallet_path, extract_webcash_token,
-    labeled_webcash_wallet_path, make_client, next_contract_id, now_utc,
-    open_labeled_webcash_wallet, open_or_create_wallet, open_voucher_wallet, open_webcash_wallet,
-    parse_amount_to_units, parse_keywords_csv, remove_master_from_password_manager,
-    resolve_wallet_path, store_master_in_password_manager, write_recovery_sidecar,
+    effective_label, extract_webcash_token, labeled_wallet_display_path, make_client,
+    next_contract_id, now_utc, open_or_create_wallet, parse_amount_to_units, parse_keywords_csv,
+    remove_master_from_password_manager, resolve_bitcoin_db_path, resolve_voucher_wallet,
+    resolve_wallet_path, resolve_webcash_wallet, store_master_in_password_manager,
+    write_recovery_sidecar,
 };
 use media::{prepare_avatar_image, prepare_post_image};
 use request_engine::{execute_paid_request, RequestBodySpec, RequestResponse, RequestSpec};
@@ -57,8 +57,25 @@ use request_engine::{execute_paid_request, RequestBodySpec, RequestResponse, Req
 const DEFAULT_API_URL: &str = "https://harmoniis.com/api";
 
 /// Derive the `bitcoin.db` path from the wallet path (sibling to `master.db`).
+/// Used by ARK and other subsystems that always operate on the main bitcoin wallet.
 fn bitcoin_db_path(wallet_path: &std::path::Path) -> std::path::PathBuf {
-    wallet_path.with_file_name("bitcoin.db")
+    resolve_bitcoin_db_path(wallet_path, None)
+}
+
+/// Open a labeled bitcoin wallet. Uses `--label` for HD derivation and DB path.
+fn open_labeled_bitcoin_wallet(
+    wallet: &harmoniis_wallet::wallet::RgbWallet,
+    network: Network,
+    wallet_path: &std::path::Path,
+    label: Option<&str>,
+) -> anyhow::Result<DeterministicBitcoinWallet> {
+    let lbl = effective_label(label);
+    let (slot_hex, _index) = wallet
+        .derive_bitcoin_secret_for_label(lbl)
+        .context("failed to derive labeled bitcoin wallet")?;
+    let db_path = resolve_bitcoin_db_path(wallet_path, label);
+    DeterministicBitcoinWallet::from_slot_seed_hex(&slot_hex, network, Some(db_path))
+        .map_err(anyhow::Error::from)
 }
 
 /// If `--accept-terms` was not passed on the CLI, prompt the user interactively.
@@ -294,6 +311,8 @@ enum WebcashCmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// List available labeled webcash wallets
+    Labels,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -351,6 +370,9 @@ enum BitcoinCmd {
         /// Max parallel HTTP requests used during scan
         #[arg(long, default_value_t = 4)]
         parallel_requests: usize,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Show receive address at a deterministic index (`taproot` or `segwit`)
     Address {
@@ -363,6 +385,9 @@ enum BitcoinCmd {
         /// Address index (external keychain)
         #[arg(long, default_value_t = 0)]
         index: u32,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Run explicit Esplora sync and print balances
     Sync {
@@ -378,6 +403,9 @@ enum BitcoinCmd {
         /// Max parallel HTTP requests used during scan
         #[arg(long, default_value_t = 4)]
         parallel_requests: usize,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Send sats on-chain from deterministic taproot wallet
     Send {
@@ -400,10 +428,15 @@ enum BitcoinCmd {
         /// Max parallel HTTP requests used during scan
         #[arg(long, default_value_t = 4)]
         parallel_requests: usize,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// ARK protocol offchain Bitcoin operations (via Arkade ASP)
     #[command(subcommand)]
     Ark(BitcoinArkCmd),
+    /// List available labeled bitcoin wallets
+    Labels,
 }
 
 #[derive(Subcommand)]
@@ -521,11 +554,18 @@ enum BitcoinArkCmd {
 #[derive(Subcommand)]
 enum VoucherCmd {
     /// Show Voucher balance and output counts
-    Info,
+    Info {
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Insert a voucher secret into the local wallet
     Insert {
         /// Voucher secret token: v<amount>:secret:<hex>
         secret: String,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Create a spend token from the local wallet
     Pay {
@@ -534,19 +574,34 @@ enum VoucherCmd {
         /// Optional memo
         #[arg(long, default_value = "hrmw voucher payment")]
         memo: String,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Verify unspent outputs against the voucher service
-    Check,
+    Check {
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Recover wallet outputs from deterministic master secret
     Recover {
         #[arg(long, default_value_t = 20)]
         gap_limit: usize,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Consolidate many outputs into fewer outputs
     Merge {
         #[arg(long, default_value_t = 20)]
         group: usize,
+        /// Use a labeled sub-wallet instead of the default "main"
+        #[arg(long)]
+        label: Option<String>,
     },
+    /// List available labeled voucher wallets
+    Labels,
 }
 
 #[derive(Subcommand)]
@@ -1763,7 +1818,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Info => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let (active_label, active_pgp) = active_pgp_identity(&wallet)?;
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
             let webcash_balance = webcash_wallet
                 .balance()
                 .await
@@ -1814,7 +1869,8 @@ async fn main() -> anyhow::Result<()> {
             match resp.status.as_str() {
                 "donated" => {
                     if let Some(secret) = resp.secret {
-                        let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+                        let webcash_wallet =
+                            resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
                         let parsed = SecretWebcash::parse(&secret)
                             .map_err(|e| anyhow::anyhow!("invalid donated webcash format: {e}"))?;
                         webcash_wallet
@@ -1824,7 +1880,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("Donation claimed.");
                         println!(
                             "Inserted into wallet: {}",
-                            default_webcash_wallet_path(&wallet_path).display()
+                            labeled_wallet_display_path(&wallet_path, "webcash", None).display()
                         );
                     } else {
                         anyhow::bail!("donation response missing secret");
@@ -1847,20 +1903,26 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── webcash ───────────────────────────────────────────────────────────
+        Cmd::Webcash(WebcashCmd::Labels) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let wallets = wallet.list_labeled_wallets("webcash")?;
+            if wallets.is_empty() {
+                println!("No labeled webcash wallets.");
+            } else {
+                println!("{:<24} {:>6}  db_filename", "label", "slot");
+                for w in wallets {
+                    println!("{:<24} {:>6}  {}", w.label, w.slot_index, w.db_filename);
+                }
+            }
+        }
+
         Cmd::Webcash(WebcashCmd::Info { label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             let balance = webcash_wallet.balance().await?;
             let stats = webcash_wallet.stats().await?;
-            let path = if let Some(lbl) = &label {
-                labeled_webcash_wallet_path(&wallet_path, lbl)
-            } else {
-                default_webcash_wallet_path(&wallet_path)
-            };
+            let path = labeled_wallet_display_path(&wallet_path, "webcash", label.as_deref());
             println!("Webcash wallet: {}", path.display());
             println!("Balance:        {}", balance);
             println!("Unspent:        {}", stats.unspent_webcash);
@@ -1870,11 +1932,8 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Insert { secret, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             let parsed = SecretWebcash::parse(&secret)
                 .map_err(|e| anyhow::anyhow!("invalid webcash secret format: {e}"))?;
             webcash_wallet
@@ -1882,11 +1941,7 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("failed to insert webcash")?;
             let balance = webcash_wallet.balance().await?;
-            let path = if let Some(lbl) = &label {
-                labeled_webcash_wallet_path(&wallet_path, lbl)
-            } else {
-                default_webcash_wallet_path(&wallet_path)
-            };
+            let path = labeled_wallet_display_path(&wallet_path, "webcash", label.as_deref());
             println!("Inserted webcash into {}", path.display());
             println!("Balance: {balance}");
         }
@@ -1897,11 +1952,8 @@ async fn main() -> anyhow::Result<()> {
             label,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             let parsed_amount = WebcashAmount::from_str(&amount)
                 .with_context(|| format!("invalid webcash amount '{amount}'"))?;
             let output = webcash_wallet
@@ -1915,11 +1967,8 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Check { label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             webcash_wallet
                 .check()
                 .await
@@ -1929,11 +1978,8 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Recover { gap_limit, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             let summary = webcash_wallet
                 .recover_from_wallet(gap_limit)
                 .await
@@ -1943,11 +1989,8 @@ async fn main() -> anyhow::Result<()> {
 
         Cmd::Webcash(WebcashCmd::Merge { group, label }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
-            let webcash_wallet = if let Some(lbl) = &label {
-                open_labeled_webcash_wallet(&wallet_path, &wallet, lbl).await?
-            } else {
-                open_webcash_wallet(&wallet_path, &wallet).await?
-            };
+            let webcash_wallet =
+                resolve_webcash_wallet(&wallet_path, &wallet, label.as_deref()).await?;
             let summary = webcash_wallet
                 .merge(group)
                 .await
@@ -1956,17 +1999,36 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── voucher prepaid-credit wallet ────────────────────────────────────
+        Cmd::Voucher(VoucherCmd::Labels) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let wallets = wallet.list_labeled_wallets("voucher")?;
+            if wallets.is_empty() {
+                println!("No labeled voucher wallets.");
+            } else {
+                println!("{:<24} {:>6}  db_filename", "label", "slot");
+                for w in wallets {
+                    println!("{:<24} {:>6}  {}", w.label, w.slot_index, w.db_filename);
+                }
+            }
+        }
         Cmd::Voucher(cmd) => {
+            let label = match &cmd {
+                VoucherCmd::Info { label } => label.as_deref(),
+                VoucherCmd::Insert { label, .. } => label.as_deref(),
+                VoucherCmd::Pay { label, .. } => label.as_deref(),
+                VoucherCmd::Check { label } => label.as_deref(),
+                VoucherCmd::Recover { label, .. } => label.as_deref(),
+                VoucherCmd::Merge { label, .. } => label.as_deref(),
+                VoucherCmd::Labels => unreachable!(),
+            };
             let wallet = open_or_create_wallet(&wallet_path)?;
             let client = make_client(api, direct);
-            let voucher_wallet = open_voucher_wallet(&wallet_path, &wallet)?;
+            let voucher_wallet = resolve_voucher_wallet(&wallet_path, &wallet, label)?;
+            let display_path = labeled_wallet_display_path(&wallet_path, "voucher", label);
             match cmd {
-                VoucherCmd::Info => {
+                VoucherCmd::Info { .. } => {
                     let stats = voucher_wallet.stats()?;
-                    println!(
-                        "Voucher wallet: {}",
-                        default_voucher_wallet_path(&wallet_path).display()
-                    );
+                    println!("Voucher wallet: {}", display_path.display());
                     let whole = stats.balance_units / 100_000_000;
                     let frac = stats.balance_units % 100_000_000;
                     if frac == 0 {
@@ -1979,15 +2041,12 @@ async fn main() -> anyhow::Result<()> {
                     println!("Total outputs:  {}", stats.total_outputs);
                     println!("Spent outputs:  {}", stats.spent_outputs);
                 }
-                VoucherCmd::Insert { secret } => {
+                VoucherCmd::Insert { secret, .. } => {
                     let parsed = harmoniis_wallet::VoucherSecret::parse(&secret)
                         .map_err(anyhow::Error::from)?;
                     voucher_wallet.insert(parsed)?;
                     let stats = voucher_wallet.stats()?;
-                    println!(
-                        "Inserted voucher into {}",
-                        default_voucher_wallet_path(&wallet_path).display()
-                    );
+                    println!("Inserted voucher into {}", display_path.display());
                     let w = stats.balance_units / 100_000_000;
                     let f = stats.balance_units % 100_000_000;
                     if f == 0 {
@@ -2000,14 +2059,13 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
-                VoucherCmd::Pay { amount, memo } => {
+                VoucherCmd::Pay { amount, memo, .. } => {
                     let parsed: f64 = amount
                         .parse()
                         .map_err(|_| anyhow::anyhow!("invalid amount: '{amount}'"))?;
                     if parsed <= 0.0 {
                         anyhow::bail!("amount must be positive");
                     }
-                    // Convert to atomic units (8 decimal places, like webcash wats)
                     let amount_units = (parsed * 100_000_000.0).round() as u64;
                     if amount_units == 0 {
                         anyhow::bail!("amount too small — minimum 0.00000001 credits");
@@ -2016,39 +2074,50 @@ async fn main() -> anyhow::Result<()> {
                     println!("Voucher payment:");
                     println!("{}", output.display());
                 }
-                VoucherCmd::Check => {
+                VoucherCmd::Check { .. } => {
                     let refreshed = voucher_wallet.check(&client).await?;
                     println!(
                         "Voucher check complete. Live balance: {} credits",
                         refreshed.balance_units
                     );
                 }
-                VoucherCmd::Recover { gap_limit } => {
+                VoucherCmd::Recover { gap_limit, .. } => {
                     let summary = voucher_wallet.recover_from_wallet(gap_limit)?;
                     println!("{summary}");
                 }
-                VoucherCmd::Merge { group } => {
+                VoucherCmd::Merge { group, .. } => {
                     let summary = voucher_wallet.merge(&client, group).await?;
                     println!("{summary}");
                 }
+                VoucherCmd::Labels => unreachable!(),
             }
         }
 
         // ── bitcoin deterministic wallet ───────────────────────────────────
+        Cmd::Bitcoin(BitcoinCmd::Labels) => {
+            let wallet = open_or_create_wallet(&wallet_path)?;
+            let wallets = wallet.list_labeled_wallets("bitcoin")?;
+            if wallets.is_empty() {
+                println!("No labeled bitcoin wallets.");
+            } else {
+                println!("{:<24} {:>6}  db_filename", "label", "slot");
+                for w in wallets {
+                    println!("{:<24} {:>6}  {}", w.label, w.slot_index, w.db_filename);
+                }
+            }
+        }
         Cmd::Bitcoin(BitcoinCmd::Info {
             network,
             esplora,
             no_sync,
             stop_gap,
             parallel_requests,
+            label,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(
-                &wallet,
-                network,
-                Some(bitcoin_db_path(&wallet_path)),
-            )?;
+            let btc =
+                open_labeled_bitcoin_wallet(&wallet, network, &wallet_path, label.as_deref())?;
             let (taproot_external, taproot_internal) =
                 btc.descriptor_strings_for(BitcoinAddressKind::Taproot)?;
             let (segwit_external, segwit_internal) =
@@ -2113,14 +2182,12 @@ async fn main() -> anyhow::Result<()> {
             network,
             kind,
             index,
+            label,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(
-                &wallet,
-                network,
-                Some(bitcoin_db_path(&wallet_path)),
-            )?;
+            let btc =
+                open_labeled_bitcoin_wallet(&wallet, network, &wallet_path, label.as_deref())?;
             let addr = btc.receive_address_at_kind(index, kind.into())?;
             println!("{addr}");
         }
@@ -2130,14 +2197,12 @@ async fn main() -> anyhow::Result<()> {
             esplora,
             stop_gap,
             parallel_requests,
+            label,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(
-                &wallet,
-                network,
-                Some(bitcoin_db_path(&wallet_path)),
-            )?;
+            let btc =
+                open_labeled_bitcoin_wallet(&wallet, network, &wallet_path, label.as_deref())?;
             let esplora_url = resolved_esplora_url(network, esplora);
             let snapshot = btc.sync(&esplora_url, stop_gap, parallel_requests)?;
             println!("Network:       {}", snapshot.network);
@@ -2181,14 +2246,12 @@ async fn main() -> anyhow::Result<()> {
             fee_rate_sat_vb,
             stop_gap,
             parallel_requests,
+            label,
         }) => {
             let wallet = open_or_create_wallet(&wallet_path)?;
             let network = Network::from(network);
-            let btc = DeterministicBitcoinWallet::from_master_wallet(
-                &wallet,
-                network,
-                Some(bitcoin_db_path(&wallet_path)),
-            )?;
+            let btc =
+                open_labeled_bitcoin_wallet(&wallet, network, &wallet_path, label.as_deref())?;
             let esplora_url = resolved_esplora_url(network, esplora);
             let txid = btc.send_taproot_onchain(
                 &esplora_url,
@@ -2716,7 +2779,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Deterministic webcash reconstruction.
-            let webcash_wallet = open_webcash_wallet(&wallet_path, &wallet).await?;
+            let webcash_wallet = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
             let webcash_summary = webcash_wallet
                 .recover_from_wallet(40)
                 .await
@@ -3829,7 +3892,7 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
             let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
-            let webcash_wallet_path = default_webcash_wallet_path(&wallet_path);
+            let webcash_wallet_path = labeled_wallet_display_path(&wallet_path, "webcash", None);
             let backend_choice = if cpu_only {
                 BackendChoice::Cpu
             } else {
@@ -3875,8 +3938,8 @@ async fn main() -> anyhow::Result<()> {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
             let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
             let run_wallet = run_wallet.unwrap_or_else(|| wallet_path.clone());
-            let run_webcash_wallet =
-                webcash_wallet.unwrap_or_else(|| default_webcash_wallet_path(&run_wallet));
+            let run_webcash_wallet = webcash_wallet
+                .unwrap_or_else(|| labeled_wallet_display_path(&run_wallet, "webcash", None));
             let backend_choice = if cpu_only {
                 BackendChoice::Cpu
             } else {
@@ -3913,8 +3976,9 @@ async fn main() -> anyhow::Result<()> {
             match cloud_cmd {
                 CloudCmd::Start { label, machine } => {
                     // Derive the labeled webcash wallet
-                    let _wc = open_labeled_webcash_wallet(&wallet_path, &wallet, &label).await?;
-                    let db_path = labeled_webcash_wallet_path(&wallet_path, &label);
+                    let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&label)).await?;
+                    let db_path =
+                        labeled_wallet_display_path(&wallet_path, "webcash", Some(&label));
 
                     provision::start(&label, machine, &db_path, &ssh_key).await?;
                 }
@@ -3928,7 +3992,7 @@ async fn main() -> anyhow::Result<()> {
                     // Recover mined webcash locally (no SCP — deterministic secret)
                     println!("Recovering mined webcash...");
                     let labeled_wc =
-                        open_labeled_webcash_wallet(&wallet_path, &wallet, &state.label).await?;
+                        resolve_webcash_wallet(&wallet_path, &wallet, Some(&state.label)).await?;
                     let recovery = labeled_wc
                         .recover_from_wallet(50)
                         .await
@@ -3949,7 +4013,7 @@ async fn main() -> anyhow::Result<()> {
                             .await
                             .context("failed to pay from mining wallet")?;
                         let token = extract_webcash_token(&payment)?;
-                        let main_wc = open_webcash_wallet(&wallet_path, &wallet).await?;
+                        let main_wc = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
                         let parsed = SecretWebcash::parse(&token)
                             .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
                         main_wc

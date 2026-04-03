@@ -571,91 +571,97 @@ fn check_master_windows_credential_manager(
     Ok(output.status.success())
 }
 
-pub fn default_webcash_wallet_path(master_wallet_path: &Path) -> PathBuf {
+// ── Labeled-wallet resolution ─────────────────────────────────────────────
+//
+// Every wallet family (webcash, bitcoin, voucher, rgb) uses:
+//   Canonical DB name:  {label}_{family}.db   (e.g. main_webcash.db)
+//   Legacy name (main): {family}.db           (e.g. webcash.db)
+//
+// `resolve_labeled_db_path` prefers canonical, falls back to legacy for
+// the "main" label (existing wallets), defaults to canonical for new ones.
+
+/// Effective label: returns "main" when the user omitted `--label`.
+pub fn effective_label(label: Option<&str>) -> &str {
+    match label {
+        None | Some("main") => "main",
+        Some(l) => l,
+    }
+}
+
+/// Resolve the database path for a labeled wallet with legacy fallback.
+pub fn resolve_labeled_db_path(master_wallet_path: &Path, family: &str, label: &str) -> PathBuf {
     let base_dir = master_wallet_path
         .parent()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| PathBuf::from("."));
-    base_dir.join("webcash.db")
+    let canonical = base_dir.join(format!("{label}_{family}.db"));
+    if canonical.exists() {
+        return canonical;
+    }
+    // Legacy fallback: "main" label used {family}.db before the label convention.
+    if label == "main" {
+        let legacy = base_dir.join(format!("{family}.db"));
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    canonical
 }
 
-pub fn labeled_webcash_wallet_path(master_wallet_path: &Path, label: &str) -> PathBuf {
-    let base_dir = master_wallet_path
-        .parent()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base_dir.join(format!("{label}_webcash.db"))
-}
-
-pub async fn open_labeled_webcash_wallet(
+/// Open a webcash wallet for any label (including "main" as default).
+pub async fn resolve_webcash_wallet(
     master_wallet_path: &Path,
     wallet: &RgbWallet,
-    label: &str,
+    label: Option<&str>,
 ) -> anyhow::Result<WebcashWallet> {
+    let label = effective_label(label);
     let (secret, _index) = wallet
         .derive_webcash_secret_for_label(label)
-        .context("failed to derive labeled webcash wallet")?;
-    let webcash_path = labeled_webcash_wallet_path(master_wallet_path, label);
-    let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
-        format!(
-            "failed to open labeled webcash wallet at {}",
-            webcash_path.display()
-        )
-    })?;
+        .context("failed to derive webcash wallet")?;
+    let db_path = resolve_labeled_db_path(master_wallet_path, "webcash", label);
+    let webcash_wallet = WebcashWallet::open(&db_path)
+        .await
+        .with_context(|| format!("failed to open webcash wallet at {}", db_path.display()))?;
     webcash_wallet
         .store_master_secret(&secret)
         .await
-        .context("failed to store labeled webcash master secret")?;
+        .context("failed to store webcash master secret")?;
     Ok(webcash_wallet)
 }
 
-pub fn default_voucher_wallet_path(master_wallet_path: &Path) -> PathBuf {
-    let base_dir = master_wallet_path
-        .parent()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base_dir.join("voucher.db")
-}
-
-pub async fn open_webcash_wallet(
+/// Open a voucher wallet for any label (including "main" as default).
+pub fn resolve_voucher_wallet(
     master_wallet_path: &Path,
     wallet: &RgbWallet,
-) -> anyhow::Result<WebcashWallet> {
-    let webcash_path = default_webcash_wallet_path(master_wallet_path);
-    let webcash_wallet = WebcashWallet::open(&webcash_path).await.with_context(|| {
-        format!(
-            "failed to open webcash wallet at {}",
-            webcash_path.display()
-        )
-    })?;
-    let master_secret = wallet
-        .derive_webcash_master_secret_hex()
-        .context("failed to derive wallet webcash master secret")?;
-    webcash_wallet
-        .store_master_secret(&master_secret)
-        .await
-        .context("failed to store deterministic webcash master secret")?;
-    Ok(webcash_wallet)
-}
-
-pub fn open_voucher_wallet(
-    master_wallet_path: &Path,
-    wallet: &RgbWallet,
+    label: Option<&str>,
 ) -> anyhow::Result<VoucherWallet> {
-    let voucher_path = default_voucher_wallet_path(master_wallet_path);
-    let voucher_wallet = VoucherWallet::open(&voucher_path).with_context(|| {
-        format!(
-            "failed to open voucher wallet at {}",
-            voucher_path.display()
-        )
-    })?;
-    let master_secret = wallet
-        .derive_voucher_master_secret_hex()
-        .context("failed to derive wallet voucher master secret")?;
+    let label = effective_label(label);
+    let (secret, _index) = wallet
+        .derive_voucher_secret_for_label(label)
+        .context("failed to derive voucher wallet")?;
+    let db_path = resolve_labeled_db_path(master_wallet_path, "voucher", label);
+    let voucher_wallet = VoucherWallet::open(&db_path)
+        .with_context(|| format!("failed to open voucher wallet at {}", db_path.display()))?;
     voucher_wallet
-        .store_master_secret(&master_secret)
-        .context("failed to store deterministic voucher master secret")?;
+        .store_master_secret(&secret)
+        .context("failed to store voucher master secret")?;
     Ok(voucher_wallet)
+}
+
+/// Resolve the bitcoin.db path for a labeled wallet.
+pub fn resolve_bitcoin_db_path(wallet_path: &Path, label: Option<&str>) -> PathBuf {
+    let label = effective_label(label);
+    resolve_labeled_db_path(wallet_path, "bitcoin", label)
+}
+
+/// Display path for a labeled wallet (for user-facing output).
+pub fn labeled_wallet_display_path(
+    master_wallet_path: &Path,
+    family: &str,
+    label: Option<&str>,
+) -> PathBuf {
+    let label = effective_label(label);
+    resolve_labeled_db_path(master_wallet_path, family, label)
 }
 
 pub fn extract_webcash_token(payment_output: &str) -> anyhow::Result<String> {
@@ -678,7 +684,7 @@ pub async fn pay_from_wallet(
     amount: &str,
     memo: &str,
 ) -> anyhow::Result<String> {
-    let webcash_wallet = open_webcash_wallet(rgb_wallet_path, wallet).await?;
+    let webcash_wallet = resolve_webcash_wallet(rgb_wallet_path, wallet, None).await?;
     let parsed_amount = WebcashAmount::from_str(amount)
         .with_context(|| format!("invalid webcash amount '{amount}'"))?;
     let payment_output = webcash_wallet
@@ -695,7 +701,7 @@ pub async fn pay_voucher_from_wallet(
     amount_units: u64,
     memo: &str,
 ) -> anyhow::Result<VoucherSecret> {
-    let voucher_wallet = open_voucher_wallet(rgb_wallet_path, wallet)?;
+    let voucher_wallet = resolve_voucher_wallet(rgb_wallet_path, wallet, None)?;
     voucher_wallet
         .pay(client, amount_units, memo)
         .await

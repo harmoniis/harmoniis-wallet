@@ -552,7 +552,7 @@ fn labeled_bitcoin_and_voucher_wallets_work() {
         .expect("voucher shop");
     assert_ne!(v_main, v_shop);
 
-    // DB filenames follow convention
+    // DB filenames follow convention: {label}_{family}.db
     assert_eq!(
         harmoniis_wallet::wallet::WalletCore::wallet_db_filename("webcash", "donation"),
         "donation_webcash.db"
@@ -561,4 +561,190 @@ fn labeled_bitcoin_and_voucher_wallets_work() {
         harmoniis_wallet::wallet::WalletCore::wallet_db_filename("bitcoin", "main"),
         "main_bitcoin.db"
     );
+    assert_eq!(
+        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("voucher", "cloudminer"),
+        "cloudminer_voucher.db"
+    );
+    assert_eq!(
+        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("rgb", "secondary"),
+        "secondary_rgb.db"
+    );
+}
+
+#[test]
+fn slot_0_is_always_main_for_all_wallet_families() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // First access with "main" should always get slot 0
+    for family in &["webcash", "bitcoin", "voucher", "rgb"] {
+        let method = match *family {
+            "webcash" => wallet.derive_webcash_secret_for_label("main"),
+            "bitcoin" => wallet.derive_bitcoin_secret_for_label("main"),
+            "voucher" => wallet.derive_voucher_secret_for_label("main"),
+            "rgb" => wallet.derive_rgb_secret_for_label("main"),
+            _ => unreachable!(),
+        };
+        let (_secret, index) = method.unwrap_or_else(|e| panic!("{family} main failed: {e}"));
+        assert_eq!(index, 0, "{family}: 'main' label must always map to slot 0");
+    }
+}
+
+#[test]
+fn labeled_wallet_slot_reuse_is_stable() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // Create a labeled wallet, then access it again — same slot, same secret.
+    let (secret_a, idx_a) = wallet
+        .derive_webcash_secret_for_label("savings")
+        .expect("first access");
+    let (secret_b, idx_b) = wallet
+        .derive_webcash_secret_for_label("savings")
+        .expect("second access");
+    assert_eq!(idx_a, idx_b, "same label must reuse the same slot");
+    assert_eq!(secret_a, secret_b, "same slot must produce the same secret");
+
+    // Different label gets a different slot
+    let (_secret_c, idx_c) = wallet
+        .derive_webcash_secret_for_label("donations")
+        .expect("different label");
+    assert_ne!(idx_a, idx_c, "different labels must get different slots");
+}
+
+#[test]
+fn wallet_slots_registry_is_consistent_after_refresh() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // After open_memory, refresh_slot_registry has already been called.
+    // Verify that slot 0 entries have label="main" for wallet families.
+    let slots = wallet.list_wallet_slots(None).expect("list all slots");
+    for family in &["webcash", "bitcoin", "voucher", "rgb"] {
+        let slot = slots
+            .iter()
+            .find(|s| s.family == *family && s.slot_index == 0);
+        assert!(slot.is_some(), "{family} slot 0 must exist in wallet_slots");
+        let slot = slot.unwrap();
+        assert_eq!(
+            slot.label.as_deref(),
+            Some("main"),
+            "{family} slot 0 label must be 'main'"
+        );
+        assert!(
+            !slot.descriptor.is_empty(),
+            "{family} slot 0 must have a descriptor"
+        );
+    }
+
+    // ALL wallet families follow {label}_{family}.db for db_rel_path
+    for family in &["webcash", "bitcoin", "voucher", "rgb"] {
+        let slot = slots
+            .iter()
+            .find(|s| s.family == *family && s.slot_index == 0)
+            .unwrap();
+        let expected_db = format!("main_{family}.db");
+        assert_eq!(
+            slot.db_rel_path.as_deref(),
+            Some(expected_db.as_str()),
+            "{family} slot 0 db_rel_path must be '{expected_db}'"
+        );
+    }
+}
+
+#[test]
+fn multiple_families_labeled_wallets_dont_collide() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // Create "hot" label in webcash and bitcoin — they should get independent slots
+    let (wc_secret, wc_idx) = wallet
+        .derive_webcash_secret_for_label("hot")
+        .expect("webcash hot");
+    let (btc_secret, btc_idx) = wallet
+        .derive_bitcoin_secret_for_label("hot")
+        .expect("bitcoin hot");
+
+    // Both get slot 1 (first non-main slot) in their respective families
+    assert_eq!(wc_idx, 1, "webcash hot should be slot 1");
+    assert_eq!(btc_idx, 1, "bitcoin hot should be slot 1");
+
+    // But the secrets are different because the family derivation paths differ
+    assert_ne!(
+        wc_secret, btc_secret,
+        "webcash and bitcoin must derive different secrets even at same slot index"
+    );
+
+    // The two should be listed independently
+    let wc_wallets = wallet
+        .list_labeled_wallets("webcash")
+        .expect("list webcash");
+    let btc_wallets = wallet
+        .list_labeled_wallets("bitcoin")
+        .expect("list bitcoin");
+    assert!(wc_wallets.iter().any(|w| w.label == "hot"));
+    assert!(btc_wallets.iter().any(|w| w.label == "hot"));
+}
+
+#[test]
+fn list_labeled_wallets_shows_all_created_labels() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+
+    // Create several labeled webcash wallets
+    wallet
+        .derive_webcash_secret_for_label("main")
+        .expect("main");
+    wallet
+        .derive_webcash_secret_for_label("savings")
+        .expect("savings");
+    wallet
+        .derive_webcash_secret_for_label("cloudminer")
+        .expect("cloudminer");
+
+    let wallets = wallet.list_labeled_wallets("webcash").expect("list");
+    // Should have at least main (slot 0), savings, cloudminer
+    assert!(
+        wallets.len() >= 3,
+        "expected at least 3 wallets, got {}",
+        wallets.len()
+    );
+    assert!(wallets
+        .iter()
+        .any(|w| w.label == "main" && w.slot_index == 0));
+    assert!(wallets.iter().any(|w| w.label == "savings"));
+    assert!(wallets.iter().any(|w| w.label == "cloudminer"));
+
+    // DB filenames follow convention
+    let savings = wallets.iter().find(|w| w.label == "savings").unwrap();
+    assert_eq!(savings.db_filename, "savings_webcash.db");
+    let cloudminer = wallets.iter().find(|w| w.label == "cloudminer").unwrap();
+    assert_eq!(cloudminer.db_filename, "cloudminer_webcash.db");
+}
+
+#[test]
+fn vault_slot_0_is_reserved_and_cannot_be_derived() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+    let err = wallet.derive_vault_identity_for_index(0);
+    assert!(
+        err.is_err(),
+        "vault index 0 must be rejected (reserved root)"
+    );
+    let msg = err.unwrap_err().to_string();
+    assert!(
+        msg.contains("reserved"),
+        "error should mention 'reserved', got: {msg}"
+    );
+}
+
+#[test]
+fn pgp_slots_have_no_db_rel_path() {
+    let wallet = RgbWallet::open_memory().expect("memory wallet");
+    let slots = wallet.list_wallet_slots(Some("pgp")).expect("pgp slots");
+    assert!(
+        !slots.is_empty(),
+        "should have at least default PGP identity"
+    );
+    for slot in &slots {
+        assert!(
+            slot.db_rel_path.is_none(),
+            "PGP slot {} should have no db_rel_path (keys stored in master.db)",
+            slot.slot_index
+        );
+    }
 }

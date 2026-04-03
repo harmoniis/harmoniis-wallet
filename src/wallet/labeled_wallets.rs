@@ -31,32 +31,27 @@ pub struct LabeledWallet {
 }
 
 impl WalletCore {
-    /// Derive the master secret hex for a labeled webcash wallet.
+    /// Generic: derive the master secret hex for any labeled wallet family.
+    pub fn derive_secret_for_label(&self, family: &str, label: &str) -> Result<(String, u32)> {
+        let index = self.resolve_or_create_wallet_slot(family, label)?;
+        let secret = self.derive_slot_hex(family, index)?;
+        Ok((secret, index))
+    }
+
     pub fn derive_webcash_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        let index = self.resolve_or_create_wallet_slot("webcash", label)?;
-        let secret = self.derive_slot_hex("webcash", index)?;
-        Ok((secret, index))
+        self.derive_secret_for_label("webcash", label)
     }
 
-    /// Derive the master secret hex for a labeled bitcoin wallet.
     pub fn derive_bitcoin_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        let index = self.resolve_or_create_wallet_slot("bitcoin", label)?;
-        let secret = self.derive_slot_hex("bitcoin", index)?;
-        Ok((secret, index))
+        self.derive_secret_for_label("bitcoin", label)
     }
 
-    /// Derive the master secret hex for a labeled voucher wallet.
     pub fn derive_voucher_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        let index = self.resolve_or_create_wallet_slot("voucher", label)?;
-        let secret = self.derive_slot_hex("voucher", index)?;
-        Ok((secret, index))
+        self.derive_secret_for_label("voucher", label)
     }
 
-    /// Derive the master secret hex for a labeled rgb wallet.
     pub fn derive_rgb_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        let index = self.resolve_or_create_wallet_slot("rgb", label)?;
-        let secret = self.derive_slot_hex("rgb", index)?;
-        Ok((secret, index))
+        self.derive_secret_for_label("rgb", label)
     }
 
     /// List all labeled wallets for a family.

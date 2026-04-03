@@ -474,8 +474,9 @@ async fn install_hrmw_remote(
         .context("GLIBC/libssl upgrade failed")?;
     }
 
-    // Ensure NVRTC is available (needed for CUDA kernel compilation).
+    // Ensure NVRTC is available (needed for CUDA kernel compilation at runtime).
     // UBUNTU24 template has libcuda but not libnvrtc.
+    // Try multiple package names to cover CUDA 12.x and 13.x.
     let nvrtc_check =
         ssh::exec(ssh_key, host, port, "ldconfig -p | grep libnvrtc").unwrap_or_default();
     if nvrtc_check.is_empty() {
@@ -484,7 +485,14 @@ async fn install_hrmw_remote(
             ssh_key,
             host,
             port,
-            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-6 2>/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -yqq libnvrtc12 2>/dev/null || true",
+            concat!(
+                "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq ",
+                "cuda-nvrtc-13-0 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-6 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-4 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-0 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq libnvrtc12 2>/dev/null || true",
+            ),
         )
         .ok();
     }

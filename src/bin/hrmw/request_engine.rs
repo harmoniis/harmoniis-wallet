@@ -19,8 +19,8 @@ use harmoniis_wallet::{
 use webylib::SecretWebcash;
 
 use crate::cli_support::{
-    open_or_create_wallet, open_voucher_wallet, open_webcash_wallet, pay_from_wallet,
-    pay_voucher_from_wallet,
+    open_or_create_wallet, pay_from_wallet, pay_voucher_from_wallet, resolve_voucher_wallet,
+    resolve_webcash_wallet,
 };
 use crate::PaymentRail;
 
@@ -404,7 +404,7 @@ async fn recover_or_log_loss(
     let (proof_kind, proof_ref) = payment_transaction_proof(payment);
     match payment {
         AcquiredPayment::Webcash { header_value, .. } => {
-            let webcash_wallet = open_webcash_wallet(wallet_path, wallet).await?;
+            let webcash_wallet = resolve_webcash_wallet(wallet_path, wallet, None).await?;
             let secret = SecretWebcash::parse(header_value)
                 .map_err(|e| anyhow::anyhow!("invalid paid webcash token: {e}"))?;
             match webcash_wallet.insert(secret).await {
@@ -595,7 +595,7 @@ async fn recover_or_log_loss(
         }
         AcquiredPayment::Voucher { secret, .. } => {
             let voucher_client = HarmoniisClient::new_direct(service_base_url);
-            let voucher_wallet = open_voucher_wallet(wallet_path, wallet)?;
+            let voucher_wallet = resolve_voucher_wallet(wallet_path, wallet, None)?;
             if voucher_wallet
                 .reinsert_if_live(&voucher_client, secret)
                 .await?
