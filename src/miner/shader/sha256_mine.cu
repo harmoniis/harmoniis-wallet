@@ -6,13 +6,13 @@
 // - Threads atomically reduce to one best packed u64:
 //   upper 32 bits = leading-zero-bit count, lower 32 bits = nonce id.
 //
-// Optimizations over baseline:
+// Optimizations (all compile to standard PTX on compute_75, JIT to any SM):
 // - LOP3 single-instruction Ch/Maj (0xCA / 0xE8 truth tables)
 // - __funnelshift_r for single-cycle rotation
-// - Shared memory nonce table (4KB, ~5 cycle reads vs ~30 cycle L2)
+// - Shared memory nonce table (4KB, ~5 cycle vs ~30 cycle L2)
 // - Early exit after h0 (skips h1-h7 for 99.999%+ of candidates)
-// - __launch_bounds__ for register allocation hints
-// - Magic-number division elimination for /1000 and %1000
+// - Magic-number division for /1000 and %1000
+// - __launch_bounds__ hint for register allocation
 
 extern "C" {
 
@@ -109,7 +109,6 @@ __global__ __launch_bounds__(256, 5) void mine_sha256(
     }
 
     // Fast division/modulo by 1000 using multiply-high magic number.
-    // 1/1000 ~= 0x10624DD3 / 2^(32+6). Verified exact for 0..999999.
     const unsigned int nonce1_idx = __umulhi(thread_id, 0x10624DD3u) >> 6u;
     const unsigned int nonce2_idx = thread_id - nonce1_idx * 1000u;
 
@@ -157,8 +156,7 @@ __global__ __launch_bounds__(256, 5) void mine_sha256(
         a = t1 + t2;
     }
 
-    // Early exit: check h0 first. For difficulty >= 1, h0 != 0 rejects
-    // immediately via __clz. This covers 99.999%+ of candidates.
+    // Early exit: check h0 first. Covers 99.999%+ of candidates.
     const unsigned int h0 = s0 + a;
     unsigned int zeros;
 
@@ -168,7 +166,6 @@ __global__ __launch_bounds__(256, 5) void mine_sha256(
             return;
         }
     } else {
-        // h0 is all zeros (32 leading zero bits). Need exact count from h1..h7.
         zeros = 32u;
         const unsigned int rem[7] = {
             s1 + b, s2 + c, s3 + d, s4 + e, s5 + f, s6 + g, s7 + h

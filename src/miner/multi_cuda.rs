@@ -1,7 +1,4 @@
 //! Multi-device CUDA mining backend.
-//!
-//! Each GPU receives a batch of work units and pipelines them through its
-//! triple-buffered stream slots. All GPUs execute in parallel via JoinSet.
 
 use async_trait::async_trait;
 use cudarc::driver::CudaContext;
@@ -14,9 +11,6 @@ use super::{
     choose_best_result, split_assignments_for_weights, CancelFlag, MinerBackend, MiningChunkResult,
     MiningResult, NONCE_SPACE_SIZE,
 };
-
-/// Work units per GPU per mining cycle (matches PIPELINE_SLOTS in cuda.rs).
-const WUS_PER_GPU: usize = 3;
 
 pub struct MultiCudaMiner {
     miners: Vec<std::sync::Arc<CudaMiner>>,
@@ -86,7 +80,6 @@ impl MinerBackend for MultiCudaMiner {
     fn startup_summary(&self) -> Vec<String> {
         let mut out = vec![
             format!("cuda_devices={}", self.miners.len()),
-            format!("cuda_wus_per_gpu={}", WUS_PER_GPU),
             format!(
                 "cuda_total_estimate={:.2} Mh/s",
                 self.aggregate_hash_rate / 1_000_000.0
@@ -131,7 +124,7 @@ impl MinerBackend for MultiCudaMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        (self.miners.len() * WUS_PER_GPU).max(1)
+        self.miners.len().max(1)
     }
 
     async fn mine_work_units(
@@ -145,42 +138,25 @@ impl MinerBackend for MultiCudaMiner {
             return Ok(Vec::new());
         }
 
-        let num_gpus = self.miners.len();
-
-        // Group midstates by GPU: round-robin assignment.
-        let mut gpu_batches: Vec<Vec<(usize, Sha256Midstate)>> =
-            (0..num_gpus).map(|_| Vec::new()).collect();
-        for (idx, midstate) in midstates.iter().enumerate() {
-            gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
-        }
-
-        // Spawn one blocking task per GPU — mine_batch does blocking CUDA sync calls,
-        // so it belongs on the blocking thread pool, not tokio worker threads.
         let mut tasks = JoinSet::new();
-        for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
-            if batch.is_empty() {
-                continue;
-            }
-            let miner = self.miners[gpu_idx].clone();
+        for (idx, midstate) in midstates.iter().enumerate() {
+            let miner = self.miners[idx % self.miners.len()].clone();
+            let midstate = midstate.clone();
             let cancel = cancel.clone();
-            tasks.spawn_blocking(move || {
-                let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
-                let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
-                let chunks = miner.mine_batch(&mids, difficulty, cancel)?;
-                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
-                    indices.into_iter().zip(chunks).collect(),
-                )
+            tasks.spawn(async move {
+                let chunk = miner
+                    .mine_range_direct(&midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel)
+                    .await?;
+                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
             });
         }
 
-        // Collect and reorder results.
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
-            let pairs = joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
-            for (idx, chunk) in pairs {
-                ordered[idx] = Some(chunk);
-            }
+            let (idx, chunk) =
+                joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
+            ordered[idx] = Some(chunk);
         }
 
         let mut out = Vec::with_capacity(midstates.len());
