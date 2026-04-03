@@ -147,14 +147,16 @@ impl MinerBackend for MultiCudaMiner {
         }
         let mut tasks = JoinSet::new();
         for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
-            if batch.is_empty() { continue; }
+            if batch.is_empty() {
+                continue;
+            }
             let miner = self.miners[gpu_idx].clone();
             tasks.spawn(async move {
                 let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
                 let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
                 let chunks = miner.mine_batch(&mids, difficulty)?;
                 Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
-                    indices.into_iter().zip(chunks).collect()
+                    indices.into_iter().zip(chunks).collect(),
                 )
             });
         }
@@ -162,9 +164,14 @@ impl MinerBackend for MultiCudaMiner {
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
             let pairs = joined.map_err(|e| anyhow::anyhow!("CUDA join: {}", e))??;
-            for (idx, chunk) in pairs { ordered[idx] = Some(chunk); }
+            for (idx, chunk) in pairs {
+                ordered[idx] = Some(chunk);
+            }
         }
-        Ok(ordered.into_iter().map(|o| o.unwrap_or_else(MiningChunkResult::empty)).collect())
+        Ok(ordered
+            .into_iter()
+            .map(|o| o.unwrap_or_else(MiningChunkResult::empty))
+            .collect())
     }
 
     async fn mine_range(
