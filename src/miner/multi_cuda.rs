@@ -132,38 +132,47 @@ impl MinerBackend for MultiCudaMiner {
         midstates: &[Sha256Midstate],
         _nonce_table: &NonceTable,
         difficulty: u32,
-        cancel: Option<CancelFlag>,
+        _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
         if midstates.is_empty() {
             return Ok(Vec::new());
         }
 
-        // v0.1.42 pattern: tasks.spawn() per GPU, mine_batch inside.
+        // Distribute work units across GPUs (round-robin).
         let num_gpus = self.miners.len();
         let mut gpu_batches: Vec<Vec<(usize, Sha256Midstate)>> =
             (0..num_gpus).map(|_| Vec::new()).collect();
         for (idx, midstate) in midstates.iter().enumerate() {
             gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
         }
-        let mut tasks = JoinSet::new();
+
+        // Dedicated OS thread per GPU with explicit context binding.
+        // tokio tasks serialize on worker threads and don't bind CUDA contexts.
+        // std::thread::spawn guarantees one thread per GPU, bind_to_thread()
+        // inside mine_batch ensures the correct context is active.
+        let mut handles = Vec::with_capacity(num_gpus);
         for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
             if batch.is_empty() {
                 continue;
             }
             let miner = self.miners[gpu_idx].clone();
-            tasks.spawn(async move {
+            handles.push(std::thread::spawn(move || {
                 let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
                 let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
                 let chunks = miner.mine_batch(&mids, difficulty)?;
                 Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
                     indices.into_iter().zip(chunks).collect(),
                 )
-            });
+            }));
         }
+
+        // Join all GPU threads, collect results in original order.
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
-        while let Some(joined) = tasks.join_next().await {
-            let pairs = joined.map_err(|e| anyhow::anyhow!("CUDA join: {}", e))??;
+        for handle in handles {
+            let pairs = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("GPU thread panicked"))??;
             for (idx, chunk) in pairs {
                 ordered[idx] = Some(chunk);
             }

@@ -22,7 +22,7 @@ const CUDA_BLOCK_SIZE: u32 = 256;
 pub(crate) const PIPELINE_SLOTS: usize = 3;
 
 pub struct CudaMiner {
-    _ctx: Arc<CudaContext>,
+    ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
@@ -79,7 +79,7 @@ impl CudaMiner {
         let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
 
         Some(Self {
-            _ctx: ctx,
+            ctx,
             stream,
             kernel,
             nonce_table_dev,
@@ -245,6 +245,10 @@ impl CudaMiner {
         if midstates.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Bind this GPU's CUDA context to the calling thread.
+        // Required because cudarc doesn't auto-bind on stream operations.
+        self.ctx.bind_to_thread()?;
 
         let n = midstates.len();
         let started = std::time::Instant::now();
