@@ -185,19 +185,97 @@ impl CudaMiner {
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
     }
 
-    /// Mine multiple work units sequentially on self.stream (the proven working stream).
-    /// Multi-GPU parallelism comes from JoinSet in multi_cuda — each GPU runs its batch
-    /// independently. Slot streams from new_stream() don't work reliably across threads.
+    /// Enqueue a kernel launch on self.stream using a specific result buffer (non-blocking).
+    fn enqueue_dispatch(
+        &self,
+        result_buf: &mut CudaSlice<u64>,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+    ) -> anyhow::Result<()> {
+        self.stream.memset_zeros(result_buf)?;
+
+        let s = midstate.state_words();
+        let s0 = s[0];
+        let s1 = s[1];
+        let s2 = s[2];
+        let s3 = s[3];
+        let s4 = s[4];
+        let s5 = s[5];
+        let s6 = s[6];
+        let s7 = s[7];
+        let prefix_len = midstate.prefix_len as u32;
+        let nonce_offset = 0u32;
+        let nonce_count = NONCE_SPACE_SIZE;
+
+        let cfg = LaunchConfig {
+            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut launch = self.stream.launch_builder(&self.kernel);
+        launch.arg(&self.nonce_table_dev);
+        launch.arg(&s0);
+        launch.arg(&s1);
+        launch.arg(&s2);
+        launch.arg(&s3);
+        launch.arg(&s4);
+        launch.arg(&s5);
+        launch.arg(&s6);
+        launch.arg(&s7);
+        launch.arg(&difficulty);
+        launch.arg(&prefix_len);
+        launch.arg(&nonce_offset);
+        launch.arg(&nonce_count);
+        launch.arg(result_buf);
+        unsafe { launch.launch(cfg) }?;
+        Ok(())
+    }
+
+    /// Pipeline multiple work units on self.stream without syncing between them.
+    ///
+    /// Enqueues N × (memset + launch) on the single FIFO stream, then syncs once
+    /// and reads all results. The GPU processes kernels back-to-back with zero gap.
+    /// Each WU gets its own result buffer so they don't overwrite each other.
     pub fn mine_batch(
         &self,
         midstates: &[Sha256Midstate],
         difficulty: u32,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
-        let mut results = Vec::with_capacity(midstates.len());
+        if midstates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let n = midstates.len();
         let started = std::time::Instant::now();
 
-        for midstate in midstates {
-            let result = self.dispatch_range(midstate, difficulty, 0, NONCE_SPACE_SIZE)?;
+        // Allocate one result buffer per WU (each kernel writes to its own).
+        let mut result_bufs: Vec<CudaSlice<u64>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            result_bufs.push(
+                self.stream
+                    .alloc_zeros::<u64>(1)
+                    .map_err(|e| anyhow::anyhow!("alloc result buf: {}", e))?,
+            );
+        }
+
+        // Enqueue ALL dispatches without synchronizing — GPU processes FIFO.
+        for i in 0..n {
+            self.enqueue_dispatch(&mut result_bufs[i], &midstates[i], difficulty)?;
+        }
+
+        // Single sync waits for ALL enqueued kernels to finish.
+        self.stream.synchronize()?;
+
+        // Read all results (kernels are done, reads are instant).
+        let mut results = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut host_best = [0u64; 1];
+            self.stream.memcpy_dtoh(&result_bufs[i], &mut host_best)?;
+            // memcpy_dtoh after sync is effectively instant — data is already computed.
+            self.stream.synchronize()?;
+
+            let result = self.best_result_from_packed(&midstates[i], difficulty, host_best[0]);
             results.push(MiningChunkResult {
                 result,
                 attempted: NONCE_SPACE_SIZE as u64,
