@@ -119,13 +119,19 @@ libc        = "0.2"
 # `fallback-dynamic-loading` loads libcuda/nvcuda at runtime, so the binary
 # can be compiled without the CUDA SDK and gracefully falls back to wgpu if
 # no CUDA driver is present.
+# CUDA: cuda-version-from-build-system tries nvcc; fallback-latest kicks in
+# on CI (no nvcc) and selects the newest API. Library search covers ALL
+# versions (9-13), so nvrtc64_12.dll AND nvrtc64_13.dll are found.
+# Drivers <580 may lack CUDA 13 symbols — catch_unwind in CudaMiner::try_new
+# handles this gracefully, falling back to wgpu.
 cudarc      = { version = "0.19.3", optional = true, default-features = false, features = [
     "std",
     "driver",
     "runtime",
     "nvrtc",
     "fallback-dynamic-loading",
-    "cuda-12000",
+    "cuda-version-from-build-system",
+    "fallback-latest",
 ] }
 
 [dev-dependencies]
