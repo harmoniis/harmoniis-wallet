@@ -17,12 +17,9 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 
 const CUDA_BLOCK_SIZE: u32 = 256;
 
+/// Work units per GPU per mining cycle. Each GPU processes this many WUs
+/// sequentially in mine_batch, while all GPUs run in parallel.
 pub(crate) const PIPELINE_SLOTS: usize = 3;
-
-struct StreamSlot {
-    stream: Arc<CudaStream>,
-    result_dev: CudaSlice<u64>,
-}
 
 pub struct CudaMiner {
     _ctx: Arc<CudaContext>,
@@ -30,7 +27,6 @@ pub struct CudaMiner {
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
     result_dev: Mutex<CudaSlice<u64>>,
-    slots: Mutex<Vec<StreamSlot>>,
     nonce_words: Vec<u32>,
     device_name: String,
     ordinal: usize,
@@ -82,31 +78,12 @@ impl CudaMiner {
         let nonce_table_dev = stream.clone_htod(&nonce_words).ok()?;
         let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
 
-        // Ensure nonce table upload is complete before other streams use it.
-        stream.synchronize().ok()?;
-
-        // Create pipeline slots with independent streams.
-        let mut slots = Vec::with_capacity(PIPELINE_SLOTS);
-        for i in 0..PIPELINE_SLOTS {
-            let slot_stream = if i == 0 {
-                stream.clone()
-            } else {
-                ctx.new_stream().ok()?
-            };
-            let slot_result = slot_stream.alloc_zeros::<u64>(1).ok()?;
-            slots.push(StreamSlot {
-                stream: slot_stream,
-                result_dev: slot_result,
-            });
-        }
-
         Some(Self {
             _ctx: ctx,
             stream,
             kernel,
             nonce_table_dev,
             result_dev: Mutex::new(result_dev),
-            slots: Mutex::new(slots),
             nonce_words,
             device_name,
             ordinal,
@@ -208,115 +185,27 @@ impl CudaMiner {
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
     }
 
-    /// Pipeline midstates across stream slots on this GPU.
-    /// Dispatches to all slots first, then collects oldest while newest computes.
+    /// Mine multiple work units sequentially on self.stream (the proven working stream).
+    /// Multi-GPU parallelism comes from JoinSet in multi_cuda — each GPU runs its batch
+    /// independently. Slot streams from new_stream() don't work reliably across threads.
     pub fn mine_batch(
         &self,
         midstates: &[Sha256Midstate],
         difficulty: u32,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
-        if midstates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut slots = self
-            .slots
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cuda slot mutex poisoned"))?;
-        let num_slots = slots.len();
-        let n = midstates.len();
+        let mut results = Vec::with_capacity(midstates.len());
         let started = std::time::Instant::now();
 
-        let mut slot_mid: Vec<Option<usize>> = vec![None; num_slots];
-        let mut results: Vec<Option<MiningChunkResult>> = (0..n).map(|_| None).collect();
-        let mut next_dispatch = 0usize;
-        let mut collected = 0usize;
-
-        // Phase 1: Fill all slots (dispatch without waiting).
-        for s in 0..num_slots.min(n) {
-            self.dispatch_on_slot(&mut slots[s], &midstates[next_dispatch], difficulty)?;
-            slot_mid[s] = Some(next_dispatch);
-            next_dispatch += 1;
+        for midstate in midstates {
+            let result = self.dispatch_range(midstate, difficulty, 0, NONCE_SPACE_SIZE)?;
+            results.push(MiningChunkResult {
+                result,
+                attempted: NONCE_SPACE_SIZE as u64,
+                elapsed: started.elapsed(),
+            });
         }
 
-        // Phase 2: Collect oldest, dispatch next on freed slot.
-        let mut collect_idx = 0usize;
-        while collected < n {
-            let s = collect_idx % num_slots;
-            if let Some(mid_idx) = slot_mid[s] {
-                let result = self.collect_from_slot(&slots[s], &midstates[mid_idx], difficulty)?;
-                results[mid_idx] = Some(MiningChunkResult {
-                    result,
-                    attempted: NONCE_SPACE_SIZE as u64,
-                    elapsed: started.elapsed(),
-                });
-                collected += 1;
-
-                if next_dispatch < n {
-                    self.dispatch_on_slot(&mut slots[s], &midstates[next_dispatch], difficulty)?;
-                    slot_mid[s] = Some(next_dispatch);
-                    next_dispatch += 1;
-                } else {
-                    slot_mid[s] = None;
-                }
-            }
-            collect_idx += 1;
-        }
-
-        Ok(results
-            .into_iter()
-            .map(|o| o.unwrap_or_else(MiningChunkResult::empty))
-            .collect())
-    }
-
-    fn dispatch_on_slot(
-        &self,
-        slot: &mut StreamSlot,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-    ) -> anyhow::Result<()> {
-        slot.stream.memset_zeros(&mut slot.result_dev)?;
-
-        let s = midstate.state_words();
-        let prefix_len = midstate.prefix_len as u32;
-        let zero = 0u32;
-        let nonce_count = NONCE_SPACE_SIZE;
-
-        let cfg = LaunchConfig {
-            grid_dim: (NONCE_SPACE_SIZE.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut launch = slot.stream.launch_builder(&self.kernel);
-        launch.arg(&self.nonce_table_dev);
-        launch.arg(&s[0]);
-        launch.arg(&s[1]);
-        launch.arg(&s[2]);
-        launch.arg(&s[3]);
-        launch.arg(&s[4]);
-        launch.arg(&s[5]);
-        launch.arg(&s[6]);
-        launch.arg(&s[7]);
-        launch.arg(&difficulty);
-        launch.arg(&prefix_len);
-        launch.arg(&zero);
-        launch.arg(&nonce_count);
-        launch.arg(&mut slot.result_dev);
-        unsafe { launch.launch(cfg) }?;
-        Ok(())
-    }
-
-    fn collect_from_slot(
-        &self,
-        slot: &StreamSlot,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-    ) -> anyhow::Result<Option<MiningResult>> {
-        let mut host_best = [0u64; 1];
-        slot.stream.memcpy_dtoh(&slot.result_dev, &mut host_best)?;
-        slot.stream.synchronize()?;
-        Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
+        Ok(results)
     }
 
     pub async fn mine_range_direct(
