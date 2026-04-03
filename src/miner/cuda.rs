@@ -1,8 +1,8 @@
 //! CUDA mining backend using `cudarc` + NVRTC.
 //!
-//! Single-stream synchronous dispatch (v0.1.42 proven pattern).
-//! Kernel uses LOP3/funnelshift/shared-memory optimizations compiled via
-//! default NVRTC (compute_75 PTX, JIT to actual SM by driver).
+//! Multi-GPU pipelining: each GPU gets a dedicated OS thread that binds its
+//! CUDA context and creates a fresh stream per batch. Kernel and nonce table
+//! are compiled/uploaded once during init and reused across batches.
 
 use async_trait::async_trait;
 use cudarc::driver::{
@@ -17,8 +17,7 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 
 const CUDA_BLOCK_SIZE: u32 = 256;
 
-/// Work units per GPU per mining cycle. Each GPU processes this many WUs
-/// sequentially in mine_batch, while all GPUs run in parallel.
+/// Work units per GPU per mining cycle.
 pub(crate) const PIPELINE_SLOTS: usize = 3;
 
 pub struct CudaMiner {
@@ -34,8 +33,6 @@ pub struct CudaMiner {
 
 impl CudaMiner {
     pub async fn try_new(ordinal: usize) -> Option<Self> {
-        // cudarc panics (instead of returning Err) when NVRTC is missing.
-        // Catch the panic so we fall back to wgpu gracefully.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -50,8 +47,6 @@ impl CudaMiner {
         let stream = ctx.default_stream();
         let device_name = ctx.name().ok()?;
 
-        // Compile with default NVRTC settings (compute_75 PTX, JIT to actual SM).
-        // No arch/maxrregcount — those caused silent failures on some NVRTC versions.
         let ptx = match compile_ptx(include_str!("shader/sha256_mine.cu")) {
             Ok(p) => p,
             Err(e) => {
@@ -130,6 +125,7 @@ impl CudaMiner {
         })
     }
 
+    /// Single synchronous dispatch on self.stream (for benchmark).
     pub fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
@@ -185,58 +181,11 @@ impl CudaMiner {
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
     }
 
-    /// Enqueue a kernel launch on self.stream using a specific result buffer (non-blocking).
-    fn enqueue_dispatch(
-        &self,
-        result_buf: &mut CudaSlice<u64>,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-    ) -> anyhow::Result<()> {
-        self.stream.memset_zeros(result_buf)?;
-
-        let s = midstate.state_words();
-        let s0 = s[0];
-        let s1 = s[1];
-        let s2 = s[2];
-        let s3 = s[3];
-        let s4 = s[4];
-        let s5 = s[5];
-        let s6 = s[6];
-        let s7 = s[7];
-        let prefix_len = midstate.prefix_len as u32;
-        let nonce_offset = 0u32;
-        let nonce_count = NONCE_SPACE_SIZE;
-
-        let cfg = LaunchConfig {
-            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut launch = self.stream.launch_builder(&self.kernel);
-        launch.arg(&self.nonce_table_dev);
-        launch.arg(&s0);
-        launch.arg(&s1);
-        launch.arg(&s2);
-        launch.arg(&s3);
-        launch.arg(&s4);
-        launch.arg(&s5);
-        launch.arg(&s6);
-        launch.arg(&s7);
-        launch.arg(&difficulty);
-        launch.arg(&prefix_len);
-        launch.arg(&nonce_offset);
-        launch.arg(&nonce_count);
-        launch.arg(result_buf);
-        unsafe { launch.launch(cfg) }?;
-        Ok(())
-    }
-
-    /// Pipeline multiple work units on self.stream without syncing between them.
+    /// Pipeline multiple work units with FIFO enqueue + single sync.
     ///
-    /// Enqueues N × (memset + launch) on the single FIFO stream, then syncs once
-    /// and reads all results. The GPU processes kernels back-to-back with zero gap.
-    /// Each WU gets its own result buffer so they don't overwrite each other.
+    /// Key: ctx.bind_to_thread() + ctx.new_stream() creates a fresh stream
+    /// bound to this GPU on the calling thread. The stored self.kernel and
+    /// self.nonce_table_dev are reused (same context, no recompilation).
     pub fn mine_batch(
         &self,
         midstates: &[Sha256Midstate],
@@ -246,39 +195,55 @@ impl CudaMiner {
             return Ok(Vec::new());
         }
 
-        // Bind this GPU's CUDA context to the calling thread.
-        // Required because cudarc doesn't auto-bind on stream operations.
-        self.ctx.bind_to_thread()?;
+        // Bind context + fresh stream on this thread.
+        self.ctx.bind_to_thread()
+            .map_err(|e| anyhow::anyhow!("CUDA[{}] bind: {}", self.ordinal, e))?;
+        let stream = self.ctx.new_stream()
+            .map_err(|e| anyhow::anyhow!("CUDA[{}] stream: {}", self.ordinal, e))?;
 
         let n = midstates.len();
         let started = std::time::Instant::now();
 
-        // Allocate one result buffer per WU (each kernel writes to its own).
+        // Per-WU result buffers on the fresh stream.
         let mut result_bufs: Vec<CudaSlice<u64>> = Vec::with_capacity(n);
         for _ in 0..n {
-            result_bufs.push(
-                self.stream
-                    .alloc_zeros::<u64>(1)
-                    .map_err(|e| anyhow::anyhow!("alloc result buf: {}", e))?,
-            );
+            result_bufs.push(stream.alloc_zeros::<u64>(1)
+                .map_err(|e| anyhow::anyhow!("CUDA[{}] alloc: {}", self.ordinal, e))?);
         }
 
-        // Enqueue ALL dispatches without synchronizing — GPU processes FIFO.
+        // Enqueue ALL dispatches — GPU processes FIFO, zero idle between kernels.
         for i in 0..n {
-            self.enqueue_dispatch(&mut result_bufs[i], &midstates[i], difficulty)?;
+            stream.memset_zeros(&mut result_bufs[i])?;
+            let s = midstates[i].state_words();
+            let prefix_len = midstates[i].prefix_len as u32;
+            let nonce_offset = 0u32;
+            let nonce_count = NONCE_SPACE_SIZE;
+            let cfg = LaunchConfig {
+                grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+                block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut launch = stream.launch_builder(&self.kernel);
+            launch.arg(&self.nonce_table_dev);
+            launch.arg(&s[0]); launch.arg(&s[1]); launch.arg(&s[2]); launch.arg(&s[3]);
+            launch.arg(&s[4]); launch.arg(&s[5]); launch.arg(&s[6]); launch.arg(&s[7]);
+            launch.arg(&difficulty);
+            launch.arg(&prefix_len);
+            launch.arg(&nonce_offset);
+            launch.arg(&nonce_count);
+            launch.arg(&mut result_bufs[i]);
+            unsafe { launch.launch(cfg) }?;
         }
 
-        // Single sync waits for ALL enqueued kernels to finish.
-        self.stream.synchronize()?;
+        // Single sync for all enqueued kernels.
+        stream.synchronize()?;
 
-        // Read all results (kernels are done, reads are instant).
+        // Read results.
         let mut results = Vec::with_capacity(n);
         for i in 0..n {
             let mut host_best = [0u64; 1];
-            self.stream.memcpy_dtoh(&result_bufs[i], &mut host_best)?;
-            // memcpy_dtoh after sync is effectively instant — data is already computed.
-            self.stream.synchronize()?;
-
+            stream.memcpy_dtoh(&result_bufs[i], &mut host_best)?;
+            stream.synchronize()?;
             let result = self.best_result_from_packed(&midstates[i], difficulty, host_best[0]);
             results.push(MiningChunkResult {
                 result,
@@ -335,6 +300,7 @@ impl MinerBackend for CudaMiner {
             format!("cuda_device={}", self.device_name),
             format!("cuda_ordinal={}", self.ordinal),
             format!("cuda_block_size={}", CUDA_BLOCK_SIZE),
+            format!("cuda_pipeline_slots={}", PIPELINE_SLOTS),
             "cuda_result_mode=atomic_best_u64".to_string(),
         ]
     }
@@ -342,7 +308,6 @@ impl MinerBackend for CudaMiner {
     async fn benchmark(&self) -> anyhow::Result<f64> {
         let midstate = Sha256Midstate::from_prefix(&[0u8; 64]);
 
-        // Warmup.
         let _ = self
             .mine_range_direct(&midstate, 256, 0, NONCE_SPACE_SIZE, None)
             .await?;
