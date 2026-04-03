@@ -193,7 +193,7 @@ pub async fn start(
         cost_per_hour: instance.dph_total.unwrap_or(0.0),
         started_at: chrono::Utc::now().to_rfc3339(),
     };
-    config::save_state(&state)?;
+    config::add_instance(&state)?;
 
     println!();
     println!("Mining started.");
@@ -227,7 +227,7 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
     Ok(())
 }
 
-/// Destroy the instance. Stops charges.
+/// Destroy a single instance. Stops charges.
 pub async fn destroy(state: &InstanceState) -> Result<()> {
     let cfg = config::load_config()?;
     let api_key = config::resolve_api_key(&cfg)?;
@@ -235,8 +235,32 @@ pub async fn destroy(state: &InstanceState) -> Result<()> {
 
     println!("Destroying instance {}...", state.instance_id);
     client.destroy_instance(state.instance_id).await?;
-    config::clear_state()?;
+    config::remove_instance(state.instance_id)?;
     println!("Instance destroyed. Charges stopped.");
+
+    Ok(())
+}
+
+/// Destroy all instances.
+pub async fn destroy_all() -> Result<()> {
+    let instances = config::load_instances()?;
+    if instances.is_empty() {
+        println!("No active instances.");
+        return Ok(());
+    }
+    let cfg = config::load_config()?;
+    let api_key = config::resolve_api_key(&cfg)?;
+    let client = VastClient::new(&api_key);
+
+    for state in &instances {
+        println!("Destroying instance {}...", state.instance_id);
+        let _ = client.destroy_instance(state.instance_id).await;
+    }
+    config::clear_state()?;
+    println!(
+        "All {} instances destroyed. Charges stopped.",
+        instances.len()
+    );
 
     Ok(())
 }

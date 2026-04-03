@@ -1150,7 +1150,7 @@ enum WebminerCmd {
 
 #[derive(Subcommand, Debug)]
 enum CloudCmd {
-    /// Provision a Vast.ai GPU instance and start mining
+    /// Provision Vast.ai GPU instance(s) and start mining
     Start {
         /// Label for the mining wallet
         #[arg(long, default_value = "cloudminer")]
@@ -1158,14 +1158,29 @@ enum CloudCmd {
         /// Use a specific Vast.ai offer ID instead of auto-selecting
         #[arg(long)]
         machine: Option<u64>,
+        /// Number of instances to provision
+        #[arg(short = 'n', long, default_value = "1")]
+        count: usize,
     },
-    /// Stop miner, recover mined webcash, transfer to main wallet (instance keeps running)
-    Stop,
-    /// Destroy the Vast.ai instance (stops charges)
-    Destroy,
+    /// Stop miner(s), recover mined webcash, transfer to main wallet
+    Stop {
+        /// Instance number to stop (1-based). Omit to stop all.
+        #[arg(short = 'n', long)]
+        instance: Option<usize>,
+    },
+    /// Destroy Vast.ai instance(s) (stops charges)
+    Destroy {
+        /// Instance number to destroy (1-based). Omit to destroy all.
+        #[arg(short = 'n', long)]
+        instance: Option<usize>,
+    },
     /// Show remote miner status
-    Status,
-    /// Show local mining wallet info
+    Status {
+        /// Instance number (1-based). Omit to show all.
+        #[arg(short = 'n', long)]
+        instance: Option<usize>,
+    },
+    /// Show mining wallet info
     Info {
         /// Label for the mining wallet
         #[arg(long, default_value = "cloudminer")]
@@ -3958,7 +3973,9 @@ async fn main() -> anyhow::Result<()> {
             daemon::run_mining_loop(config).await?;
         }
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
-            use harmoniis_wallet::miner::cloud::{config as cloud_config, provision};
+            use harmoniis_wallet::miner::cloud::{
+                config as cloud_config, config::InstanceState, provision,
+            };
 
             // Open existing wallet — required for vault SSH key derivation.
             if !wallet_path.exists() {
@@ -3974,32 +3991,57 @@ async fn main() -> anyhow::Result<()> {
             let ssh_key = harmoniis_wallet::miner::cloud::ssh::derive_ssh_keypair(&wallet)?;
 
             match cloud_cmd {
-                CloudCmd::Start { label, machine } => {
-                    // Derive the labeled webcash wallet
+                CloudCmd::Start {
+                    label,
+                    machine,
+                    count,
+                } => {
+                    // Derive the labeled webcash wallet (shared across all instances)
                     let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&label)).await?;
                     let db_path =
                         labeled_wallet_display_path(&wallet_path, "webcash", Some(&label));
 
-                    provision::start(&label, machine, &db_path, &ssh_key).await?;
+                    for i in 0..count {
+                        if count > 1 {
+                            println!("\n=== Instance {}/{} ===", i + 1, count);
+                        }
+                        provision::start(&label, machine, &db_path, &ssh_key).await?;
+                    }
                 }
-                CloudCmd::Stop => {
-                    let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
+                CloudCmd::Stop { instance } => {
+                    let instances = cloud_config::load_instances()?;
+                    if instances.is_empty() {
+                        anyhow::bail!("No active instances.");
+                    }
 
-                    // Stop the remote miner
-                    provision::stop(&state, &ssh_key).await?;
+                    let targets: Vec<&InstanceState> = if let Some(n) = instance {
+                        let idx = n.checked_sub(1).context("-n must be >= 1")?;
+                        vec![instances.get(idx).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Instance #{n} not found. Have {} instances.",
+                                instances.len()
+                            )
+                        })?]
+                    } else {
+                        instances.iter().collect()
+                    };
 
-                    // Recover mined webcash locally (no SCP — deterministic secret)
+                    // Stop all target miners
+                    for state in &targets {
+                        provision::stop(state, &ssh_key).await?;
+                    }
+
+                    // Recover once (all instances share the same wallet)
+                    let label = &targets[0].label;
                     println!("Recovering mined webcash...");
                     let labeled_wc =
-                        resolve_webcash_wallet(&wallet_path, &wallet, Some(&state.label)).await?;
+                        resolve_webcash_wallet(&wallet_path, &wallet, Some(label)).await?;
                     let recovery = labeled_wc
                         .recover_from_wallet(50)
                         .await
                         .context("webcash recovery failed")?;
                     println!("{recovery}");
 
-                    // Transfer recovered balance to main wallet
                     let labeled_balance = labeled_wc.balance().await?;
                     println!("Mining wallet balance: {labeled_balance}");
 
@@ -4027,18 +4069,51 @@ async fn main() -> anyhow::Result<()> {
                         println!("No webcash mined yet.");
                     }
                 }
-                CloudCmd::Destroy => {
-                    let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
-                    provision::destroy(&state).await?;
+                CloudCmd::Destroy { instance } => {
+                    let instances = cloud_config::load_instances()?;
+                    if instances.is_empty() {
+                        println!("No active instances.");
+                    } else if let Some(n) = instance {
+                        let idx = n.checked_sub(1).context("-n must be >= 1")?;
+                        let state = instances
+                            .get(idx)
+                            .ok_or_else(|| anyhow::anyhow!("Instance #{n} not found."))?;
+                        provision::destroy(state).await?;
+                    } else {
+                        provision::destroy_all().await?;
+                    }
                 }
-                CloudCmd::Status => {
-                    let state = cloud_config::load_state()?
-                        .ok_or_else(|| anyhow::anyhow!("No active instance."))?;
-                    provision::status(&state, &ssh_key).await?;
+                CloudCmd::Status { instance } => {
+                    let instances = cloud_config::load_instances()?;
+                    if instances.is_empty() {
+                        println!("No active instances.");
+                    } else if let Some(n) = instance {
+                        let idx = n.checked_sub(1).context("-n must be >= 1")?;
+                        let state = instances
+                            .get(idx)
+                            .ok_or_else(|| anyhow::anyhow!("Instance #{n} not found."))?;
+                        provision::status(state, &ssh_key).await?;
+                    } else {
+                        for (i, state) in instances.iter().enumerate() {
+                            if instances.len() > 1 {
+                                println!("\n=== Instance #{} ===", i + 1);
+                            }
+                            provision::status(state, &ssh_key).await?;
+                        }
+                    }
                 }
                 CloudCmd::Info { label } => {
-                    provision::info(&label, &ssh_key);
+                    let instances = cloud_config::load_instances()?;
+                    if instances.is_empty() {
+                        provision::info(&label, &ssh_key);
+                    } else {
+                        for (i, state) in instances.iter().enumerate() {
+                            if instances.len() > 1 {
+                                println!("\n=== Instance #{} ===", i + 1);
+                            }
+                            provision::info(&state.label, &ssh_key);
+                        }
+                    }
                 }
                 CloudCmd::SetApiKey { key } => {
                     let mut cfg = cloud_config::load_config()?;

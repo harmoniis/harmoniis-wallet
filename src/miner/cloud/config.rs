@@ -32,6 +32,13 @@ pub struct InstanceState {
     pub started_at: String,
 }
 
+/// Multi-instance state file.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct InstancesFile {
+    #[serde(default)]
+    pub instances: Vec<InstanceState>,
+}
+
 fn cloud_dir() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -73,26 +80,64 @@ pub fn save_config(cfg: &CloudConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn load_state() -> Result<Option<InstanceState>> {
+/// Load all instance states.
+pub fn load_instances() -> Result<Vec<InstanceState>> {
     let path = state_path();
     if !path.exists() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let state: InstanceState =
-        toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(Some(state))
+
+    // Try new format (InstancesFile with [[instances]])
+    if let Ok(file) = toml::from_str::<InstancesFile>(&text) {
+        return Ok(file.instances);
+    }
+    // Backward compat: old single-instance format
+    if let Ok(state) = toml::from_str::<InstanceState>(&text) {
+        return Ok(vec![state]);
+    }
+    Ok(Vec::new())
 }
 
-pub fn save_state(state: &InstanceState) -> Result<()> {
+/// Backward compat: load first instance (or None).
+pub fn load_state() -> Result<Option<InstanceState>> {
+    let instances = load_instances()?;
+    Ok(instances.into_iter().next())
+}
+
+/// Add an instance to the state file.
+pub fn add_instance(state: &InstanceState) -> Result<()> {
+    let mut instances = load_instances()?;
+    instances.push(state.clone());
+    save_instances(&instances)
+}
+
+/// Remove an instance by ID.
+pub fn remove_instance(instance_id: u64) -> Result<()> {
+    let mut instances = load_instances()?;
+    instances.retain(|s| s.instance_id != instance_id);
+    save_instances(&instances)
+}
+
+/// Save all instances.
+fn save_instances(instances: &[InstanceState]) -> Result<()> {
     let dir = cloud_dir();
     std::fs::create_dir_all(&dir)?;
-    let text = toml::to_string_pretty(state)?;
+    let file = InstancesFile {
+        instances: instances.to_vec(),
+    };
+    let text = toml::to_string_pretty(&file)?;
     std::fs::write(state_path(), text)?;
     Ok(())
 }
 
+/// Backward compat: save single instance (replaces all).
+pub fn save_state(state: &InstanceState) -> Result<()> {
+    save_instances(&[state.clone()])
+}
+
+/// Remove all instance state.
 pub fn clear_state() -> Result<()> {
     let path = state_path();
     if path.exists() {
