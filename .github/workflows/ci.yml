@@ -119,8 +119,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — GPU + CUDA
-          - os: ubuntu-latest
+          # Linux — GPU + CUDA (Ubuntu 22.04 for GLIBC 2.35 — works on Vast.ai cuda:12.2.2-devel-ubuntu22.04)
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             features: bundled-sqlite,gpu,cuda
@@ -210,13 +210,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --no-default-features --features ${{ matrix.features }}
-
-      # Install musl toolchain for static Linux builds
-      - name: Install musl toolchain
-        if: matrix.musl
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -yqq musl-tools
 
       # Native release build (Unix)
       - name: Build release binary
