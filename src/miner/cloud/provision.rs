@@ -380,7 +380,19 @@ async fn install_hrmw_remote(
     host: &str,
     port: u16,
 ) -> Result<()> {
-    // Install hrmw (binary built for GLIBC 2.31 — no upgrade needed)
+    // Step 1: Upgrade GLIBC + libssl on Ubuntu 20.04 (cuda:12.0.1 template)
+    // The release binary is built on Ubuntu 24.04 (GLIBC 2.39, libssl3).
+    // This adds the noble repo and installs only libc6 + libssl3t64 (~20s).
+    println!("  Upgrading GLIBC + libssl...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq libc6 libssl3t64",
+    )
+    .context("GLIBC/libssl upgrade failed")?;
+
+    // Step 2: Install hrmw
     println!("  Installing hrmw...");
     ssh::exec(
         ssh_key,
@@ -390,7 +402,7 @@ async fn install_hrmw_remote(
     )
     .context("hrmw install failed")?;
 
-    // Verify
+    // Step 3: Verify
     let version = ssh::exec(ssh_key, host, port, &format!("{REMOTE_HRMW} --version"))
         .context("hrmw verification failed")?;
     println!("  {}", version.trim());
