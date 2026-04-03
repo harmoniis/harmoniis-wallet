@@ -121,7 +121,32 @@ impl CudaMiner {
         &self.device_name
     }
 
-    /// Send work to the persistent GPU thread and wait for results.
+    /// Send work to the persistent GPU thread (non-blocking).
+    pub fn send_work(
+        &self,
+        midstates: Vec<Sha256Midstate>,
+        difficulty: u32,
+    ) -> anyhow::Result<()> {
+        self.worker
+            .work_tx
+            .send(WorkRequest {
+                midstates,
+                difficulty,
+            })
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))
+    }
+
+    /// Wait for results from the persistent GPU thread (blocks until done).
+    pub fn recv_result(&self) -> anyhow::Result<Vec<MiningChunkResult>> {
+        self.worker
+            .result_rx
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] result mutex poisoned", self.ordinal))?
+            .recv()
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))?
+    }
+
+    /// Send work and wait for results (convenience for benchmark/single dispatch).
     pub fn mine_batch(
         &self,
         midstates: &[Sha256Midstate],
@@ -130,21 +155,8 @@ impl CudaMiner {
         if midstates.is_empty() {
             return Ok(Vec::new());
         }
-
-        self.worker
-            .work_tx
-            .send(WorkRequest {
-                midstates: midstates.to_vec(),
-                difficulty,
-            })
-            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))?;
-
-        self.worker
-            .result_rx
-            .lock()
-            .map_err(|_| anyhow::anyhow!("CUDA[{}] result mutex poisoned", self.ordinal))?
-            .recv()
-            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))?
+        self.send_work(midstates.to_vec(), difficulty)?;
+        self.recv_result()
     }
 
     /// Synchronous single-dispatch (used by benchmark).

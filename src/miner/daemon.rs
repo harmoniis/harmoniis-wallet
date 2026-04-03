@@ -494,13 +494,13 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     hex::encode(&solution.hash)
                 );
 
-                // Submit to server
+                // Submit to server — inline await for now.
+                // Difficulty updates from server responses must reach the main loop.
                 match protocol.submit_report(&preimage, &solution.hash).await {
                     Ok(resp) => {
                         tracker.record_accepted();
                         println!("Mining report accepted! keep={}", wu.keep_secret);
 
-                        // Update difficulty if server says so
                         if let Some(new_diff) = resp.difficulty_target {
                             if new_diff != target.difficulty {
                                 println!(
@@ -512,7 +512,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             }
                         }
 
-                        // Claim and rotate mined keep secret through wallet insert/replace.
                         claim_accepted_keep_secret(
                             &webcash_wallet,
                             &config.webcash_wallet_path,
@@ -523,8 +522,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         eprintln!("Mining report rejected: {}", e);
-
-                        // Save orphaned solution
                         let orphan_line = format!(
                             "{} 0x{} {} difficulty={}\n",
                             preimage,

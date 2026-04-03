@@ -89,7 +89,7 @@ pub struct MiningResult {
 }
 
 /// Output from mining one nonce range chunk.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MiningChunkResult {
     pub result: Option<MiningResult>,
     pub attempted: u64,

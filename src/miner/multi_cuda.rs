@@ -1,4 +1,7 @@
 //! Multi-device CUDA mining backend.
+//!
+//! Distributes work units across GPUs via persistent worker threads.
+//! mine_work_units sends to all workers then collects — no thread spawn per cycle.
 
 use async_trait::async_trait;
 use cudarc::driver::CudaContext;
@@ -138,7 +141,6 @@ impl MinerBackend for MultiCudaMiner {
             return Ok(Vec::new());
         }
 
-        // Distribute work units across GPUs (round-robin).
         let num_gpus = self.miners.len();
         let mut gpu_batches: Vec<Vec<(usize, Sha256Midstate)>> =
             (0..num_gpus).map(|_| Vec::new()).collect();
@@ -146,35 +148,31 @@ impl MinerBackend for MultiCudaMiner {
             gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
         }
 
-        // Send work to all GPU persistent workers in parallel, then collect.
-        // mine_batch sends via channel (instant) and blocks on recv (waits for GPU).
-        // Using short-lived threads so all GPUs start computing simultaneously.
-        let mut handles = Vec::with_capacity(num_gpus);
+        // Send work to ALL persistent GPU workers (channel send = ~100ns each).
+        // All GPUs start computing simultaneously.
+        let mut active_gpus: Vec<(usize, Vec<usize>)> = Vec::new();
         for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
             if batch.is_empty() {
                 continue;
             }
-            let miner = self.miners[gpu_idx].clone();
-            handles.push(std::thread::spawn(move || {
-                let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
-                let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
-                let chunks = miner.mine_batch(&mids, difficulty)?;
-                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
-                    indices.into_iter().zip(chunks).collect(),
-                )
-            }));
+            let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+            let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
+            self.miners[gpu_idx].send_work(mids, difficulty)?;
+            active_gpus.push((gpu_idx, indices));
         }
 
+        // Collect from all workers (blocks on slowest GPU — all run in parallel).
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
-        for handle in handles {
-            let pairs = handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("GPU thread panicked"))??;
-            for (idx, chunk) in pairs {
-                ordered[idx] = Some(chunk);
+        for (gpu_idx, indices) in active_gpus {
+            let chunks = self.miners[gpu_idx].recv_result()?;
+            for (local_i, global_i) in indices.into_iter().enumerate() {
+                if local_i < chunks.len() {
+                    ordered[global_i] = Some(chunks[local_i].clone());
+                }
             }
         }
+
         Ok(ordered
             .into_iter()
             .map(|o| o.unwrap_or_else(MiningChunkResult::empty))
