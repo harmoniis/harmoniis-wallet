@@ -17,7 +17,7 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 
 const CUDA_BLOCK_SIZE: u32 = 256;
 
-const PIPELINE_SLOTS: usize = 3;
+pub(crate) const PIPELINE_SLOTS: usize = 3;
 
 struct StreamSlot {
     stream: Arc<CudaStream>,
@@ -25,6 +25,7 @@ struct StreamSlot {
 }
 
 pub struct CudaMiner {
+    _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
@@ -99,10 +100,8 @@ impl CudaMiner {
             });
         }
 
-        // ctx is not stored — cudarc auto-binds context on stream operations.
-        drop(ctx);
-
         Some(Self {
+            _ctx: ctx,
             stream,
             kernel,
             nonce_table_dev,

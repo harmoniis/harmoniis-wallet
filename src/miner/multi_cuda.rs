@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use cudarc::driver::CudaContext;
 use tokio::task::JoinSet;
 
-use super::cuda::CudaMiner;
+use super::cuda::{CudaMiner, PIPELINE_SLOTS};
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
@@ -124,7 +124,7 @@ impl MinerBackend for MultiCudaMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        self.miners.len().max(1)
+        (self.miners.len() * PIPELINE_SLOTS).max(1)
     }
 
     async fn mine_work_units(
