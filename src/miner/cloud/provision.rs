@@ -380,17 +380,37 @@ async fn install_hrmw_remote(
     host: &str,
     port: u16,
 ) -> Result<()> {
-    // Step 1: Upgrade GLIBC + libssl on Ubuntu 20.04 (cuda:12.0.1 template)
-    // The release binary is built on Ubuntu 24.04 (GLIBC 2.39, libssl3).
-    // This adds the noble repo and installs only libc6 + libssl3t64 (~20s).
-    println!("  Upgrading GLIBC + libssl...");
-    ssh::exec(
-        ssh_key,
-        host,
-        port,
-        "echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq libc6 libssl3t64",
-    )
-    .context("GLIBC/libssl upgrade failed")?;
+    // Step 1: Ensure system deps are available.
+    // - UBUNTU24: has GLIBC 2.39 + libssl3, but may lack NVRTC
+    // - Ubuntu 20.04: needs GLIBC + libssl upgrade from noble repo
+    println!("  Checking system dependencies...");
+    let glibc_check =
+        ssh::exec(ssh_key, host, port, "ldd --version 2>&1 | head -1").unwrap_or_default();
+    if glibc_check.contains("2.31") || glibc_check.contains("2.35") {
+        println!("  Upgrading GLIBC + libssl...");
+        ssh::exec(
+            ssh_key,
+            host,
+            port,
+            "echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq libc6 libssl3t64",
+        )
+        .context("GLIBC/libssl upgrade failed")?;
+    }
+
+    // Ensure NVRTC is available (needed for CUDA kernel compilation).
+    // UBUNTU24 template has libcuda but not libnvrtc.
+    let nvrtc_check =
+        ssh::exec(ssh_key, host, port, "ldconfig -p | grep libnvrtc").unwrap_or_default();
+    if nvrtc_check.is_empty() {
+        println!("  Installing CUDA NVRTC...");
+        ssh::exec(
+            ssh_key,
+            host,
+            port,
+            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-6 2>/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -yqq libnvrtc12 2>/dev/null || true",
+        )
+        .ok();
+    }
 
     // Step 2: Install hrmw
     println!("  Installing hrmw...");
