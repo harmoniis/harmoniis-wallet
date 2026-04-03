@@ -125,8 +125,7 @@ cudarc      = { version = "0.19.3", optional = true, default-features = false, f
     "runtime",
     "nvrtc",
     "fallback-dynamic-loading",
-    "cuda-version-from-build-system",
-    "fallback-latest",
+    "cuda-12080",
 ] }
 
 [dev-dependencies]
