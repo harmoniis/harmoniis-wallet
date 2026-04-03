@@ -1554,6 +1554,47 @@ fn print_request_response(response: &RequestResponse) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Offer to configure Vast.ai API key during setup.
+/// If already configured, shows current status. Otherwise prompts.
+fn setup_vast_api_key() -> anyhow::Result<()> {
+    use harmoniis_wallet::miner::cloud::config as cloud_config;
+
+    let cfg = cloud_config::load_config()?;
+    if let Some(key) = &cfg.vast_api_key {
+        if !key.is_empty() {
+            println!();
+            println!(
+                "Vast.ai: configured (key ends in ...{})",
+                &key[key.len().saturating_sub(8)..]
+            );
+            return Ok(());
+        }
+    }
+
+    println!();
+    println!("Cloud mining (optional):");
+    println!("  Vast.ai GPU cloud for webcash mining.");
+    println!("  Get an API key: https://cloud.vast.ai → Account → API Key");
+    print!("Vast.ai API key (Enter to skip): ");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+
+    if key.is_empty() {
+        println!("  Skipped. Configure later with: hrmw webminer cloud set-api-key <KEY>");
+    } else {
+        let mut cfg = cloud_config::load_config()?;
+        cfg.vast_api_key = Some(key);
+        cloud_config::save_config(&cfg)?;
+        println!("  Vast.ai API key saved.");
+    }
+
+    Ok(())
+}
+
 fn contract_from_recovery(
     rc: &harmoniis_wallet::client::recovery::RecoveryContract,
 ) -> Option<Contract> {
@@ -1667,6 +1708,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+
+                // Offer to configure Vast.ai API key for cloud mining
+                setup_vast_api_key()?;
+
                 return Ok(());
             }
 
@@ -1709,6 +1754,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 PasswordManagerMode::Off => {}
             }
+
+            // Offer to configure Vast.ai API key for cloud mining
+            setup_vast_api_key()?;
         }
 
         // ── info ──────────────────────────────────────────────────────────────
@@ -3926,7 +3974,7 @@ async fn main() -> anyhow::Result<()> {
                     provision::status(&state, &ssh_key).await?;
                 }
                 CloudCmd::Info { label } => {
-                    provision::info(&label);
+                    provision::info(&label, &ssh_key);
                 }
                 CloudCmd::SetApiKey { key } => {
                     let mut cfg = cloud_config::load_config()?;

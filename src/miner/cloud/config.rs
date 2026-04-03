@@ -102,6 +102,12 @@ pub fn clear_state() -> Result<()> {
 }
 
 /// Resolve the API key from config, env, or prompt.
+/// Resolve the Vast.ai API key from config, env, or interactive prompt.
+///
+/// Resolution order:
+/// 1. Config file (`~/.harmoniis/cloud/config.toml`)
+/// 2. `VAST_API_KEY` environment variable
+/// 3. Interactive prompt (saved to config for future use)
 pub fn resolve_api_key(cfg: &CloudConfig) -> Result<String> {
     if let Some(key) = &cfg.vast_api_key {
         if !key.is_empty() {
@@ -113,9 +119,36 @@ pub fn resolve_api_key(cfg: &CloudConfig) -> Result<String> {
             return Ok(key);
         }
     }
-    anyhow::bail!(
-        "Vast.ai API key not configured.\n\
-         Set it with: hrmw webminer cloud config set vast-api-key <KEY>\n\
-         Or export VAST_API_KEY=<KEY>"
-    )
+    // Interactive prompt — ask the user for the key and persist it.
+    prompt_and_save_api_key()
+}
+
+fn prompt_and_save_api_key() -> Result<String> {
+    println!("Vast.ai API key not found.");
+    println!();
+    println!("To get your API key:");
+    println!("  1. Register at https://cloud.vast.ai");
+    println!("  2. Add credits (Account → Billing → Add Credit)");
+    println!("  3. Copy API key from Account → API Key (sidebar)");
+    println!();
+    print!("Paste your Vast.ai API key: ");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    // Persist to config
+    let mut cfg = load_config()?;
+    cfg.vast_api_key = Some(key.clone());
+    save_config(&cfg)?;
+    println!("API key saved to ~/.harmoniis/cloud/config.toml");
+    println!();
+
+    Ok(key)
 }

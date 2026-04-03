@@ -261,47 +261,124 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
     println!();
 
     // Check miner process
-    match ssh::exec(
+    let running = match ssh::exec(
         ssh_key,
         &state.ssh_host,
         state.ssh_port,
         "pgrep -a hrmw || echo 'NOT_RUNNING'",
     ) {
-        Ok(output) if output.contains("NOT_RUNNING") => println!("Miner: NOT RUNNING"),
-        Ok(_) => println!("Miner: RUNNING"),
-        Err(e) => println!("Miner check: {e}"),
+        Ok(output) if output.contains("NOT_RUNNING") => {
+            println!("  Miner:    NOT RUNNING");
+            false
+        }
+        Ok(_) => {
+            println!("  Miner:    RUNNING");
+            true
+        }
+        Err(e) => {
+            println!("  Miner:    unknown ({e})");
+            false
+        }
+    };
+
+    // Extract mining stats from the latest log line
+    if running {
+        if let Ok(log) = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            "grep 'speed=' /root/miner.log | tail -1",
+        ) {
+            let line = log.trim();
+            if !line.is_empty() {
+                // Parse speed= and solutions= from the line
+                let speed = line
+                    .split("speed=")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .unwrap_or("?");
+                let solutions = line
+                    .split("solutions=")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .unwrap_or("?");
+                println!("  Speed:    {speed}");
+                println!("  Solutions: {solutions}");
+            }
+        }
+        // Count total mined
+        if let Ok(count) = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            "grep -c 'SOLUTION FOUND' /root/miner.log 2>/dev/null || echo 0",
+        ) {
+            let n = count.trim();
+            if n != "0" {
+                let amount = n.parse::<u64>().unwrap_or(0) as f64 * 185.546875;
+                println!("  Mined:    {n} solutions ({amount} webcash)");
+            }
+        }
     }
 
-    // Show miner log tail
+    // Show last few log lines
     if let Ok(log) = ssh::exec(
         ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "tail -10 /root/miner.log 2>/dev/null",
+        "tail -5 /root/miner.log 2>/dev/null",
     ) {
-        println!();
-        println!("Last 10 lines:");
-        for line in log.trim().lines() {
-            println!("  {line}");
+        let trimmed = log.trim();
+        if !trimmed.is_empty() {
+            println!();
+            for line in trimmed.lines() {
+                println!("  {line}");
+            }
         }
     }
 
     Ok(())
 }
 
-/// Show local mining wallet info.
-pub fn info(label: &str) {
+/// Show mining wallet info — remote balance if instance is active, otherwise local.
+pub fn info(label: &str, ssh_key: &ed25519_dalek::SigningKey) {
     println!("Mining label: {label}");
     println!("Wallet: {label}_webcash.db");
-    println!("Check balance: hrmw webcash info --label {label}");
-    println!("Recover mined: hrmw webcash recover --label {label}");
     if let Ok(Some(state)) = config::load_state() {
         println!();
         println!("Active instance: {}", state.instance_id);
         println!("  GPU: {}x {}", state.num_gpus, state.gpu_name);
         println!("  Cost: ${:.2}/hr", state.cost_per_hour);
+        println!("  Started: {}", state.started_at);
+
+        // Show remote mining stats from log
+        if let Ok(output) = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            "echo \"solutions=$(grep -c 'SOLUTION FOUND' /root/miner.log 2>/dev/null || echo 0)\"; echo \"inserted=$(grep -c 'Inserted amount' /root/miner.log 2>/dev/null || echo 0)\"; grep 'speed=' /root/miner.log 2>/dev/null | tail -1",
+        ) {
+            println!();
+            println!("Remote mining:");
+            for line in output.trim().lines() {
+                if line.starts_with("solutions=") {
+                    let n: u64 = line.trim_start_matches("solutions=").parse().unwrap_or(0);
+                    let amount = n as f64 * 185.546875;
+                    println!("  Solutions found: {n} ({amount} webcash)");
+                } else if line.starts_with("inserted=") {
+                    let n: u64 = line.trim_start_matches("inserted=").parse().unwrap_or(0);
+                    let amount = n as f64 * 185.546875;
+                    println!("  Inserted to wallet: {n} ({amount} webcash)");
+                } else if line.contains("speed=") {
+                    let speed = line.split("speed=").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or("?");
+                    println!("  Current speed: {speed}");
+                }
+            }
+        }
     } else {
         println!("No active cloud mining instance.");
+        println!();
+        println!("Recover mined webcash: hrmw webcash recover --label {label}");
     }
 }
 
