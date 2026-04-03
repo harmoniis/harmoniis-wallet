@@ -111,19 +111,9 @@ pub async fn start(
         selected.id
     };
 
-    // 3. Create instance
+    // 3. Create instance (no onstart — we install everything via SSH after boot)
     println!("[3/6] Creating instance...");
-    let onstart = r#"#!/bin/bash
-set -e
-mkdir -p /root/.harmoniis/wallet /root/.local/bin
-# Upgrade GLIBC on Ubuntu 20.04 to support the hrmw binary
-echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list
-apt-get update -qq
-apt-get install -yqq libc6
-# Install hrmw
-curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh
-"#;
-    let instance_id = client.create_instance(offer_id, onstart).await?;
+    let instance_id = client.create_instance(offer_id, "").await?;
     println!("  Instance: {instance_id}");
 
     // 4. Wait for running (5 min max, auto-destroy if stuck)
@@ -137,9 +127,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh
     // Wait for SSH to accept connections
     wait_for_ssh(ssh_key, &ssh_host, ssh_port).await?;
 
-    // 5. Wait for hrmw install + verify CUDA
-    println!("[5/6] Waiting for hrmw install...");
-    wait_for_hrmw(ssh_key, &ssh_host, ssh_port).await?;
+    // 5. Install GLIBC + hrmw via SSH
+    println!("[5/6] Installing hrmw...");
+    install_hrmw_remote(ssh_key, &ssh_host, ssh_port).await?;
 
     // Verify GPUs
     match ssh::exec(
@@ -385,23 +375,25 @@ async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16
     anyhow::bail!("SSH not ready after 2.5 minutes")
 }
 
-async fn wait_for_hrmw(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
-    for i in 0..60 {
-        if let Ok(out) = ssh::exec(
-            ssh_key,
-            host,
-            port,
-            &format!("test -x {REMOTE_HRMW} && {REMOTE_HRMW} --version || echo NOT_READY"),
-        ) {
-            if !out.contains("NOT_READY") {
-                println!("  {}", out.trim());
-                return Ok(());
-            }
-        }
-        if i % 6 == 0 && i > 0 {
-            println!("  Still installing...");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-    anyhow::bail!("hrmw install timed out after 5 minutes")
+async fn install_hrmw_remote(
+    ssh_key: &ed25519_dalek::SigningKey,
+    host: &str,
+    port: u16,
+) -> Result<()> {
+    // Install hrmw (binary built for GLIBC 2.31 — no upgrade needed)
+    println!("  Installing hrmw...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "mkdir -p /root/.harmoniis/wallet /root/.local/bin && curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh",
+    )
+    .context("hrmw install failed")?;
+
+    // Verify
+    let version = ssh::exec(ssh_key, host, port, &format!("{REMOTE_HRMW} --version"))
+        .context("hrmw verification failed")?;
+    println!("  {}", version.trim());
+
+    Ok(())
 }
