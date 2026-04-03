@@ -12,6 +12,10 @@
 //   output[2] = unused (reserved)
 // - Host re-computes the actual hash from the winning nonce to verify.
 //
+// Note: nonce table stays in storage (global memory). The 4KB table fits in
+// GPU L2 cache, giving similar latency to LDS without workgroupBarrier()
+// overhead that hurts AMD GCN/RDNA occupancy.
+//
 // Layout:
 //   binding 0: nonce_table — 1000 × u32 (base64-encoded 3-digit nonces, big-endian packed)
 //   binding 1: input       — 12 × u32
@@ -43,10 +47,9 @@ const K = array<u32, 64>(
 );
 
 @group(0) @binding(0) var<storage, read> nonce_table: array<u32, 1000>;
-@group(0) @binding(1) var<storage, read> input: array<u32, 12>;  // midstate + params
+@group(0) @binding(1) var<storage, read> input: array<u32, 12>;
 @group(0) @binding(2) var<storage, read_write> output: array<atomic<u32>, 3>;
 
-// SHA256 helper functions
 fn rotr(x: u32, n: u32) -> u32 {
     return (x >> n) | (x << (32u - n));
 }
@@ -98,9 +101,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s0 = input[0]; let s1 = input[1]; let s2 = input[2]; let s3 = input[3];
     let s4 = input[4]; let s5 = input[5]; let s6 = input[6]; let s7 = input[7];
 
-    // Rolling 16-word message schedule (matches CUDA — 4x less register pressure).
-    //   word 0: nonce1, word 1: nonce2, word 2: "fQ==", word 3: 0x80 padding,
-    //   words 4..14: zeros, word 15: bit-length.
+    // Rolling 16-word message schedule.
     var w: array<u32, 16>;
     w[0] = nonce_table[nonce1_idx];
     w[1] = nonce_table[nonce2_idx];
@@ -142,7 +143,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (lz < difficulty) {
             return;
         }
-        // difficulty <= 32 and first word has enough zeros.
         let prev = atomicMax(&output[0], lz);
         if (lz > prev) {
             atomicStore(&output[1], thread_id);

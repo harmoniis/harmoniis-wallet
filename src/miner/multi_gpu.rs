@@ -128,9 +128,9 @@ impl MinerBackend for MultiGpuMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        // Each GPU should get its OWN full 1M nonce work unit — not a
-        // fraction of a shared work unit.  This tells the daemon to create
-        // N midstates so each GPU mines independently at 100% capacity.
+        // Each GPU gets one full 1M-nonce work unit. Unlike the CUDA backend,
+        // wgpu cannot overlap dispatches on the same device (shared input/result
+        // buffers, single command queue). Pipeline depth = GPU count.
         self.miners.len().max(1)
     }
 
@@ -160,7 +160,7 @@ impl MinerBackend for MultiGpuMiner {
             return Ok(out);
         }
 
-        // Multi-GPU: each GPU gets its own full 1M nonce work unit.
+        // Multi-GPU: each GPU gets its own full 1M nonce work unit in parallel.
         let mut tasks = JoinSet::new();
         for (idx, midstate) in midstates.iter().enumerate() {
             let miner = self.miners[idx % self.miners.len()].clone();

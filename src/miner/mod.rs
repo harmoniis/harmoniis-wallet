@@ -9,6 +9,8 @@ pub mod composite;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda")]
+pub mod cuda_detect;
 pub mod daemon;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -251,6 +253,9 @@ pub(crate) fn split_assignments_for_weights(
 /// Query CUDA device count, suppressing cudarc's panic when CUDA DLLs are missing.
 #[cfg(feature = "cuda")]
 fn cuda_device_count() -> usize {
+    // Ensure CUDA libraries are on the search path before cudarc loads them.
+    cuda_detect::ensure_cuda_libraries();
+
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let n = std::panic::catch_unwind(|| cudarc::driver::CudaContext::device_count())
