@@ -176,7 +176,13 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
 pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!(
+                "GPU probe: cannot find exe for {} ({}) — {e}",
+                identity.backend, identity.vendor,
+            );
+            return false;
+        }
     };
     let status = std::process::Command::new(exe)
         .arg("gpu-probe")
@@ -189,10 +195,23 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    match status {
+    let ok = match status {
         Ok(s) => s.success(),
-        Err(_) => false,
+        Err(e) => {
+            eprintln!(
+                "GPU probe: failed to spawn for {} ({}) — {e}",
+                identity.backend, identity.vendor,
+            );
+            false
+        }
+    };
+    if !ok {
+        eprintln!(
+            "GPU probe: adapter {} (vendor={:#x}, device={:#x}) failed — skipping",
+            identity.backend, identity.vendor, identity.device,
+        );
     }
+    ok
 }
 
 pub struct GpuMiner {
@@ -226,6 +245,11 @@ impl GpuMiner {
             })
             .await;
         if let Ok(adapter) = preferred {
+            let info = adapter.get_info();
+            eprintln!(
+                "GPU: preferred adapter: {} ({:?}, {:?})",
+                info.name, info.backend, info.device_type
+            );
             if let Some(miner) = Self::try_from_adapter(adapter).await {
                 return Some(miner);
             }
@@ -234,16 +258,19 @@ impl GpuMiner {
         // Fallback: scan all adapters and pick the first one we can open.
         let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
         if adapters.is_empty() {
-            eprintln!("No GPU adapters visible to wgpu (enumerate_adapters returned 0)");
+            eprintln!("GPU: no adapters visible to wgpu (enumerate_adapters returned 0)");
             return None;
         }
+        eprintln!("GPU: scanning {} adapters for fallback...", adapters.len());
         for adapter in adapters {
+            let info = adapter.get_info();
+            eprintln!("GPU: trying {} ({:?})", info.name, info.backend);
             if let Some(miner) = Self::try_from_adapter(adapter).await {
                 return Some(miner);
             }
         }
 
-        eprintln!("No compatible GPU adapter could be initialized");
+        eprintln!("GPU: no compatible adapter could be initialized");
         None
     }
 
@@ -251,11 +278,15 @@ impl GpuMiner {
     pub async fn try_from_adapter(adapter: wgpu::Adapter) -> Option<Self> {
         let info = adapter.get_info();
         if info.device_type == wgpu::DeviceType::Cpu {
+            eprintln!("GPU: skipping CPU adapter: {}", info.name);
             return None;
         }
 
         let adapter_name = info.name.clone();
-        // Adapter selection is an internal detail — don't print to user.
+        eprintln!(
+            "GPU: initializing {} ({:?}, vendor={:#x}, device={:#x})",
+            adapter_name, info.backend, info.vendor, info.device,
+        );
 
         let req_default = adapter
             .request_device(&wgpu::DeviceDescriptor {

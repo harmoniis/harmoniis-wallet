@@ -500,11 +500,26 @@ pub async fn select_backend_for_devices(
 #[cfg(feature = "gpu")]
 pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     let devices = enumerate_all_devices().await;
+    let wgpu_count = devices
+        .iter()
+        .filter(|d| matches!(&d.kind, DeviceKind::Wgpu { .. }))
+        .count();
+    if wgpu_count > 0 {
+        eprintln!("GPU: {wgpu_count} physical device(s) found, probing...");
+    }
+
     let mut miners = Vec::new();
 
     for dev in &devices {
         #[allow(irrefutable_let_patterns)]
         if let DeviceKind::Wgpu { adapters } = &dev.kind {
+            eprintln!(
+                "GPU[{}]: {} ({} adapter backend(s))",
+                dev.id,
+                dev.label,
+                adapters.len(),
+            );
+            let mut initialized = false;
             // Try each adapter backend (Vulkan → DX12 → Metal) until one works.
             for identity in adapters {
                 if !gpu::subprocess_probe(identity) {
@@ -517,12 +532,24 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                 let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
                 if let Some(adapter) = identity.find_matching(found) {
                     if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                        eprintln!(
+                            "GPU[{}]: {} ready ({})",
+                            dev.id, dev.label, identity.backend,
+                        );
                         miners.push(miner);
+                        initialized = true;
                         break;
                     }
                 }
             }
+            if !initialized {
+                eprintln!("GPU[{}]: {} — no working adapter found", dev.id, dev.label);
+            }
         }
+    }
+
+    if wgpu_count > 0 {
+        eprintln!("GPU: {}/{} device(s) initialized", miners.len(), wgpu_count);
     }
     miners
 }

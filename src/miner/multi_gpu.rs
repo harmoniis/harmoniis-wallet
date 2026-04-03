@@ -37,11 +37,18 @@ impl MultiGpuMiner {
         let mut device_names = Vec::with_capacity(gpu_miners.len());
         let mut aggregate_hash_rate = 0.0;
 
-        for miner in gpu_miners {
+        for (idx, miner) in gpu_miners.into_iter().enumerate() {
+            let name = miner.adapter_name().to_string();
+            eprintln!("GPU[{idx}]: benchmarking {}...", name);
             let hps = miner.benchmark().await.unwrap_or(1.0).max(1.0);
+            eprintln!(
+                "GPU[{idx}]: {} — {:.2} Mh/s",
+                name,
+                hps / 1_000_000.0,
+            );
             aggregate_hash_rate += hps;
             weights.push(hps);
-            device_names.push(miner.adapter_name().to_string());
+            device_names.push(name);
             miners.push(std::sync::Arc::new(miner));
         }
 
