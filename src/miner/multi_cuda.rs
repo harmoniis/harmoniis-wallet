@@ -146,10 +146,9 @@ impl MinerBackend for MultiCudaMiner {
             gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
         }
 
-        // Dedicated OS thread per GPU with explicit context binding.
-        // tokio tasks serialize on worker threads and don't bind CUDA contexts.
-        // std::thread::spawn guarantees one thread per GPU, bind_to_thread()
-        // inside mine_batch ensures the correct context is active.
+        // Send work to all GPU persistent workers in parallel, then collect.
+        // mine_batch sends via channel (instant) and blocks on recv (waits for GPU).
+        // Using short-lived threads so all GPUs start computing simultaneously.
         let mut handles = Vec::with_capacity(num_gpus);
         for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
             if batch.is_empty() {
@@ -166,7 +165,6 @@ impl MinerBackend for MultiCudaMiner {
             }));
         }
 
-        // Join all GPU threads, collect results in original order.
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         for handle in handles {

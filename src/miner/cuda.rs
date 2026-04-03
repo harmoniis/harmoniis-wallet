@@ -1,14 +1,18 @@
-//! CUDA mining backend using `cudarc` + NVRTC.
+//! CUDA mining backend — persistent GPU worker threads.
 //!
-//! Multi-GPU pipelining: each GPU gets a dedicated OS thread that binds its
-//! CUDA context and creates a fresh stream per batch. Kernel and nonce table
-//! are compiled/uploaded once during init and reused across batches.
+//! Each GPU gets ONE dedicated OS thread spawned during init. The thread binds
+//! the CUDA context, creates a stream, pre-allocates result buffers, then loops
+//! forever waiting for work. Zero per-cycle overhead: no thread spawn, no stream
+//! creation, no buffer allocation during mining.
+//!
+//! Architecture follows maaku/webminer's pattern: persistent threads, tight loop.
 
 use async_trait::async_trait;
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
 use cudarc::nvrtc::compile_ptx;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
@@ -20,12 +24,20 @@ const CUDA_BLOCK_SIZE: u32 = 256;
 /// Work units per GPU per mining cycle.
 pub(crate) const PIPELINE_SLOTS: usize = 3;
 
+/// Work request sent to a GPU worker thread.
+struct WorkRequest {
+    midstates: Vec<Sha256Midstate>,
+    difficulty: u32,
+}
+
+/// A handle to a persistent GPU worker thread.
+struct GpuWorker {
+    work_tx: mpsc::Sender<WorkRequest>,
+    result_rx: Mutex<mpsc::Receiver<anyhow::Result<Vec<MiningChunkResult>>>>,
+}
+
 pub struct CudaMiner {
-    ctx: Arc<CudaContext>,
-    stream: Arc<CudaStream>,
-    kernel: CudaFunction,
-    nonce_table_dev: CudaSlice<u32>,
-    result_dev: Mutex<CudaSlice<u64>>,
+    worker: GpuWorker,
     nonce_words: Vec<u32>,
     device_name: String,
     ordinal: usize,
@@ -44,7 +56,7 @@ impl CudaMiner {
 
     fn try_new_inner(ordinal: usize) -> Option<Self> {
         let ctx = CudaContext::new(ordinal).ok()?;
-        let stream = ctx.default_stream();
+        let init_stream = ctx.default_stream();
         let device_name = ctx.name().ok()?;
 
         let ptx = match compile_ptx(include_str!("shader/sha256_mine.cu")) {
@@ -70,15 +82,35 @@ impl CudaMiner {
         };
 
         let nonce_words = NonceTable::new().as_u32_slice();
-        let nonce_table_dev = stream.clone_htod(&nonce_words).ok()?;
-        let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
+        let nonce_table_dev = init_stream.clone_htod(&nonce_words).ok()?;
+
+        // Channels for work dispatch and result collection.
+        let (work_tx, work_rx) = mpsc::channel::<WorkRequest>();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let nonce_words_clone = nonce_words.clone();
+
+        // Spawn the persistent GPU worker thread.
+        std::thread::Builder::new()
+            .name(format!("cuda-gpu-{}", ordinal))
+            .spawn(move || {
+                gpu_worker_loop(
+                    ctx,
+                    kernel,
+                    nonce_table_dev,
+                    &nonce_words_clone,
+                    ordinal,
+                    work_rx,
+                    result_tx,
+                );
+            })
+            .ok()?;
 
         Some(Self {
-            ctx,
-            stream,
-            kernel,
-            nonce_table_dev,
-            result_dev: Mutex::new(result_dev),
+            worker: GpuWorker {
+                work_tx,
+                result_rx: Mutex::new(result_rx),
+            },
             nonce_words,
             device_name,
             ordinal,
@@ -89,103 +121,7 @@ impl CudaMiner {
         &self.device_name
     }
 
-    fn nonce_indices(nonce: u32) -> (usize, usize) {
-        ((nonce / 1000) as usize, (nonce % 1000) as usize)
-    }
-
-    fn best_result_from_packed(
-        &self,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-        packed_best: u64,
-    ) -> Option<MiningResult> {
-        let best_zeros = (packed_best >> 32) as u32;
-        if best_zeros < difficulty {
-            return None;
-        }
-
-        let nonce = (packed_best & 0xFFFF_FFFF) as u32;
-        if nonce >= NONCE_SPACE_SIZE {
-            return None;
-        }
-
-        let (n1, n2) = Self::nonce_indices(nonce);
-        let state_words =
-            midstate.finalize_words_from_nonce_u32(self.nonce_words[n1], self.nonce_words[n2]);
-        let achieved = leading_zero_bits_words(&state_words);
-        if achieved < difficulty {
-            return None;
-        }
-
-        Some(MiningResult {
-            nonce1_idx: n1 as u16,
-            nonce2_idx: n2 as u16,
-            hash: state_words_to_bytes(&state_words),
-            difficulty_achieved: achieved,
-        })
-    }
-
-    /// Single synchronous dispatch on self.stream (for benchmark).
-    pub fn dispatch_range(
-        &self,
-        midstate: &Sha256Midstate,
-        difficulty: u32,
-        nonce_offset: u32,
-        nonce_count: u32,
-    ) -> anyhow::Result<Option<MiningResult>> {
-        let mut result_dev = self
-            .result_dev
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cuda result buffer mutex poisoned"))?;
-
-        self.stream.memset_zeros(&mut *result_dev)?;
-
-        let s = midstate.state_words();
-        let s0 = s[0];
-        let s1 = s[1];
-        let s2 = s[2];
-        let s3 = s[3];
-        let s4 = s[4];
-        let s5 = s[5];
-        let s6 = s[6];
-        let s7 = s[7];
-        let prefix_len = midstate.prefix_len as u32;
-
-        let cfg = LaunchConfig {
-            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut launch = self.stream.launch_builder(&self.kernel);
-        launch.arg(&self.nonce_table_dev);
-        launch.arg(&s0);
-        launch.arg(&s1);
-        launch.arg(&s2);
-        launch.arg(&s3);
-        launch.arg(&s4);
-        launch.arg(&s5);
-        launch.arg(&s6);
-        launch.arg(&s7);
-        launch.arg(&difficulty);
-        launch.arg(&prefix_len);
-        launch.arg(&nonce_offset);
-        launch.arg(&nonce_count);
-        launch.arg(&mut *result_dev);
-        unsafe { launch.launch(cfg) }?;
-
-        let mut host_best = [0u64; 1];
-        self.stream.memcpy_dtoh(&*result_dev, &mut host_best)?;
-        self.stream.synchronize()?;
-
-        Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
-    }
-
-    /// Pipeline multiple work units with FIFO enqueue + single sync.
-    ///
-    /// Key: ctx.bind_to_thread() + ctx.new_stream() creates a fresh stream
-    /// bound to this GPU on the calling thread. The stored self.kernel and
-    /// self.nonce_table_dev are reused (same context, no recompilation).
+    /// Send work to the persistent GPU thread and wait for results.
     pub fn mine_batch(
         &self,
         midstates: &[Sha256Midstate],
@@ -195,66 +131,32 @@ impl CudaMiner {
             return Ok(Vec::new());
         }
 
-        self.ctx.bind_to_thread()
-            .map_err(|e| anyhow::anyhow!("CUDA[{}] bind: {}", self.ordinal, e))?;
-        let stream = self.ctx.new_stream()
-            .map_err(|e| anyhow::anyhow!("CUDA[{}] stream: {}", self.ordinal, e))?;
-
-        let n = midstates.len();
-        let started = std::time::Instant::now();
-        let nonce_count = NONCE_SPACE_SIZE;
-        let nonce_offset = 0u32;
-        let cfg = LaunchConfig {
-            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Allocate result buffers + enqueue all dispatches in one pass.
-        let mut result_bufs: Vec<CudaSlice<u64>> = Vec::with_capacity(n);
-        for i in 0..n {
-            let mut rbuf = stream.alloc_zeros::<u64>(1)
-                .map_err(|e| anyhow::anyhow!("CUDA[{}] alloc: {}", self.ordinal, e))?;
-
-            let s = midstates[i].state_words();
-            let prefix_len = midstates[i].prefix_len as u32;
-            let mut launch = stream.launch_builder(&self.kernel);
-            launch.arg(&self.nonce_table_dev);
-            launch.arg(&s[0]); launch.arg(&s[1]); launch.arg(&s[2]); launch.arg(&s[3]);
-            launch.arg(&s[4]); launch.arg(&s[5]); launch.arg(&s[6]); launch.arg(&s[7]);
-            launch.arg(&difficulty);
-            launch.arg(&prefix_len);
-            launch.arg(&nonce_offset);
-            launch.arg(&nonce_count);
-            launch.arg(&mut rbuf);
-            unsafe { launch.launch(cfg) }?;
-
-            result_bufs.push(rbuf);
-        }
-
-        // Single sync — all kernels are done.
-        stream.synchronize()?;
-
-        // Batch readback — enqueue all DtoH copies then sync once.
-        let mut host_results = vec![0u64; n];
-        for i in 0..n {
-            stream.memcpy_dtoh(&result_bufs[i], &mut host_results[i..i + 1])?;
-        }
-        stream.synchronize()?;
-
-        // Parse results on CPU.
-        let elapsed = started.elapsed();
-        let results = host_results
-            .iter()
-            .enumerate()
-            .map(|(i, &packed)| MiningChunkResult {
-                result: self.best_result_from_packed(&midstates[i], difficulty, packed),
-                attempted: NONCE_SPACE_SIZE as u64,
-                elapsed,
+        self.worker
+            .work_tx
+            .send(WorkRequest {
+                midstates: midstates.to_vec(),
+                difficulty,
             })
-            .collect();
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))?;
 
-        Ok(results)
+        self.worker
+            .result_rx
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] result mutex poisoned", self.ordinal))?
+            .recv()
+            .map_err(|_| anyhow::anyhow!("CUDA[{}] worker thread dead", self.ordinal))?
+    }
+
+    /// Synchronous single-dispatch (used by benchmark).
+    pub fn dispatch_range(
+        &self,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+        _nonce_offset: u32,
+        _nonce_count: u32,
+    ) -> anyhow::Result<Option<MiningResult>> {
+        let chunks = self.mine_batch(&[midstate.clone()], difficulty)?;
+        Ok(chunks.into_iter().next().and_then(|c| c.result))
     }
 
     pub async fn mine_range_direct(
@@ -291,6 +193,161 @@ impl CudaMiner {
     }
 }
 
+/// Persistent GPU worker thread — runs forever, zero per-cycle allocation.
+fn gpu_worker_loop(
+    ctx: Arc<CudaContext>,
+    kernel: CudaFunction,
+    nonce_table_dev: CudaSlice<u32>,
+    nonce_words: &[u32],
+    ordinal: usize,
+    work_rx: mpsc::Receiver<WorkRequest>,
+    result_tx: mpsc::Sender<anyhow::Result<Vec<MiningChunkResult>>>,
+) {
+    // Bind context ONCE — this thread owns this GPU forever.
+    if let Err(e) = ctx.bind_to_thread() {
+        eprintln!("CUDA[{}] worker bind failed: {}", ordinal, e);
+        return;
+    }
+
+    // Create stream ONCE.
+    let stream = match ctx.new_stream() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("CUDA[{}] worker stream failed: {}", ordinal, e);
+            return;
+        }
+    };
+
+    // Pre-allocate result buffers (grow as needed, never shrink).
+    let mut result_bufs: Vec<CudaSlice<u64>> = Vec::new();
+
+    let cfg = LaunchConfig {
+        grid_dim: (NONCE_SPACE_SIZE.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+        block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let nonce_offset = 0u32;
+    let nonce_count = NONCE_SPACE_SIZE;
+
+    // Tight loop — wait for work, compute, send results.
+    while let Ok(req) = work_rx.recv() {
+        let started = std::time::Instant::now();
+        let n = req.midstates.len();
+
+        // Grow result buffer pool if needed.
+        while result_bufs.len() < n {
+            match stream.alloc_zeros::<u64>(1) {
+                Ok(buf) => result_bufs.push(buf),
+                Err(e) => {
+                    let _ = result_tx.send(Err(anyhow::anyhow!(
+                        "CUDA[{}] alloc: {}",
+                        ordinal,
+                        e
+                    )));
+                    continue;
+                }
+            }
+        }
+
+        // Enqueue ALL kernels — GPU processes FIFO, zero idle between them.
+        let mut ok = true;
+        for i in 0..n {
+            if let Err(e) = stream.memset_zeros(&mut result_bufs[i]) {
+                let _ = result_tx.send(Err(anyhow::anyhow!("CUDA[{}] memset: {}", ordinal, e)));
+                ok = false;
+                break;
+            }
+
+            let s = req.midstates[i].state_words();
+            let prefix_len = req.midstates[i].prefix_len as u32;
+            let mut launch = stream.launch_builder(&kernel);
+            launch.arg(&nonce_table_dev);
+            launch.arg(&s[0]);
+            launch.arg(&s[1]);
+            launch.arg(&s[2]);
+            launch.arg(&s[3]);
+            launch.arg(&s[4]);
+            launch.arg(&s[5]);
+            launch.arg(&s[6]);
+            launch.arg(&s[7]);
+            launch.arg(&req.difficulty);
+            launch.arg(&prefix_len);
+            launch.arg(&nonce_offset);
+            launch.arg(&nonce_count);
+            launch.arg(&mut result_bufs[i]);
+            if let Err(e) = unsafe { launch.launch(cfg) } {
+                let _ = result_tx.send(Err(anyhow::anyhow!("CUDA[{}] launch: {}", ordinal, e)));
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        // Single sync — all kernels done.
+        if let Err(e) = stream.synchronize() {
+            let _ = result_tx.send(Err(anyhow::anyhow!("CUDA[{}] sync: {}", ordinal, e)));
+            continue;
+        }
+
+        // Batch readback.
+        let mut host_results = vec![0u64; n];
+        let mut read_ok = true;
+        for i in 0..n {
+            if let Err(e) = stream.memcpy_dtoh(&result_bufs[i], &mut host_results[i..i + 1]) {
+                let _ = result_tx.send(Err(anyhow::anyhow!("CUDA[{}] dtoh: {}", ordinal, e)));
+                read_ok = false;
+                break;
+            }
+        }
+        if !read_ok {
+            continue;
+        }
+        if let Err(e) = stream.synchronize() {
+            let _ = result_tx.send(Err(anyhow::anyhow!("CUDA[{}] read sync: {}", ordinal, e)));
+            continue;
+        }
+
+        // Parse results on CPU.
+        let elapsed = started.elapsed();
+        let results: Vec<MiningChunkResult> = host_results
+            .iter()
+            .enumerate()
+            .map(|(i, &packed)| {
+                let best_zeros = (packed >> 32) as u32;
+                let nonce = (packed & 0xFFFF_FFFF) as u32;
+                let result = if best_zeros >= req.difficulty && nonce < NONCE_SPACE_SIZE {
+                    let n1 = (nonce / 1000) as usize;
+                    let n2 = (nonce % 1000) as usize;
+                    let state_words = req.midstates[i]
+                        .finalize_words_from_nonce_u32(nonce_words[n1], nonce_words[n2]);
+                    let achieved = leading_zero_bits_words(&state_words);
+                    if achieved >= req.difficulty {
+                        Some(MiningResult {
+                            nonce1_idx: n1 as u16,
+                            nonce2_idx: n2 as u16,
+                            hash: state_words_to_bytes(&state_words),
+                            difficulty_achieved: achieved,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                MiningChunkResult {
+                    result,
+                    attempted: NONCE_SPACE_SIZE as u64,
+                    elapsed,
+                }
+            })
+            .collect();
+
+        let _ = result_tx.send(Ok(results));
+    }
+}
+
 #[async_trait]
 impl MinerBackend for CudaMiner {
     fn name(&self) -> &str {
@@ -303,7 +360,7 @@ impl MinerBackend for CudaMiner {
             format!("cuda_ordinal={}", self.ordinal),
             format!("cuda_block_size={}", CUDA_BLOCK_SIZE),
             format!("cuda_pipeline_slots={}", PIPELINE_SLOTS),
-            "cuda_result_mode=atomic_best_u64".to_string(),
+            "cuda_worker=persistent_thread".to_string(),
         ]
     }
 
