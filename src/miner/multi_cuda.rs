@@ -1,10 +1,14 @@
 //! Multi-device CUDA mining backend.
+//!
+//! Dispatches work to persistent GPU worker threads. The dispatcher sends
+//! ALL work before receiving ANY results, ensuring all GPUs start simultaneously.
+//! No thread creation per cycle — workers are spawned once during init.
 
 use async_trait::async_trait;
 use cudarc::driver::CudaContext;
 use tokio::task::JoinSet;
 
-use super::cuda::CudaMiner;
+use super::cuda::{CudaMiner, PIPELINE_SLOTS};
 use super::sha256::Sha256Midstate;
 use super::work_unit::NonceTable;
 use super::{
@@ -132,38 +136,55 @@ impl MinerBackend for MultiCudaMiner {
         midstates: &[Sha256Midstate],
         _nonce_table: &NonceTable,
         difficulty: u32,
-        cancel: Option<CancelFlag>,
+        _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
         if midstates.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut tasks = JoinSet::new();
+        let num_gpus = self.miners.len();
+
+        // Group midstates by GPU (round-robin).
+        let mut gpu_batches: Vec<Vec<(usize, Sha256Midstate)>> =
+            (0..num_gpus).map(|_| Vec::new()).collect();
         for (idx, midstate) in midstates.iter().enumerate() {
-            let miner = self.miners[idx % self.miners.len()].clone();
-            let midstate = midstate.clone();
-            let cancel = cancel.clone();
-            tasks.spawn(async move {
-                let chunk = miner
-                    .mine_range_direct(&midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel)
-                    .await?;
-                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
-            });
+            gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
+        }
+
+        // Dispatch ALL GPUs via short-lived threads (sends + blocking recv).
+        // Each thread sends to its GPU's persistent worker, then blocks on result.
+        // All threads run in parallel — all GPUs start simultaneously.
+        let mut handles = Vec::with_capacity(num_gpus);
+        for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
+            if batch.is_empty() {
+                continue;
+            }
+            let miner = self.miners[gpu_idx].clone();
+            handles.push(std::thread::spawn(move || {
+                let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+                let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
+                let chunks = miner.mine_batch(&mids, difficulty)?;
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
+                    indices.into_iter().zip(chunks).collect(),
+                )
+            }));
         }
 
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
-        while let Some(joined) = tasks.join_next().await {
-            let (idx, chunk) =
-                joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
-            ordered[idx] = Some(chunk);
+        for handle in handles {
+            let pairs = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("GPU dispatch thread panicked"))??;
+            for (idx, chunk) in pairs {
+                ordered[idx] = Some(chunk);
+            }
         }
 
-        let mut out = Vec::with_capacity(midstates.len());
-        for item in ordered {
-            out.push(item.ok_or_else(|| anyhow::anyhow!("missing CUDA mining chunk result"))?);
-        }
-        Ok(out)
+        Ok(ordered
+            .into_iter()
+            .map(|o| o.unwrap_or_else(MiningChunkResult::empty))
+            .collect())
     }
 
     async fn mine_range(
