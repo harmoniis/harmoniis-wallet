@@ -143,10 +143,17 @@ impl MinerBackend for MultiCudaMiner {
             let miner = self.miners[idx % self.miners.len()].clone();
             let midstate = midstate.clone();
             let cancel = cancel.clone();
-            tasks.spawn(async move {
-                let chunk = miner
-                    .mine_range_direct(&midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel)
-                    .await?;
+            // spawn_blocking: mine_range_direct does blocking CUDA sync calls.
+            // Using spawn() would serialize GPUs on tokio worker threads.
+            tasks.spawn_blocking(move || {
+                let rt = tokio::runtime::Handle::current();
+                let chunk = rt.block_on(miner.mine_range_direct(
+                    &midstate,
+                    difficulty,
+                    0,
+                    NONCE_SPACE_SIZE,
+                    cancel,
+                ))?;
                 Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
             });
         }
