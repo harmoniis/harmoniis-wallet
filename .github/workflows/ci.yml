@@ -119,12 +119,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — GPU + CUDA (Docker build for GLIBC 2.31 compat with Vast.ai cuda:12.0.1 template)
+          # Linux — GPU + CUDA
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
             features: bundled-sqlite,gpu,cuda
-            docker_build: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
@@ -213,22 +212,9 @@ jobs:
         run: cargo build --release --no-default-features --features ${{ matrix.features }}
 
       # Docker release build (Linux x86_64 — GLIBC 2.31 compat for Vast.ai)
-      - name: Build release binary (Docker)
-        if: matrix.docker_build
-        run: |
-          docker run --rm -v "$PWD:/src" -w /src ubuntu:20.04 bash -c '
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq
-            apt-get install -yqq curl build-essential pkg-config libssl-dev
-            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            export PATH=/root/.cargo/bin:$PATH
-            cargo build --release --no-default-features --features ${{ matrix.features }}
-          '
-
       # Native release build (Unix)
       - name: Build release binary
-        if: "!matrix.freebsd_vm && runner.os != 'Windows' && !matrix.docker_build"
+        if: "!matrix.freebsd_vm && runner.os != 'Windows'"
         shell: bash
         run: |
           HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
