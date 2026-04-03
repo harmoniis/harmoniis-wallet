@@ -148,28 +148,38 @@ impl MinerBackend for MultiCudaMiner {
             gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
         }
 
-        // Send work to ALL persistent GPU workers (channel send = ~100ns each).
-        // All GPUs start computing simultaneously.
-        let mut active_gpus: Vec<(usize, Vec<usize>)> = Vec::new();
+        // Send work to all persistent GPU workers via short-lived dispatch threads.
+        // Each thread sends then blocks on recv — all GPUs compute in parallel.
+        // Thread overhead (~0.3ms) is the cost of true parallelism since async
+        // recv would serialize on the tokio worker thread.
+        let mut handles = Vec::with_capacity(num_gpus);
         for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
             if batch.is_empty() {
                 continue;
             }
-            let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
-            let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
-            self.miners[gpu_idx].send_work(mids, difficulty)?;
-            active_gpus.push((gpu_idx, indices));
+            let miner = self.miners[gpu_idx].clone();
+            handles.push(std::thread::spawn(move || {
+                let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+                let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
+                miner.send_work(mids, difficulty)?;
+                let chunks = miner.recv_result()?;
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
+                    indices
+                        .into_iter()
+                        .zip(chunks)
+                        .collect(),
+                )
+            }));
         }
 
-        // Collect from all workers (blocks on slowest GPU — all run in parallel).
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
-        for (gpu_idx, indices) in active_gpus {
-            let chunks = self.miners[gpu_idx].recv_result()?;
-            for (local_i, global_i) in indices.into_iter().enumerate() {
-                if local_i < chunks.len() {
-                    ordered[global_i] = Some(chunks[local_i].clone());
-                }
+        for handle in handles {
+            let pairs = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("GPU dispatch thread panicked"))??;
+            for (idx, chunk) in pairs {
+                ordered[idx] = Some(chunk);
             }
         }
 
