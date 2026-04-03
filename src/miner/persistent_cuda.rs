@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use cudarc::nvrtc::compile_ptx;
 use std::sync::{Arc, Mutex};
 
 use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
@@ -64,20 +64,7 @@ impl PersistentCudaMiner {
         let stream = ctx.default_stream();
         let device_name = ctx.name().ok()?;
 
-        let arch = match ctx.compute_capability().ok()? {
-            (major, _) if major >= 12 => "compute_120",
-            (8, minor) if minor >= 9 => "compute_89",
-            (8, minor) if minor >= 6 => "compute_86",
-            (8, _) => "compute_80",
-            _ => "compute_75",
-        };
-        let opts = CompileOptions {
-            arch: Some(arch),
-            maxrregcount: Some(48),
-            ..Default::default()
-        };
-        let ptx =
-            compile_ptx_with_opts(include_str!("shader/sha256_mine_persistent.cu"), opts).ok()?;
+        let ptx = compile_ptx(include_str!("shader/sha256_mine_persistent.cu")).ok()?;
         let module = ctx.load_module(ptx).ok()?;
         let kernel = module.load_function("mine_persistent").ok()?;
 

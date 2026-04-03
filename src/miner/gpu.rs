@@ -173,19 +173,12 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
 
 /// Probe an adapter by spawning the current binary with `gpu-probe`.
 /// Returns `true` if the adapter is safe to use.
-/// Timeout for the subprocess GPU probe.
-///
-/// If a driver hangs during shader compilation (observed on some NVIDIA
-/// Pascal + wgpu 28 combinations), the probe is killed and the next
-/// adapter backend (e.g., DX12) is tried instead.
-const PROBE_TIMEOUT_SECS: u64 = 30;
-
 pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let mut child = match std::process::Command::new(exe)
+    let status = std::process::Command::new(exe)
         .arg("gpu-probe")
         .arg("--vendor")
         .arg(identity.vendor.to_string())
@@ -195,28 +188,10 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
         .arg(&identity.backend)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    // Poll with timeout — kill the probe if the driver hangs.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(PROBE_TIMEOUT_SECS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // Timed out — driver hang. Silently skip to next backend.
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(_) => return false,
-        }
+        .status();
+    match status {
+        Ok(s) => s.success(),
+        Err(_) => false,
     }
 }
 
@@ -227,8 +202,6 @@ pub struct GpuMiner {
     bind_group: wgpu::BindGroup,
     input_buffer: wgpu::Buffer,
     result_buffer: wgpu::Buffer,
-    /// Pre-allocated staging buffer for result readback (reused across dispatches).
-    staging_buffer: wgpu::Buffer,
     nonce_words: Vec<u32>,
     adapter_name: String,
     adapter_backend: wgpu::Backend,
@@ -395,15 +368,6 @@ impl GpuMiner {
             mapped_at_creation: false,
         });
 
-        // Pre-allocate staging buffer for result readback (reused every dispatch).
-        // Eliminates ~10-50 us Vulkan allocation overhead per dispatch.
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: RESULT_BUFFER_SIZE,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("miner_bind_group"),
             layout: &bind_group_layout,
@@ -437,7 +401,6 @@ impl GpuMiner {
             bind_group,
             input_buffer,
             result_buffer,
-            staging_buffer,
             nonce_words,
             adapter_name,
             adapter_backend: info.backend,
@@ -474,6 +437,14 @@ impl GpuMiner {
         self.queue
             .write_buffer(&self.result_buffer, 0, &[0u8; RESULT_WORDS * 4]);
 
+        // Only the staging buffer needs per-dispatch creation (map/unmap cycle).
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging"),
+            size: RESULT_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -495,13 +466,13 @@ impl GpuMiner {
         encoder.copy_buffer_to_buffer(
             &self.result_buffer,
             0,
-            &self.staging_buffer,
+            &staging_buffer,
             0,
             RESULT_BUFFER_SIZE,
         );
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
-        let buffer_slice = self.staging_buffer.slice(..);
+        let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = tokio::sync::oneshot::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
@@ -519,7 +490,7 @@ impl GpuMiner {
         let nonce_id = result_words[1];
 
         drop(data);
-        self.staging_buffer.unmap();
+        staging_buffer.unmap();
 
         // Host-side re-verification (matches CUDA's best_result_from_packed):
         // re-compute hash from the nonce to guarantee correctness.
