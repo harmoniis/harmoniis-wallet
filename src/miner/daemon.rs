@@ -379,6 +379,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let stats_print_interval = std::time::Duration::from_secs(5);
     let mut work_unit_timer;
 
+    // Pre-generated work units from background thread (overlaps CPU gen with GPU compute).
+    let mut pending_work_units: Option<Vec<WorkUnit>> = None;
+
     // Main mining loop
     while !shutdown.load(Ordering::Relaxed) {
         // Refresh target periodically
@@ -390,6 +393,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             "Difficulty changed: {} -> {}",
                             target.difficulty, new_target.difficulty
                         );
+                        pending_work_units = None; // Discard stale WUs
                     }
                     target = new_target;
                     tracker.set_difficulty(target.difficulty);
@@ -412,22 +416,35 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             continue;
         }
 
-        // Build independent work units for this mining cycle.
-        let mut work_units = Vec::with_capacity(pipeline_depth);
-        for _ in 0..pipeline_depth {
-            work_units.push(WorkUnit::new(
-                target.difficulty,
-                target.mining_amount,
-                target.subsidy_amount,
-            ));
-        }
+        // Use pre-generated WUs if available, otherwise generate inline (first cycle).
+        let work_units: Vec<WorkUnit> = match pending_work_units.take() {
+            Some(wus) => wus,
+            None => (0..pipeline_depth)
+                .map(|_| {
+                    WorkUnit::new(target.difficulty, target.mining_amount, target.subsidy_amount)
+                })
+                .collect(),
+        };
         let midstates: Vec<_> = work_units.iter().map(|wu| wu.midstate.clone()).collect();
 
-        // Mine all work units (backend may run these in parallel).
+        // Pre-generate NEXT batch on a background thread while GPU mines current batch.
+        let (gen_diff, gen_mine, gen_sub) =
+            (target.difficulty, target.mining_amount, target.subsidy_amount);
+        let gen_depth = pipeline_depth;
+        let next_batch_thread = std::thread::spawn(move || {
+            (0..gen_depth)
+                .map(|_| WorkUnit::new(gen_diff, gen_mine, gen_sub))
+                .collect::<Vec<WorkUnit>>()
+        });
+
+        // Mine all work units (backend runs GPUs in parallel).
         work_unit_timer = std::time::Instant::now();
         let chunks = backend
             .mine_work_units(&midstates, &nonce_table, target.difficulty, None)
             .await?;
+
+        // Collect pre-generated next batch (ready — CPU gen runs during GPU mining).
+        pending_work_units = next_batch_thread.join().ok();
         let wu_elapsed = work_unit_timer.elapsed();
         let mut attempts_this_work_unit = 0u64;
         for chunk in &chunks {

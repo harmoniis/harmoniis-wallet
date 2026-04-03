@@ -195,7 +195,6 @@ impl CudaMiner {
             return Ok(Vec::new());
         }
 
-        // Bind context + fresh stream on this thread.
         self.ctx.bind_to_thread()
             .map_err(|e| anyhow::anyhow!("CUDA[{}] bind: {}", self.ordinal, e))?;
         let stream = self.ctx.new_stream()
@@ -203,26 +202,22 @@ impl CudaMiner {
 
         let n = midstates.len();
         let started = std::time::Instant::now();
+        let nonce_count = NONCE_SPACE_SIZE;
+        let nonce_offset = 0u32;
+        let cfg = LaunchConfig {
+            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
 
-        // Per-WU result buffers on the fresh stream.
+        // Allocate result buffers + enqueue all dispatches in one pass.
         let mut result_bufs: Vec<CudaSlice<u64>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            result_bufs.push(stream.alloc_zeros::<u64>(1)
-                .map_err(|e| anyhow::anyhow!("CUDA[{}] alloc: {}", self.ordinal, e))?);
-        }
-
-        // Enqueue ALL dispatches — GPU processes FIFO, zero idle between kernels.
         for i in 0..n {
-            stream.memset_zeros(&mut result_bufs[i])?;
+            let mut rbuf = stream.alloc_zeros::<u64>(1)
+                .map_err(|e| anyhow::anyhow!("CUDA[{}] alloc: {}", self.ordinal, e))?;
+
             let s = midstates[i].state_words();
             let prefix_len = midstates[i].prefix_len as u32;
-            let nonce_offset = 0u32;
-            let nonce_count = NONCE_SPACE_SIZE;
-            let cfg = LaunchConfig {
-                grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-                block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-                shared_mem_bytes: 0,
-            };
             let mut launch = stream.launch_builder(&self.kernel);
             launch.arg(&self.nonce_table_dev);
             launch.arg(&s[0]); launch.arg(&s[1]); launch.arg(&s[2]); launch.arg(&s[3]);
@@ -231,26 +226,33 @@ impl CudaMiner {
             launch.arg(&prefix_len);
             launch.arg(&nonce_offset);
             launch.arg(&nonce_count);
-            launch.arg(&mut result_bufs[i]);
+            launch.arg(&mut rbuf);
             unsafe { launch.launch(cfg) }?;
+
+            result_bufs.push(rbuf);
         }
 
-        // Single sync for all enqueued kernels.
+        // Single sync — all kernels are done.
         stream.synchronize()?;
 
-        // Read results.
-        let mut results = Vec::with_capacity(n);
+        // Batch readback — enqueue all DtoH copies then sync once.
+        let mut host_results = vec![0u64; n];
         for i in 0..n {
-            let mut host_best = [0u64; 1];
-            stream.memcpy_dtoh(&result_bufs[i], &mut host_best)?;
-            stream.synchronize()?;
-            let result = self.best_result_from_packed(&midstates[i], difficulty, host_best[0]);
-            results.push(MiningChunkResult {
-                result,
-                attempted: NONCE_SPACE_SIZE as u64,
-                elapsed: started.elapsed(),
-            });
+            stream.memcpy_dtoh(&result_bufs[i], &mut host_results[i..i + 1])?;
         }
+        stream.synchronize()?;
+
+        // Parse results on CPU.
+        let elapsed = started.elapsed();
+        let results = host_results
+            .iter()
+            .enumerate()
+            .map(|(i, &packed)| MiningChunkResult {
+                result: self.best_result_from_packed(&midstates[i], difficulty, packed),
+                attempted: NONCE_SPACE_SIZE as u64,
+                elapsed,
+            })
+            .collect();
 
         Ok(results)
     }
