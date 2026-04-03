@@ -1,15 +1,13 @@
-// CUDA SHA256 mining kernel.
+// CUDA SHA256 mining kernel — optimized intrinsics.
 //
-// Optimized output mode:
-// - Midstate words are provided by host.
-// - Each thread evaluates one nonce candidate.
-// - Threads atomically reduce to one best packed u64:
-//   upper 32 bits = leading-zero-bit count, lower 32 bits = nonce id.
+// Uses LOP3 (single-instruction Ch/Maj), __funnelshift_r (single-instruction
+// rotation), early exit on h0, and __launch_bounds__ for register hints.
+// All compile to standard PTX on compute_75 and JIT to any SM >= 5.0.
 
 extern "C" {
 
 __device__ __forceinline__ unsigned int rotr(const unsigned int x, const unsigned int n) {
-    return (x >> n) | (x << (32u - n));
+    return __funnelshift_r(x, x, n);
 }
 
 __device__ __forceinline__ unsigned int ch(
@@ -17,7 +15,9 @@ __device__ __forceinline__ unsigned int ch(
     const unsigned int y,
     const unsigned int z
 ) {
-    return (x & y) ^ (~x & z);
+    unsigned int r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
 }
 
 __device__ __forceinline__ unsigned int maj(
@@ -25,7 +25,9 @@ __device__ __forceinline__ unsigned int maj(
     const unsigned int y,
     const unsigned int z
 ) {
-    return (x & y) ^ (x & z) ^ (y & z);
+    unsigned int r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
 }
 
 __device__ __forceinline__ unsigned int ep0(const unsigned int x) {
@@ -63,7 +65,7 @@ __constant__ unsigned int K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-__global__ void mine_sha256(
+__global__ __launch_bounds__(256) void mine_sha256(
     const unsigned int* nonce_table,
     const unsigned int s0,
     const unsigned int s1,
@@ -136,20 +138,24 @@ __global__ void mine_sha256(
         a = t1 + t2;
     }
 
+    // Early exit: check h0 first — rejects 99.999%+ without computing h1-h7.
     const unsigned int h0 = s0 + a;
-    const unsigned int h1 = s1 + b;
-    const unsigned int h2 = s2 + c;
-    const unsigned int h3 = s3 + d;
-    const unsigned int h4 = s4 + e;
-    const unsigned int h5 = s5 + f;
-    const unsigned int h6 = s6 + g;
-    const unsigned int h7 = s7 + h;
-
     unsigned int zeros;
+
     if (h0 != 0u) {
         zeros = __clz(h0);
+        if (zeros < difficulty) {
+            return;
+        }
     } else {
         zeros = 32u;
+        const unsigned int h1 = s1 + b;
+        const unsigned int h2 = s2 + c;
+        const unsigned int h3 = s3 + d;
+        const unsigned int h4 = s4 + e;
+        const unsigned int h5 = s5 + f;
+        const unsigned int h6 = s6 + g;
+        const unsigned int h7 = s7 + h;
         const unsigned int words[7] = {h1, h2, h3, h4, h5, h6, h7};
         #pragma unroll
         for (unsigned int i = 0u; i < 7u; ++i) {
@@ -160,10 +166,9 @@ __global__ void mine_sha256(
                 break;
             }
         }
-    }
-
-    if (zeros < difficulty) {
-        return;
+        if (zeros < difficulty) {
+            return;
+        }
     }
 
     const unsigned long long packed =
