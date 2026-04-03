@@ -18,7 +18,7 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 const CUDA_BLOCK_SIZE: u32 = 256;
 
 pub struct CudaMiner {
-    stream: Arc<CudaStream>,
+    ctx: Arc<CudaContext>,
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
     // Single packed u64 result on device: [zeros:32 | nonce:32].
@@ -74,8 +74,12 @@ impl CudaMiner {
         let nonce_table_dev = stream.clone_htod(&nonce_words).ok()?;
         let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
 
+        // stream was only needed for init uploads — not stored.
+        // dispatch_range creates a fresh stream per call from the bound context.
+        drop(stream);
+
         Some(Self {
-            stream,
+            ctx,
             kernel,
             nonce_table_dev,
             result_dev: Mutex::new(result_dev),
@@ -125,13 +129,18 @@ impl CudaMiner {
         })
     }
 
-    fn dispatch_range(
+    pub fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
         difficulty: u32,
         nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
+        // Bind this GPU's CUDA context to the calling thread.
+        // Required when dispatch_range runs on spawn_blocking threads
+        // (each thread needs the correct context for cuLaunchKernel).
+        self.ctx.bind_to_thread()?;
+
         let mut result_dev = self
             .result_dev
             .lock()
@@ -179,6 +188,52 @@ impl CudaMiner {
         self.stream.synchronize()?;
 
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
+    }
+
+    /// Pipeline multiple midstates on this single GPU.
+    pub fn mine_batch(
+        &self,
+        midstates: &[super::sha256::Sha256Midstate],
+        difficulty: u32,
+    ) -> anyhow::Result<Vec<super::MiningChunkResult>> {
+        use super::{MiningChunkResult, NONCE_SPACE_SIZE};
+        if midstates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut result_dev = self.result_dev.lock()
+            .map_err(|_| anyhow::anyhow!("cuda result buffer mutex poisoned"))?;
+        let started = std::time::Instant::now();
+        let mut results = Vec::with_capacity(midstates.len());
+        for midstate in midstates {
+            self.stream.memset_zeros(&mut *result_dev)?;
+            let s = midstate.state_words();
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (NONCE_SPACE_SIZE.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+                block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut launch = self.stream.launch_builder(&self.kernel);
+            launch.arg(&self.nonce_table_dev);
+            launch.arg(&s[0]); launch.arg(&s[1]); launch.arg(&s[2]); launch.arg(&s[3]);
+            launch.arg(&s[4]); launch.arg(&s[5]); launch.arg(&s[6]); launch.arg(&s[7]);
+            launch.arg(&difficulty);
+            let prefix_len = midstate.prefix_len as u32;
+            launch.arg(&prefix_len);
+            let zero = 0u32;
+            launch.arg(&zero);
+            launch.arg(&NONCE_SPACE_SIZE);
+            launch.arg(&mut *result_dev);
+            unsafe { launch.launch(cfg) }?;
+            let mut host_best = [0u64; 1];
+            self.stream.memcpy_dtoh(&*result_dev, &mut host_best)?;
+            self.stream.synchronize()?;
+            results.push(MiningChunkResult {
+                result: self.best_result_from_packed(midstate, difficulty, host_best[0]),
+                attempted: NONCE_SPACE_SIZE as u64,
+                elapsed: started.elapsed(),
+            });
+        }
+        Ok(results)
     }
 
     pub async fn mine_range_direct(

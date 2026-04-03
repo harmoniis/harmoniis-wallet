@@ -138,39 +138,33 @@ impl MinerBackend for MultiCudaMiner {
             return Ok(Vec::new());
         }
 
-        let mut tasks = JoinSet::new();
+        // v0.1.42 pattern: tasks.spawn() per GPU, mine_batch inside.
+        let num_gpus = self.miners.len();
+        let mut gpu_batches: Vec<Vec<(usize, Sha256Midstate)>> =
+            (0..num_gpus).map(|_| Vec::new()).collect();
         for (idx, midstate) in midstates.iter().enumerate() {
-            let miner = self.miners[idx % self.miners.len()].clone();
-            let midstate = midstate.clone();
-            let cancel = cancel.clone();
-            // spawn_blocking: mine_range_direct does blocking CUDA sync calls.
-            // Using spawn() would serialize GPUs on tokio worker threads.
-            tasks.spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                let chunk = rt.block_on(miner.mine_range_direct(
-                    &midstate,
-                    difficulty,
-                    0,
-                    NONCE_SPACE_SIZE,
-                    cancel,
-                ))?;
-                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
+            gpu_batches[idx % num_gpus].push((idx, midstate.clone()));
+        }
+        let mut tasks = JoinSet::new();
+        for (gpu_idx, batch) in gpu_batches.into_iter().enumerate() {
+            if batch.is_empty() { continue; }
+            let miner = self.miners[gpu_idx].clone();
+            tasks.spawn(async move {
+                let indices: Vec<usize> = batch.iter().map(|(i, _)| *i).collect();
+                let mids: Vec<Sha256Midstate> = batch.into_iter().map(|(_, m)| m).collect();
+                let chunks = miner.mine_batch(&mids, difficulty)?;
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(
+                    indices.into_iter().zip(chunks).collect()
+                )
             });
         }
-
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
-            let (idx, chunk) =
-                joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
-            ordered[idx] = Some(chunk);
+            let pairs = joined.map_err(|e| anyhow::anyhow!("CUDA join: {}", e))??;
+            for (idx, chunk) in pairs { ordered[idx] = Some(chunk); }
         }
-
-        let mut out = Vec::with_capacity(midstates.len());
-        for item in ordered {
-            out.push(item.ok_or_else(|| anyhow::anyhow!("missing CUDA mining chunk result"))?);
-        }
-        Ok(out)
+        Ok(ordered.into_iter().map(|o| o.unwrap_or_else(MiningChunkResult::empty)).collect())
     }
 
     async fn mine_range(
