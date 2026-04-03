@@ -119,12 +119,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux — GPU + CUDA (built on Ubuntu 20.04 for max GLIBC compat)
-          - os: ubuntu-20.04
-            target: x86_64-unknown-linux-gnu
+          # Linux — GPU + CUDA (musl static binary — no GLIBC dependency)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
             platform: linux-x86_64
             features: bundled-sqlite,gpu,cuda
-          - os: ubuntu-20.04
+            musl: true
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
             features: bundled-sqlite,gpu,cuda
@@ -210,6 +211,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --no-default-features --features ${{ matrix.features }}
+
+      # Install musl toolchain for static Linux builds
+      - name: Install musl toolchain
+        if: matrix.musl
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yqq musl-tools
 
       # Native release build (Unix)
       - name: Build release binary
