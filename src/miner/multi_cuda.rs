@@ -22,20 +22,48 @@ pub struct MultiCudaMiner {
 
 impl MultiCudaMiner {
     pub async fn try_new() -> Option<Self> {
-        let device_count = CudaContext::device_count().ok()?;
+        // Ensure CUDA libraries are discoverable before any cudarc call.
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(ver) = super::cuda_detect::ensure_cuda_libraries() {
+                eprintln!("CUDA toolkit detected: {ver}");
+            }
+        }
+
+        let device_count = match CudaContext::device_count() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("CUDA: failed to query device count: {e}");
+                return None;
+            }
+        };
         if device_count <= 0 {
+            eprintln!("CUDA: no devices found");
             return None;
         }
+        eprintln!("CUDA: {device_count} device(s) detected, initializing...");
 
         let mut miners = Vec::new();
         for ordinal in 0..(device_count as usize) {
-            if let Some(miner) = CudaMiner::try_new(ordinal).await {
-                miners.push(std::sync::Arc::new(miner));
+            match CudaMiner::try_new(ordinal).await {
+                Some(miner) => miners.push(std::sync::Arc::new(miner)),
+                None => {
+                    // Retry once after a short delay (cloud GPU driver locking).
+                    eprintln!("CUDA[{ordinal}]: retrying after 500ms...");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(miner) = CudaMiner::try_new(ordinal).await {
+                        miners.push(std::sync::Arc::new(miner));
+                    } else {
+                        eprintln!("CUDA[{ordinal}]: skipped (init failed twice)");
+                    }
+                }
             }
         }
         if miners.is_empty() {
+            eprintln!("CUDA: no devices initialized successfully");
             return None;
         }
+        eprintln!("CUDA: {}/{} device(s) initialized", miners.len(), device_count);
 
         let mut weights = Vec::with_capacity(miners.len());
         let mut device_names = Vec::with_capacity(miners.len());

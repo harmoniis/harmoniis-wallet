@@ -9,7 +9,7 @@
 extern "C" {
 
 __device__ __forceinline__ unsigned int rotr(const unsigned int x, const unsigned int n) {
-    return (x >> n) | (x << (32u - n));
+    return __funnelshift_r(x, x, n);
 }
 
 __device__ __forceinline__ unsigned int ch(
@@ -63,7 +63,7 @@ __constant__ unsigned int K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-__global__ void mine_sha256(
+__global__ __launch_bounds__(256) void mine_sha256(
     const unsigned int* nonce_table,
     const unsigned int s0,
     const unsigned int s1,
@@ -79,6 +79,13 @@ __global__ void mine_sha256(
     const unsigned int nonce_count,
     unsigned long long* out_best
 ) {
+    // Cooperatively load nonce table (4KB) into shared memory.
+    __shared__ unsigned int s_nonce[1000];
+    for (unsigned int i = threadIdx.x; i < 1000u; i += blockDim.x) {
+        s_nonce[i] = nonce_table[i];
+    }
+    __syncthreads();
+
     const unsigned int local_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (local_id >= nonce_count) {
         return;
@@ -94,8 +101,8 @@ __global__ void mine_sha256(
 
     // 16-word rolling message schedule.
     unsigned int w[16];
-    w[0] = nonce_table[nonce1_idx];
-    w[1] = nonce_table[nonce2_idx];
+    w[0] = s_nonce[nonce1_idx];
+    w[1] = s_nonce[nonce2_idx];
     w[2] = 0x66513d3du;  // "fQ=="
     w[3] = 0x80000000u;  // SHA256 padding bit
     w[4] = 0u;  w[5] = 0u;  w[6] = 0u;  w[7] = 0u;
@@ -137,26 +144,23 @@ __global__ void mine_sha256(
     }
 
     const unsigned int h0 = s0 + a;
-    const unsigned int h1 = s1 + b;
-    const unsigned int h2 = s2 + c;
-    const unsigned int h3 = s3 + d;
-    const unsigned int h4 = s4 + e;
-    const unsigned int h5 = s5 + f;
-    const unsigned int h6 = s6 + g;
-    const unsigned int h7 = s7 + h;
 
     unsigned int zeros;
     if (h0 != 0u) {
         zeros = __clz(h0);
     } else {
+        // h0 == 0: at least 32 leading zero bits. Compute remaining words
+        // only for the rare case that matters (<0.01% of candidates).
         zeros = 32u;
-        const unsigned int words[7] = {h1, h2, h3, h4, h5, h6, h7};
+        const unsigned int tail[7] = {
+            s1 + b, s2 + c, s3 + d, s4 + e, s5 + f, s6 + g, s7 + h
+        };
         #pragma unroll
         for (unsigned int i = 0u; i < 7u; ++i) {
-            if (words[i] == 0u) {
+            if (tail[i] == 0u) {
                 zeros += 32u;
             } else {
-                zeros += __clz(words[i]);
+                zeros += __clz(tail[i]);
                 break;
             }
         }

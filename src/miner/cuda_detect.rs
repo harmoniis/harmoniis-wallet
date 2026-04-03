@@ -19,6 +19,7 @@ pub fn ensure_cuda_libraries() -> Option<String> {
     // 2. Find the NVRTC library in any of those directories
     for dir in &cuda_dirs {
         if let Some(ver) = find_nvrtc_in(dir) {
+            eprintln!("CUDA detect: found NVRTC {ver} in {}", dir.display());
             version = Some(ver);
             prepend_library_path(dir);
             break;
@@ -28,6 +29,13 @@ pub fn ensure_cuda_libraries() -> Option<String> {
     // 3. Also try to detect from nvidia-smi
     if version.is_none() {
         version = detect_cuda_version_from_smi();
+        if let Some(ref v) = version {
+            eprintln!("CUDA detect: version {v} (from nvidia-smi)");
+        }
+    }
+
+    if version.is_none() {
+        eprintln!("CUDA detect: no CUDA libraries found (searched {} dirs)", cuda_dirs.len());
     }
 
     version
@@ -68,14 +76,33 @@ fn find_cuda_directories() -> Vec<PathBuf> {
     // Platform-specific well-known locations
     #[cfg(windows)]
     {
-        // Scan all installed CUDA Toolkit versions
-        let base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA";
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let bin = entry.path().join("bin");
-                if bin.is_dir() {
-                    dirs.push(bin);
+        // Scan all installed CUDA Toolkit versions (prefer newest first).
+        let bases = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA",
+            r"C:\Program Files\NVIDIA\CUDA",
+        ];
+        for base in bases {
+            if let Ok(entries) = std::fs::read_dir(base) {
+                // Collect and sort descending so v13.0 is tried before v12.0.
+                let mut versions: Vec<_> = entries.flatten().collect();
+                versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                for entry in versions {
+                    let bin = entry.path().join("bin");
+                    if bin.is_dir() {
+                        dirs.push(bin);
+                    }
+                    let lib_x64 = entry.path().join("lib").join("x64");
+                    if lib_x64.is_dir() {
+                        dirs.push(lib_x64);
+                    }
                 }
+            }
+        }
+        // NVIDIA driver directory — nvrtc forwarding DLLs live here.
+        if let Ok(sysroot) = std::env::var("SystemRoot") {
+            let sys32 = PathBuf::from(&sysroot).join("System32");
+            if sys32.is_dir() {
+                dirs.push(sys32);
             }
         }
     }
@@ -85,6 +112,7 @@ fn find_cuda_directories() -> Vec<PathBuf> {
         let known = [
             "/usr/local/cuda/lib64",
             "/usr/local/cuda/lib",
+            "/usr/local/cuda/targets/x86_64-linux/lib",
             "/usr/lib/x86_64-linux-gnu",
             "/usr/lib64",
         ];
@@ -112,20 +140,28 @@ fn find_cuda_directories() -> Vec<PathBuf> {
 }
 
 /// Check if a directory contains an NVRTC library. Returns version if found.
+/// When multiple versions exist, returns the newest (highest major version).
 fn find_nvrtc_in(dir: &Path) -> Option<String> {
     let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(u32, String)> = None; // (major_version, display_string)
+
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
         #[cfg(windows)]
         {
-            // nvrtc64_130_0.dll, nvrtc64_120_0.dll, etc.
+            // nvrtc64_130_0.dll (CUDA 13.0), nvrtc64_120_0.dll (CUDA 12.0),
+            // nvrtc64_12*.dll (some builds omit patch), nvrtc-builtins64_*.dll (skip)
             if name.starts_with("nvrtc64_") && name.ends_with(".dll") {
                 let ver = name.trim_start_matches("nvrtc64_").trim_end_matches(".dll");
-                // Parse "130_0" → "13.0", "120_0" → "12.0"
                 if let Some(major_minor) = parse_nvrtc_version(ver) {
-                    return Some(major_minor);
+                    let major = ver.split('_').next()
+                        .and_then(|s| if s.len() >= 2 { s[..s.len()-1].parse::<u32>().ok() } else { None })
+                        .unwrap_or(0);
+                    if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                        best = Some((major, major_minor));
+                    }
                 }
             }
         }
@@ -135,15 +171,16 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
             // libnvrtc.so.12, libnvrtc.so.13, libnvrtc.so.12.0.76, etc.
             if name.starts_with("libnvrtc.so.") {
                 let ver = name.trim_start_matches("libnvrtc.so.");
-                // Take first number as major version
-                if let Some(dot) = ver.find('.') {
-                    return Some(ver[..dot].to_string() + ".x");
+                let major_str = ver.split('.').next().unwrap_or(ver);
+                let major = major_str.parse::<u32>().unwrap_or(0);
+                let display = format!("{major}.x");
+                if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                    best = Some((major, display));
                 }
-                return Some(format!("{ver}.x"));
             }
         }
     }
-    None
+    best.map(|(_, display)| display)
 }
 
 /// Parse NVRTC DLL version string: "130_0" → "13.0", "120_0" → "12.0"
@@ -191,14 +228,27 @@ fn prepend_library_path(dir: &Path) {
 
 /// Detect CUDA version from nvidia-smi output.
 fn detect_cuda_version_from_smi() -> Option<String> {
-    let output = std::process::Command::new("nvidia-smi").output().ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Look for "CUDA Version: 13.0" or similar
-    for line in stdout.lines() {
-        if let Some(pos) = line.find("CUDA Version:") {
-            let ver = line[pos + 14..].trim();
-            let ver = ver.split_whitespace().next().unwrap_or(ver);
-            return Some(ver.to_string());
+    // Try PATH first, then well-known Windows location.
+    let candidates = if cfg!(windows) {
+        vec![
+            "nvidia-smi".to_string(),
+            r"C:\Windows\System32\nvidia-smi.exe".to_string(),
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".to_string(),
+        ]
+    } else {
+        vec!["nvidia-smi".to_string()]
+    };
+
+    for cmd in &candidates {
+        if let Ok(output) = std::process::Command::new(cmd).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(pos) = line.find("CUDA Version:") {
+                    let ver = line[pos + 14..].trim();
+                    let ver = ver.split_whitespace().next().unwrap_or(ver);
+                    return Some(ver.to_string());
+                }
+            }
         }
     }
     None

@@ -29,17 +29,78 @@ pub struct CudaMiner {
 
 impl CudaMiner {
     pub async fn try_new(ordinal: usize) -> Option<Self> {
-        let ctx = CudaContext::new(ordinal).ok()?;
-        let stream = ctx.default_stream();
-        let device_name = ctx.name().ok()?;
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::try_new_inner(ordinal)
+        }));
+        std::panic::set_hook(prev);
+        match result {
+            Ok(opt) => opt,
+            Err(_) => {
+                eprintln!("CUDA[{ordinal}]: initialization panicked (driver issue)");
+                None
+            }
+        }
+    }
 
-        let ptx = compile_ptx(include_str!("shader/sha256_mine.cu")).ok()?;
-        let module = ctx.load_module(ptx).ok()?;
-        let kernel = module.load_function("mine_sha256").ok()?;
+    fn try_new_inner(ordinal: usize) -> Option<Self> {
+        let ctx = match CudaContext::new(ordinal) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: context creation failed: {e}");
+                return None;
+            }
+        };
+        let stream = ctx.new_stream().unwrap_or_else(|_| ctx.default_stream());
+        let device_name = match ctx.name() {
+            Ok(name) => name,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: failed to get device name: {e}");
+                return None;
+            }
+        };
+
+        eprintln!("CUDA[{ordinal}]: compiling PTX for {device_name}...");
+        let ptx = match compile_ptx(include_str!("shader/sha256_mine.cu")) {
+            Ok(ptx) => ptx,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: PTX compilation failed: {e}");
+                return None;
+            }
+        };
+        let module = match ctx.load_module(ptx) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: module load failed: {e}");
+                return None;
+            }
+        };
+        let kernel = match module.load_function("mine_sha256") {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: kernel load failed: {e}");
+                return None;
+            }
+        };
 
         let nonce_words = NonceTable::new().as_u32_slice();
-        let nonce_table_dev = stream.clone_htod(&nonce_words).ok()?;
-        let result_dev = stream.alloc_zeros::<u64>(1).ok()?;
+        let nonce_table_dev = match stream.clone_htod(&nonce_words) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: nonce table upload failed: {e}");
+                return None;
+            }
+        };
+        let result_dev = match stream.alloc_zeros::<u64>(1) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: result buffer alloc failed: {e}");
+                return None;
+            }
+        };
+
+        eprintln!("CUDA[{ordinal}]: {device_name} ready");
 
         Some(Self {
             stream,
@@ -141,9 +202,9 @@ impl CudaMiner {
         launch.arg(&mut *result_dev);
         unsafe { launch.launch(cfg) }?;
 
+        self.stream.synchronize()?;
         let mut host_best = [0u64; 1];
         self.stream.memcpy_dtoh(&*result_dev, &mut host_best)?;
-        self.stream.synchronize()?;
 
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
     }
