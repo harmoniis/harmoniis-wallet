@@ -113,7 +113,16 @@ pub async fn start(
 
     // 3. Create instance
     println!("[3/6] Creating instance...");
-    let onstart = "#!/bin/bash\nset -e\nmkdir -p /root/.harmoniis/wallet /root/.local/bin\ncurl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh";
+    let onstart = r#"#!/bin/bash
+set -e
+mkdir -p /root/.harmoniis/wallet /root/.local/bin
+# Upgrade GLIBC on Ubuntu 20.04 to support the hrmw binary
+echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list
+apt-get update -qq
+apt-get install -yqq libc6
+# Install hrmw
+curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh
+"#;
     let instance_id = client.create_instance(offer_id, onstart).await?;
     println!("  Instance: {instance_id}");
 
