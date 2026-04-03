@@ -29,6 +29,18 @@ pub struct CudaMiner {
 
 impl CudaMiner {
     pub async fn try_new(ordinal: usize) -> Option<Self> {
+        // cudarc panics (instead of returning Err) when NVRTC is missing.
+        // Catch the panic so we fall back to wgpu gracefully.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::try_new_inner(ordinal)
+        }));
+        std::panic::set_hook(prev);
+        result.ok().flatten()
+    }
+
+    fn try_new_inner(ordinal: usize) -> Option<Self> {
         let ctx = CudaContext::new(ordinal).ok()?;
         let stream = ctx.default_stream();
         let device_name = ctx.name().ok()?;

@@ -537,31 +537,23 @@ pub async fn select_backend(
             Ok(Box::new(miner))
         }
         BackendChoice::Gpu => {
-            #[cfg(feature = "cuda")]
-            {
-                let cuda_ok = cuda_device_count();
-                if cuda_ok > 0 {
-                    if let Some(miner) = multi_cuda::MultiCudaMiner::try_new().await {
-                        println!("Mining backend: {}", miner.name());
-                        return Ok(Box::new(miner));
-                    }
-                }
-            }
+            // --backend gpu = wgpu/Vulkan only (no CUDA).
+            // Use --backend auto for CUDA+wgpu fallback.
             #[cfg(feature = "gpu")]
             {
                 let gpu_miners = init_wgpu_miners_from_devices().await;
                 if let Some(miner) = multi_gpu::MultiGpuMiner::from_miners(gpu_miners).await {
-                    println!("Mining backend: {}", miner.name());
+                    println!("Mining backend: {} (Vulkan/wgpu)", miner.name());
                     return Ok(Box::new(miner));
                 }
             }
-            #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+            #[cfg(not(feature = "gpu"))]
             {
-                anyhow::bail!("GPU support not compiled (enable 'gpu' and/or 'cuda' feature)")
+                anyhow::bail!("wgpu/Vulkan GPU support not compiled (enable 'gpu' feature)")
             }
-            #[cfg(any(feature = "gpu", feature = "cuda"))]
+            #[cfg(feature = "gpu")]
             {
-                anyhow::bail!("GPU requested but no compatible CUDA/Vulkan GPU found")
+                anyhow::bail!("No compatible Vulkan/wgpu GPU found. Try --backend auto for CUDA.")
             }
         }
         BackendChoice::Auto => {
