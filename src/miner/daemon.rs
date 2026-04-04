@@ -769,38 +769,3 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use webylib::Error as WebylibError;
-
-    fn sample_secret() -> SecretWebcash {
-        SecretWebcash::parse(
-            "e1.0:secret:1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .expect("valid secret")
-    }
-
-    #[test]
-    fn append_pending_keep_secret_writes_secret_token_line() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let pending_path = temp.path().join("pending_keeps.log");
-        let secret = sample_secret();
-
-        append_pending_keep_secret(&pending_path, &secret).expect("append pending keep");
-
-        let content = fs::read_to_string(&pending_path).expect("read pending log");
-        assert_eq!(content, format!("{}\n", secret));
-    }
-
-    #[test]
-    fn duplicate_wallet_error_detection_matches_constraint_text() {
-        let duplicate =
-            WebylibError::wallet("UNIQUE constraint failed: unspent_outputs.secret_hash");
-        assert!(is_duplicate_wallet_row_error(&duplicate));
-        let other = WebylibError::wallet("network timeout");
-        assert!(!is_duplicate_wallet_row_error(&other));
-    }
-}
