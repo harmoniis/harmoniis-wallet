@@ -112,7 +112,14 @@ mod s3_impl {
 
         /// Sync a local directory of wallet databases to S3.
         pub async fn sync_to_s3(&self, wallet_dir: &std::path::Path) -> Result<()> {
-            let db_files = ["master.db", "rgb.db", "bitcoin.db", "voucher.db"];
+            // New canonical names + legacy names for backward compat
+            let db_files = [
+                "master.db",
+                "main_rgb.db", "rgb.db",
+                "main_bitcoin.db", "bitcoin.db",
+                "main_voucher.db", "voucher.db",
+                "main_webcash.db", "webcash.db",
+            ];
             for db_name in &db_files {
                 let local_path = wallet_dir.join(db_name);
                 if local_path.exists() {
@@ -136,7 +143,13 @@ mod s3_impl {
                     wallet_dir.display()
                 ))
             })?;
-            let db_files = ["master.db", "rgb.db", "bitcoin.db", "voucher.db"];
+            let db_files = [
+                "master.db",
+                "main_rgb.db", "rgb.db",
+                "main_bitcoin.db", "bitcoin.db",
+                "main_voucher.db", "voucher.db",
+                "main_webcash.db", "webcash.db",
+            ];
             for db_name in &db_files {
                 if let Some(data) = self.download_db(db_name).await? {
                     let local_path = wallet_dir.join(db_name);
