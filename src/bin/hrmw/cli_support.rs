@@ -588,7 +588,10 @@ pub fn effective_label(label: Option<&str>) -> &str {
     }
 }
 
-/// Resolve the database path for a labeled wallet with legacy fallback.
+/// Resolve the database path for a labeled wallet with legacy migration.
+///
+/// If the old `{family}.db` exists but `main_{family}.db` does not,
+/// rename it automatically. This migrates v0.1.42 and earlier wallets.
 pub fn resolve_labeled_db_path(master_wallet_path: &Path, family: &str, label: &str) -> PathBuf {
     let base_dir = master_wallet_path
         .parent()
@@ -598,11 +601,25 @@ pub fn resolve_labeled_db_path(master_wallet_path: &Path, family: &str, label: &
     if canonical.exists() {
         return canonical;
     }
-    // Legacy fallback: "main" label used {family}.db before the label convention.
+    // Legacy migration: rename {family}.db → main_{family}.db
     if label == "main" {
         let legacy = base_dir.join(format!("{family}.db"));
         if legacy.exists() {
-            return legacy;
+            if let Err(e) = std::fs::rename(&legacy, &canonical) {
+                eprintln!(
+                    "Warning: could not migrate {} → {}: {}",
+                    legacy.display(),
+                    canonical.display(),
+                    e
+                );
+                return legacy;
+            }
+            eprintln!(
+                "Migrated {} → {}",
+                legacy.display(),
+                canonical.display()
+            );
+            return canonical;
         }
     }
     canonical
