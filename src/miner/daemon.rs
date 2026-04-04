@@ -450,12 +450,14 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
     let mut submitter_handles = Vec::with_capacity(SUBMITTER_THREADS);
+    let webcash_wallet_path = Arc::new(config.webcash_wallet_path.clone());
     for thread_id in 0..SUBMITTER_THREADS {
         let rx = shared_rx.clone();
         let sub_proto = protocol.clone();
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
+        let sub_wallet_path = webcash_wallet_path.clone();
         let handle = std::thread::Builder::new()
             .name(format!("submitter-{thread_id}"))
             .spawn(move || {
@@ -496,8 +498,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                 }
                             }
 
-                            // Wallet claim — blocking file I/O on this thread.
-                            let t1 = std::time::Instant::now();
+                            // Write keep to pending log (crash safety backup).
                             let keep_str = report.keep_secret.to_string();
                             if let Err(e) = std::fs::OpenOptions::new()
                                 .create(true)
@@ -509,6 +510,34 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                 })
                             {
                                 eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
+                            }
+
+                            // Insert into webcash wallet (blocking runtime for async wallet).
+                            let t1 = std::time::Instant::now();
+                            let rt = tokio::runtime::Runtime::new().ok();
+                            if let Some(rt) = rt {
+                                let wallet_result = rt.block_on(async {
+                                    let wallet = webylib::Wallet::open(&*sub_wallet_path).await?;
+                                    wallet.insert(report.keep_secret.clone()).await
+                                });
+                                match wallet_result {
+                                    Ok(()) => println!(
+                                        "Claimed/replaced mined webcash in wallet: {}",
+                                        sub_wallet_path.display()
+                                    ),
+                                    Err(e) => {
+                                        let msg = e.to_string().to_ascii_lowercase();
+                                        if msg.contains("unique constraint")
+                                            || msg.contains("constraint failed")
+                                        {
+                                            // Already inserted — no action needed.
+                                        } else {
+                                            eprintln!(
+                                                "[submitter-{thread_id}] wallet insert failed: {e}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             eprintln!(
                                 "[submitter-{thread_id}] wallet claim in {}ms",
