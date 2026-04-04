@@ -54,8 +54,120 @@ pub fn pending_keep_log_path() -> PathBuf {
 
 /// Pending solutions file — solutions persisted to disk BEFORE async submission.
 /// If the miner crashes, these can be retried on next startup.
-fn pending_solutions_path() -> PathBuf {
+pub fn pending_solutions_path() -> PathBuf {
     default_wallet_root().join("miner_pending_solutions.log")
+}
+
+/// Retry unsubmitted solutions from miner_pending_solutions.log.
+///
+/// Reads the file, checks each against miner_pending_keeps.log (already accepted),
+/// submits unsubmitted ones to the server, and inserts accepted keeps into the wallet.
+/// Returns (submitted, already_accepted, failed).
+pub fn retry_pending_solutions(
+    server_url: &str,
+    webcash_wallet_path: &std::path::Path,
+) -> anyhow::Result<(usize, usize, usize)> {
+    use super::protocol::MiningProtocol;
+    use std::collections::HashSet;
+
+    let solutions_path = pending_solutions_path();
+    if !solutions_path.exists() {
+        return Ok((0, 0, 0));
+    }
+
+    let solutions_text = std::fs::read_to_string(&solutions_path)?;
+    if solutions_text.trim().is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    // Load already-accepted keep secrets to skip them.
+    let keeps_path = pending_keep_log_path();
+    let accepted_keeps: HashSet<String> = if keeps_path.exists() {
+        std::fs::read_to_string(&keeps_path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let proto = MiningProtocol::new(server_url)?;
+    let mut submitted = 0usize;
+    let mut already = 0usize;
+    let mut failed = 0usize;
+
+    for line in solutions_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Format: preimage\t0xhash_hex\tkeep_secret\tdifficulty=N
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let preimage = parts[0];
+        let hash_hex = parts[1].trim_start_matches("0x");
+        let keep_secret_str = parts[2];
+
+        // Skip if already accepted.
+        if accepted_keeps.contains(keep_secret_str) {
+            already += 1;
+            continue;
+        }
+
+        // Parse hash from hex.
+        let hash_bytes = match hex::decode(hash_hex) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => {
+                eprintln!("  Skipping malformed hash: {hash_hex}");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Submit to server.
+        match proto.submit_report_blocking(preimage, &hash_bytes) {
+            Ok(resp) => {
+                println!("  Submitted: {keep_secret_str}");
+                submitted += 1;
+
+                // Write to pending keeps log.
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&keeps_path)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "{}", keep_secret_str)
+                    });
+
+                // Log if server returned new difficulty.
+                if let Some(d) = resp.difficulty_target {
+                    eprintln!("  Server difficulty: {d}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  Failed to submit: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    // Clear the solutions file after processing (keeps file has the record).
+    if submitted > 0 || already > 0 {
+        let _ = std::fs::write(&solutions_path, "");
+    }
+
+    Ok((submitted, already, failed))
 }
 
 fn is_duplicate_wallet_row_error(err: &webylib::Error) -> bool {

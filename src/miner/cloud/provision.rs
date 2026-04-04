@@ -288,6 +288,25 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         }
     }
 
+    // Retry any unsubmitted solutions locally.
+    let solutions_path = crate::miner::daemon::pending_solutions_path();
+    if solutions_path.exists() {
+        println!("  Submitting pending solutions locally...");
+        match crate::miner::daemon::retry_pending_solutions(
+            "https://webcash.tech",
+            std::path::Path::new(""),
+        ) {
+            Ok((submitted, already, failed)) => {
+                if submitted > 0 || failed > 0 {
+                    println!(
+                        "  Pending solutions: {submitted} submitted, {already} already accepted, {failed} failed"
+                    );
+                }
+            }
+            Err(e) => eprintln!("  Warning: retry pending solutions failed: {e}"),
+        }
+    }
+
     println!();
     println!("Recovering mined webcash locally...");
     println!();
@@ -295,6 +314,37 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
     println!("  Use `hrmw webminer cloud destroy` to stop charges.");
 
     Ok(())
+}
+
+/// Download pending solution files from a running instance (non-destructive backup).
+pub fn backup_pending_files(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) {
+    let local_wallet_dir = dirs_next::home_dir()
+        .unwrap_or_default()
+        .join(".harmoniis")
+        .join("wallet");
+    let _ = std::fs::create_dir_all(&local_wallet_dir);
+
+    for remote_file in [
+        "/root/.harmoniis/wallet/miner_pending_solutions.log",
+        "/root/.harmoniis/wallet/miner_pending_keeps.log",
+    ] {
+        if let Ok(content) = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            &format!("cat {remote_file} 2>/dev/null"),
+        ) {
+            if !content.trim().is_empty() {
+                let filename = std::path::Path::new(remote_file)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let local_path = local_wallet_dir.join(&*filename);
+                // Write (overwrite with latest remote state).
+                let _ = std::fs::write(&local_path, content.as_bytes());
+            }
+        }
+    }
 }
 
 /// Destroy a single instance. Stops charges.
@@ -430,6 +480,9 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
             }
         }
     }
+
+    // Silently backup pending files on every status check.
+    backup_pending_files(state, ssh_key);
 
     Ok(())
 }
