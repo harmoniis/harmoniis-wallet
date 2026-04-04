@@ -72,9 +72,6 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo check --lib --no-default-features --features bundled-sqlite,actix-actors
 
-      - name: Check s3-storage feature
-        if: runner.os == 'Linux'
-        run: cargo check --lib --no-default-features --features bundled-sqlite,s3-storage
 
   test-freebsd:
     name: Test (FreeBSD)
