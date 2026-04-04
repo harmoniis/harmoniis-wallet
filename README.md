@@ -77,13 +77,81 @@ Wallet data at `~/.harmoniis/` is **never removed** by the uninstaller.
 
 ```bash
 hrmw webminer bench                     # benchmark CPU + GPU
-hrmw webminer run --accept-terms        # foreground mining
+hrmw webminer run --accept-terms        # foreground mining (local GPU)
 hrmw webminer start --accept-terms      # background mining
 hrmw webminer status                    # check miner status
 hrmw webminer stop                      # stop background miner
 ```
 
 GPU auto-detection: CUDA (NVIDIA) > Vulkan/DX12 (AMD/Intel) > CPU fallback.
+
+### Cloud Mining (Vast.ai)
+
+Mine webcash on rented GPU instances. One command provisions, installs, and starts mining.
+
+**Setup:**
+
+1. Register at [cloud.vast.ai](https://cloud.vast.ai)
+2. Add credits: Account → Billing → Add Credit
+3. Copy API key: Account → API Key (sidebar)
+4. Run `hrmw setup` — it will prompt for the Vast.ai API key (or set later with `hrmw webminer cloud set-api-key <KEY>`)
+
+**Usage:**
+
+```bash
+hrmw webminer cloud start               # provision top offer and start mining
+hrmw webminer cloud start -n 3          # start 3 instances in parallel
+hrmw webminer cloud status              # show mining speed, solutions, GPU status
+hrmw webminer cloud info                # show remote wallet balance
+hrmw webminer cloud stop                # stop miner, recover webcash, transfer to main wallet
+hrmw webminer cloud destroy             # destroy instance(s), stop charges
+```
+
+**Per-instance control:**
+
+```bash
+hrmw webminer cloud status -n 1         # status for instance #1 only
+hrmw webminer cloud stop -n 2           # stop instance #2 only
+hrmw webminer cloud destroy -n 1        # destroy instance #1 only
+```
+
+**Example session (8x RTX 4080S, $1.07/hr):**
+
+```
+$ hrmw webminer cloud start
+[1/6] Uploading SSH key to Vast.ai...
+[2/6] Searching for best GPU offers...
+  #1: 8x RTX 4080S ($1.07/hr, 407.0 TFLOPS, 380.5 FLOPS/$)
+  Selected: 8x RTX 4080S
+[3/6] Creating instance...
+[4/6] Waiting for instance to start...
+[5/6] Installing hrmw...
+  CUDA: 8/8 device(s) initialized
+[6/6] Starting miner...
+  Mining started. GPU: 8x RTX 4080S, Cost: $1.07/hr
+
+$ hrmw webminer cloud status
+  Miner: RUNNING
+  Speed: 36.52 GH/s
+  Solutions: 25/87
+  Mined: 90 solutions (16,699 webcash)
+
+$ hrmw webminer cloud stop
+  Stopping miner... draining pending submissions...
+  Downloaded miner_pending_solutions.log: 108 entries
+  Submitting pending solutions locally...
+  Pending solutions: 60 submitted, 92 already accepted
+  Recovering mined webcash...
+  Transferred 58,447 webcash to main wallet.
+  Main wallet balance: 74,033 webcash
+```
+
+**How it works:**
+- SSH key derived from wallet vault (deterministic, no key files to manage)
+- Cloud miner uses a labeled wallet (`cloudminer_webcash.db`) — separate from main
+- `cloud stop` recovers mined webcash locally via deterministic secret (no file download needed)
+- Pending solutions backed up on every `cloud status` check
+- Graceful shutdown: SIGINT → submitter threads drain → download pending files → retry locally
 
 ## Contract Usage
 
@@ -109,6 +177,22 @@ hrmw contract replace --id CONTRACT_ID
 ```
 
 `replace` rotates witness state: the old secret is invalid after replacement.
+
+## Labeled Wallets
+
+Each wallet family (webcash, bitcoin, voucher, rgb) supports multiple labeled sub-wallets derived from the master keychain:
+
+```bash
+hrmw webcash info                           # main wallet (default)
+hrmw webcash info --label donation          # labeled wallet
+hrmw webcash info --label cloudminer        # cloud mining wallet
+
+hrmw webcash list-wallets                   # list all webcash labeled wallets
+```
+
+Labeled wallets are deterministic — the same master mnemonic always derives the same labeled wallet. File naming: `{label}_{family}.db` (e.g. `donation_webcash.db`).
+
+**Migration from v0.1.43:** Old wallet files (`webcash.db`, `bitcoin.db`, etc.) are automatically renamed to `main_webcash.db`, `main_bitcoin.db` on first access. No manual action needed.
 
 ## Webcash Usage
 
@@ -337,10 +421,13 @@ let mqtt_seed = root.derive_mqtt_tls_seed_bytes(\"default\")?;
 
 Database model:
 
-- `master.db` stores root material metadata, slot registry, and PGP identity registry.
-- `rgb.db` stores wallet-level contract/certificate/local timeline state.
-- `webcash.db` stores Webcash balance state.
-- `bitcoin.db` stores Bitcoin/ARK wallet persistence (including ARK boarding outputs).
+- `master.db` — root material metadata, slot registry, PGP identity registry
+- `main_webcash.db` — main Webcash balance (was `webcash.db` in v0.1.43 and earlier — auto-migrated)
+- `main_bitcoin.db` — Bitcoin/ARK wallet persistence (was `bitcoin.db`)
+- `main_voucher.db` — Voucher balance (was `voucher.db`)
+- `main_rgb.db` — RGB contract/certificate state (was `rgb.db`)
+- `cloudminer_webcash.db` — cloud mining labeled wallet
+- `{label}_webcash.db` — user-defined labeled wallets
 
 Important:
 
@@ -353,13 +440,16 @@ All wallet data lives under `~/.harmoniis/`:
 
 | File | Purpose |
 |------|---------|
-| `~/.harmoniis/master.db` | Root material metadata, slot registry, PGP identity registry |
-| `~/.harmoniis/rgb.db` | Wallet-level contract, certificate, and local timeline state |
-| `~/.harmoniis/webcash.db` | Webcash balance state |
-| `~/.harmoniis/bitcoin.db` | Bitcoin/ARK wallet persistence (including ARK boarding outputs) |
-| `~/.harmoniis/miner.log` | Miner daemon log |
-| `~/.harmoniis/miner_status.json` | Miner status snapshot |
-| `~/.harmoniis/miner_pending_keeps.log` | Pending mined keeps (fallback if insert fails) |
+| `wallet/master.db` | Root material, slot registry, PGP identities |
+| `wallet/main_webcash.db` | Main webcash balance |
+| `wallet/main_bitcoin.db` | Bitcoin/ARK wallet |
+| `wallet/main_voucher.db` | Voucher balance |
+| `wallet/main_rgb.db` | RGB contract state |
+| `wallet/cloudminer_webcash.db` | Cloud mining webcash (labeled) |
+| `wallet/miner_pending_solutions.log` | Mined solutions awaiting server submission |
+| `wallet/miner_pending_keeps.log` | Accepted keeps awaiting wallet insertion |
+| `cloud/config.toml` | Vast.ai API key and cloud mining config |
+| `cloud/state.toml` | Active cloud instance(s) state |
 
 ## Backup and Restore
 
@@ -407,7 +497,7 @@ src/
     contracts.rs           # RGB contract operations
     snapshots.rs           # JSON snapshot import/export
     webcash.rs             # re-exports from webylib (SecretWebcash, Amount, etc.)
-    storage.rs             # S3 wallet backup (behind s3-storage feature)
+    labeled_wallets.rs     # labeled sub-wallet management
   marketplace/
     mod.rs                 # HarmoniisClient (was client/)
     identities.rs          # identity registration
@@ -431,9 +521,9 @@ Backward-compatible re-exports in `lib.rs`:
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `bundled-sqlite` | on | Compile SQLite from source |
-| `securities` | off | Dormant Phase 3 security types |
-| `actix-actors` | off | Actix actor wrappers for wallet, webcash, and payment ledger |
-| `s3-storage` | off | S3 wallet backup + AWS Secrets Manager integration |
+| `gpu` | on | wgpu/Vulkan GPU mining |
+| `cuda` | on | NVIDIA CUDA mining (requires CUDA 12.0+ driver) |
+| `actix-actors` | off | Actix actor wrappers for backend integration |
 
 ### Configuration
 
