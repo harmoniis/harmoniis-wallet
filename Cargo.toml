@@ -73,7 +73,7 @@ pkcs8       = { version = "0.10", features = ["pem"] }
 rusqlite    = { version = "0.37" }   # bundled-sqlite feature adds rusqlite/bundled
 
 # Networking (rustls: no OpenSSL dependency — cross-platform)
-reqwest     = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest     = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false }
 tokio       = { version = "1", features = ["full"] }
 
 # CLI

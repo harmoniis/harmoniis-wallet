@@ -40,16 +40,21 @@ pub struct MiningReportResponse {
 pub struct MiningProtocol {
     server_url: String,
     http: Client,
+    /// Blocking HTTP client for the dedicated submission OS thread.
+    http_blocking: reqwest::blocking::Client,
 }
 
 impl MiningProtocol {
     pub fn new(server_url: &str) -> anyhow::Result<Self> {
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+        let timeout = std::time::Duration::from_secs(60);
+        let http = Client::builder().timeout(timeout).build()?;
+        let http_blocking = reqwest::blocking::Client::builder()
+            .timeout(timeout)
             .build()?;
         Ok(MiningProtocol {
             server_url: server_url.trim_end_matches('/').to_string(),
             http,
+            http_blocking,
         })
     }
 
@@ -78,6 +83,47 @@ impl MiningProtocol {
             subsidy_amount,
             ratio: resp.ratio,
         })
+    }
+
+    /// Blocking variant of `submit_report` for the dedicated OS submission thread.
+    /// Pure blocking I/O — no tokio runtime involvement.
+    pub fn submit_report_blocking(
+        &self,
+        preimage: &str,
+        hash: &[u8; 32],
+    ) -> anyhow::Result<MiningReportResponse> {
+        let url = format!("{}/api/v1/mining_report", self.server_url);
+        let hash_decimal = BigUint::from_bytes_be(hash).to_string();
+        let body_str = format!(
+            r#"{{"preimage": "{}", "work": {}, "legalese": {{"terms": true}}}}"#,
+            preimage, hash_decimal
+        );
+
+        let resp = self
+            .http_blocking
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()?;
+
+        let status_code = resp.status();
+        let body_text = resp.text()?;
+
+        if status_code.is_success() {
+            let parsed: MiningReportResponse = serde_json::from_str(&body_text)?;
+            Ok(parsed)
+        } else {
+            if let Ok(parsed) = serde_json::from_str::<MiningReportResponse>(&body_text) {
+                if parsed.error.as_deref() == Some("Didn't use a new secret value.") {
+                    return Ok(parsed);
+                }
+            }
+            anyhow::bail!(
+                "mining report rejected (HTTP {}): {}",
+                status_code,
+                body_text
+            )
+        }
     }
 
     /// Submit a mining report to the server.

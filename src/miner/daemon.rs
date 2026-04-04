@@ -10,6 +10,15 @@ use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
 use super::sha256::Sha256Midstate;
 use super::work_unit::{NonceTable, WorkUnit};
+
+/// Solution queued for submission on the dedicated OS thread.
+struct SolutionReport {
+    preimage: String,
+    hash: [u8; 32],
+    difficulty_achieved: u32,
+    keep_secret: SecretWebcash,
+}
+
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
 
@@ -42,6 +51,12 @@ pub fn orphan_log_path() -> PathBuf {
 /// Pending keep log (accepted on server but not persisted locally yet): wallet-root/miner_pending_keeps.log
 pub fn pending_keep_log_path() -> PathBuf {
     default_wallet_root().join("miner_pending_keeps.log")
+}
+
+/// Pending solutions file — solutions persisted to disk BEFORE async submission.
+/// If the miner crashes, these can be retried on next startup.
+fn pending_solutions_path() -> PathBuf {
+    default_wallet_root().join("miner_pending_solutions.log")
 }
 
 fn is_duplicate_wallet_row_error(err: &webylib::Error) -> bool {
@@ -382,10 +397,107 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let stats_print_interval = std::time::Duration::from_secs(5);
     let mut work_unit_timer;
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
+    let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
+
+    // Dedicated OS thread for solution submission (maaku/webminer pattern).
+    // Uses std::thread (not tokio::spawn) to avoid async runtime scheduling
+    // issues. Mining loop pushes to channel and never blocks.
+    // Multiple submitter threads drain the queue in parallel.
+    // Server takes 6-14s per response, so 1 thread can only handle ~6/min.
+    // With N threads we handle N×6/min. Use 3 threads = ~18/min capacity.
+    const SUBMITTER_THREADS: usize = 3;
+    let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
+    let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
+    for thread_id in 0..SUBMITTER_THREADS {
+        let rx = shared_rx.clone();
+        let sub_proto = protocol.clone();
+        let sub_tracker = tracker.clone();
+        let sub_pending_keep = pending_keep_path.clone();
+        let sub_shared_target = shared_target.clone();
+        std::thread::Builder::new()
+            .name(format!("submitter-{thread_id}"))
+            .spawn(move || {
+                eprintln!("[submitter-{thread_id}] started");
+                loop {
+                    let report = {
+                        let rx = rx.lock().unwrap();
+                        rx.recv()
+                    };
+                    let report = match report {
+                        Ok(r) => r,
+                        Err(_) => break, // channel closed
+                    };
+                    let t0 = std::time::Instant::now();
+                    eprintln!(
+                        "[submitter-{thread_id}] submitting difficulty={} hash=0x{}...",
+                        report.difficulty_achieved,
+                        hex::encode(&report.hash[..4]),
+                    );
+
+                    // Pure blocking HTTP — no tokio runtime involvement.
+                    match sub_proto.submit_report_blocking(&report.preimage, &report.hash) {
+                        Ok(resp) => {
+                            let http_ms = t0.elapsed().as_millis();
+                            sub_tracker.record_accepted();
+                            eprintln!("[submitter-{thread_id}] accepted in {http_ms}ms");
+                            println!("Mining report accepted! keep={}", report.keep_secret);
+
+                            if let Some(new_diff) = resp.difficulty_target {
+                                let mut t = sub_shared_target.write().unwrap();
+                                if new_diff != t.difficulty {
+                                    println!(
+                                        "Difficulty adjustment: {} → {}",
+                                        t.difficulty, new_diff
+                                    );
+                                    t.difficulty = new_diff;
+                                    sub_tracker.set_difficulty(new_diff);
+                                }
+                            }
+
+                            // Wallet claim — blocking file I/O on this thread.
+                            let t1 = std::time::Instant::now();
+                            let keep_str = report.keep_secret.to_string();
+                            if let Err(e) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&sub_pending_keep)
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "{}", keep_str)
+                                })
+                            {
+                                eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
+                            }
+                            eprintln!("[submitter-{thread_id}] wallet claim in {}ms", t1.elapsed().as_millis());
+                        }
+                        Err(e) => {
+                            let http_ms = t0.elapsed().as_millis();
+                            eprintln!("[submitter-{thread_id}] FAILED in {http_ms}ms: {e}");
+                            let orphan_line = format!(
+                                "{} 0x{} {} difficulty={}\n",
+                                report.preimage,
+                                hex::encode(&report.hash),
+                                report.keep_secret,
+                                report.difficulty_achieved,
+                            );
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(orphan_log_path())
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    f.write_all(orphan_line.as_bytes())
+                                });
+                        }
+                    }
+                }
+                eprintln!("[submitter-{thread_id}] exiting (channel closed)");
+            })
+            .expect("failed to spawn solution submitter thread");
+    }
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
-    let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
     {
         let refresh_target = shared_target.clone();
         let refresh_protocol = protocol.clone();
@@ -490,14 +602,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
         tracker.add_attempts(attempts_this_work_unit);
 
-        // Print stats periodically (after each work unit if enough time passed)
+        // Print stats periodically using rolling average (not per-cycle).
         if last_stats_print.elapsed() >= stats_print_interval {
-            let hps = if wu_elapsed.as_secs_f64() > 0.0 {
-                attempts_this_work_unit as f64 / wu_elapsed.as_secs_f64()
-            } else {
-                0.0
-            };
             let snapshot = tracker.snapshot();
+            let hps = snapshot.hash_rate_mhs * 1_000_000.0;
             let expected_solutions = if target.difficulty > 0 {
                 let denom = 2.0_f64.powi(target.difficulty as i32);
                 snapshot.total_attempts as f64 / denom
@@ -532,54 +640,31 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     hex::encode(&solution.hash)
                 );
 
-                // Submit inline — solutions are money, never lose them to a
-                // background queue that could be killed before draining.
-                match protocol.submit_report(&preimage, &solution.hash).await {
-                    Ok(resp) => {
-                        tracker.record_accepted();
-                        println!("Mining report accepted! keep={}", wu.keep_secret);
+                // Persist to disk FIRST (crash safety), then queue for
+                // background submission on the dedicated OS thread.
+                let pending_line = format!(
+                    "{}\t0x{}\t{}\tdifficulty={}\n",
+                    preimage,
+                    hex::encode(&solution.hash),
+                    wu.keep_secret,
+                    solution.difficulty_achieved,
+                );
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(pending_solutions_path())
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        f.write_all(pending_line.as_bytes())
+                    });
 
-                        if let Some(new_diff) = resp.difficulty_target {
-                            if new_diff != target.difficulty {
-                                println!(
-                                    "Difficulty adjustment: {} → {}",
-                                    target.difficulty, new_diff
-                                );
-                                // Update shared target so next cycle uses new difficulty.
-                                let mut t = shared_target.write().unwrap();
-                                t.difficulty = new_diff;
-                                target.difficulty = new_diff;
-                                tracker.set_difficulty(new_diff);
-                            }
-                        }
-
-                        claim_accepted_keep_secret(
-                            &webcash_wallet,
-                            &config.webcash_wallet_path,
-                            &pending_keep_path,
-                            &wu.keep_secret,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        eprintln!("Mining report rejected: {}", e);
-
-                        let orphan_line = format!(
-                            "{} 0x{} {} difficulty={}\n",
-                            preimage,
-                            hex::encode(&solution.hash),
-                            wu.keep_secret,
-                            solution.difficulty_achieved
-                        );
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(orphan_log_path())
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                f.write_all(orphan_line.as_bytes())
-                            });
-                    }
+                if let Err(e) = solution_tx.send(SolutionReport {
+                    preimage,
+                    hash: solution.hash,
+                    difficulty_achieved: solution.difficulty_achieved,
+                    keep_secret: wu.keep_secret,
+                }) {
+                    eprintln!("[miner] failed to queue solution: {e}");
                 }
             }
         }
