@@ -8,6 +8,7 @@ use webylib::SecretWebcash;
 
 use super::protocol::MiningProtocol;
 use super::stats::{self, StatsTracker};
+use super::sha256::Sha256Midstate;
 use super::work_unit::{NonceTable, WorkUnit};
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
@@ -443,28 +444,46 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         }
     });
 
-    // Main mining loop
-    while !shutdown.load(Ordering::Relaxed) {
-        // Refresh target periodically
-        if last_target_fetch.elapsed() >= target_refresh_interval {
-            match protocol.get_target().await {
-                Ok(new_target) => {
-                    if new_target.difficulty != target.difficulty {
-                        println!(
-                            "Difficulty changed: {} -> {}",
-                            target.difficulty, new_target.difficulty
-                        );
+    // Background target refresher — polls server every 15s without ever
+    // blocking the mining loop. Updates are picked up atomically next cycle.
+    let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
+    {
+        let refresh_target = shared_target.clone();
+        let refresh_protocol = protocol.clone();
+        let refresh_tracker = tracker.clone();
+        let refresh_status = status_path.clone();
+        let refresh_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(target_refresh_interval);
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                if refresh_shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                match refresh_protocol.get_target().await {
+                    Ok(new_target) => {
+                        let mut t = refresh_target.write().unwrap();
+                        if new_target.difficulty != t.difficulty {
+                            println!(
+                                "Difficulty changed: {} -> {}",
+                                t.difficulty, new_target.difficulty
+                            );
+                        }
+                        *t = new_target;
+                        refresh_tracker.set_difficulty(t.difficulty);
                     }
-                    target = new_target;
-                    tracker.set_difficulty(target.difficulty);
+                    Err(e) => eprintln!("Warning: failed to fetch target: {e}"),
                 }
-                Err(e) => {
-                    eprintln!("Warning: failed to fetch target: {}", e);
-                }
+                let _ = refresh_tracker.write_to_file(&refresh_status);
             }
-            last_target_fetch = std::time::Instant::now();
-            let _ = tracker.write_to_file(&status_path);
-        }
+        });
+    }
+
+    // Main mining loop — ZERO network I/O, never blocks.
+    while !shutdown.load(Ordering::Relaxed) {
+        // Read latest target atomically (non-blocking RwLock read).
+        target = shared_target.read().unwrap().clone();
 
         // Skip if difficulty exceeds our max
         if target.difficulty > config.max_difficulty {
@@ -476,9 +495,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             continue;
         }
 
-        // Overlap work unit creation with mining: while GPUs mine batch N,
-        // create batch N+1 on a background thread. On steady state this hides
-        // the CPU cost entirely behind GPU compute.
         let t_cycle = std::time::Instant::now();
 
         // Use pre-built batch from previous cycle if available and difficulty
@@ -499,7 +515,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 .await?
             }
         };
-        let midstates: Vec<_> = work_units.iter().map(|wu| wu.midstate.clone()).collect();
+
+        // Build midstate refs — Arc avoids cloning 32 Sha256Midstates per cycle.
+        let midstates: Arc<Vec<Sha256Midstate>> = Arc::new(
+            work_units.iter().map(|wu| wu.midstate.clone()).collect(),
+        );
 
         // Start creating NEXT batch in background with rayon (overlapped with
         // GPU mining). On a 122-thread machine, 32 WUs finish in ~30μs.
@@ -519,8 +539,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             .await?;
         let mine_us = work_unit_timer.elapsed().as_micros();
 
-        // Collect pre-built next batch (should be ready by now since mining
-        // took ~1ms and creation takes ~1ms — they ran in parallel).
+        // Collect pre-built next batch (should be ready by now).
         pending_work_units = next_batch_handle.await.ok();
 
         let cycle_us = t_cycle.elapsed().as_micros();
