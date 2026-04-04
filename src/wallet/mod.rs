@@ -4,7 +4,6 @@ pub mod labeled_wallets;
 pub mod payments;
 pub mod schema;
 pub mod snapshots;
-pub mod storage;
 pub mod webcash;
 
 pub mod ark;

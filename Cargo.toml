@@ -46,8 +46,6 @@ securities = []
 # Enable when using harmoniis-wallet in an actix-web backend.
 actix-actors = ["dep:actix", "dep:actix-rt"]
 
-# S3 storage for wallet database files.
-s3-storage = ["dep:aws-sdk-s3", "dep:aws-sdk-secretsmanager"]
 
 # ── Dependencies ───────────────────────────────────────────────────────────────
 [dependencies]
@@ -100,10 +98,6 @@ rustls        = { version = "0.23", features = ["ring"] }
 # Actix actors (optional, for backend integration)
 actix       = { version = "0.13", optional = true }
 actix-rt    = { version = "2", optional = true }
-
-# S3 storage (optional, for backend integration)
-aws-sdk-s3              = { version = "1", optional = true }
-aws-sdk-secretsmanager  = { version = "1", optional = true }
 
 # Mining
 wgpu        = { version = "28", optional = true }
