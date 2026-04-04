@@ -15,9 +15,7 @@ use super::work_unit::NonceTable;
 use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE};
 
 /// Default workgroup size (must match `@workgroup_size` in shader).
-/// 64 threads = better AMD RDNA occupancy (single-wave workgroups,
-/// faster resource release, more VGPRs per thread for unrolled code).
-const WORKGROUP_SIZE: u32 = 64;
+const WORKGROUP_SIZE: u32 = 256;
 
 /// Input buffer words:
 /// [0..8] = midstate words
