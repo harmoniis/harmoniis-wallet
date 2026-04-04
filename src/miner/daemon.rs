@@ -482,7 +482,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let t_cycle = std::time::Instant::now();
 
         // Use pre-built batch from previous cycle if available and difficulty
-        // hasn't changed, otherwise create fresh.
+        // hasn't changed, otherwise create fresh with rayon parallelism.
         let work_units = match pending_work_units.take() {
             Some(pending) if !pending.is_empty() && pending[0].difficulty == target.difficulty => {
                 pending
@@ -493,20 +493,23 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 let s = target.subsidy_amount;
                 let n = pipeline_depth;
                 tokio::task::spawn_blocking(move || {
-                    (0..n).map(|_| WorkUnit::new(d, a, s)).collect::<Vec<_>>()
+                    use rayon::prelude::*;
+                    (0..n).into_par_iter().map(|_| WorkUnit::new(d, a, s)).collect()
                 })
                 .await?
             }
         };
         let midstates: Vec<_> = work_units.iter().map(|wu| wu.midstate.clone()).collect();
 
-        // Start creating NEXT batch in background (overlapped with GPU mining).
+        // Start creating NEXT batch in background with rayon (overlapped with
+        // GPU mining). On a 122-thread machine, 32 WUs finish in ~30μs.
         let next_d = target.difficulty;
         let next_a = target.mining_amount;
         let next_s = target.subsidy_amount;
         let next_n = pipeline_depth;
         let next_batch_handle = tokio::task::spawn_blocking(move || {
-            (0..next_n).map(|_| WorkUnit::new(next_d, next_a, next_s)).collect::<Vec<_>>()
+            use rayon::prelude::*;
+            (0..next_n).into_par_iter().map(|_| WorkUnit::new(next_d, next_a, next_s)).collect::<Vec<_>>()
         });
 
         // Mine current batch on GPUs (overlapped with next batch creation).
