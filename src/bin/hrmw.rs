@@ -4026,9 +4026,14 @@ async fn main() -> anyhow::Result<()> {
                         instances.iter().collect()
                     };
 
-                    // Stop all target miners
+                    // Stop all target miners (continue on individual failures)
                     for state in &targets {
-                        provision::stop(state, &ssh_key).await?;
+                        if let Err(e) = provision::stop(state, &ssh_key).await {
+                            eprintln!(
+                                "Warning: failed to stop instance {}: {e}",
+                                state.instance_id
+                            );
+                        }
                     }
 
                     // Recover once (all instances share the same wallet)
@@ -4105,13 +4110,13 @@ async fn main() -> anyhow::Result<()> {
                 CloudCmd::Info { label } => {
                     let instances = cloud_config::load_instances()?;
                     if instances.is_empty() {
-                        provision::info(&label, &ssh_key);
+                        provision::info(&label, &ssh_key, None);
                     } else {
                         for (i, state) in instances.iter().enumerate() {
                             if instances.len() > 1 {
                                 println!("\n=== Instance #{} ===", i + 1);
                             }
-                            provision::info(&state.label, &ssh_key);
+                            provision::info(&state.label, &ssh_key, Some(state));
                         }
                     }
                 }

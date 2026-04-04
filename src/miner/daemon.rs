@@ -153,8 +153,13 @@ pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize
                 }
             }
             Err(e) => {
-                eprintln!("  Failed to submit: {e}");
-                failed += 1;
+                let msg = e.to_string();
+                if msg.contains("Didn't use a new secret") {
+                    already += 1;
+                } else {
+                    eprintln!("  Failed to submit: {e}");
+                    failed += 1;
+                }
             }
         }
     }

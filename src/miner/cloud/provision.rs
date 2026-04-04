@@ -485,10 +485,13 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
 }
 
 /// Show mining wallet info — remote balance if instance is active, otherwise local.
-pub fn info(label: &str, ssh_key: &ed25519_dalek::SigningKey) {
+pub fn info(label: &str, ssh_key: &ed25519_dalek::SigningKey, instance: Option<&InstanceState>) {
     println!("Mining label: {label}");
     println!("Wallet: {label}_webcash.db");
-    if let Ok(Some(state)) = config::load_state() {
+    let state = instance
+        .cloned()
+        .or_else(|| config::load_state().ok().flatten());
+    if let Some(state) = state {
         println!();
         println!("Active instance: {}", state.instance_id);
         println!("  GPU: {}x {}", state.num_gpus, state.gpu_name);
