@@ -169,7 +169,7 @@ pub async fn start(
             ssh::exec(ssh_key, &ssh_host, ssh_port, "cat /root/miner.log").unwrap_or_default();
         // Auto-destroy on failure
         let _ = client.destroy_instance(instance_id).await;
-        config::clear_state()?;
+        config::remove_instance(instance_id)?;
         anyhow::bail!("Miner failed to start. Instance destroyed.\n{log}");
     }
 
@@ -583,7 +583,7 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
     }
     println!("  Instance did not start in 5 minutes — destroying...");
     let _ = client.destroy_instance(instance_id).await;
-    config::clear_state()?;
+    config::remove_instance(instance_id).ok();
     anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 

@@ -4005,7 +4005,10 @@ async fn main() -> anyhow::Result<()> {
                         if count > 1 {
                             println!("\n=== Instance {}/{} ===", i + 1, count);
                         }
-                        provision::start(&label, machine, &db_path, &ssh_key).await?;
+                        if let Err(e) = provision::start(&label, machine, &db_path, &ssh_key).await
+                        {
+                            eprintln!("Instance {}/{} failed: {e}", i + 1, count);
+                        }
                     }
                 }
                 CloudCmd::Stop { instance } => {
