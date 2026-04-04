@@ -407,13 +407,14 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     const SUBMITTER_THREADS: usize = 3;
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
+    let mut submitter_handles = Vec::with_capacity(SUBMITTER_THREADS);
     for thread_id in 0..SUBMITTER_THREADS {
         let rx = shared_rx.clone();
         let sub_proto = protocol.clone();
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name(format!("submitter-{thread_id}"))
             .spawn(move || {
                 eprintln!("[submitter-{thread_id}] started");
@@ -496,6 +497,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 eprintln!("[submitter-{thread_id}] exiting (channel closed)");
             })
             .expect("failed to spawn solution submitter thread");
+        submitter_handles.push(handle);
     }
 
     // Background target refresher — polls server every 15s without ever
@@ -677,28 +679,14 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Graceful shutdown: drop the sender so submitter threads drain remaining
-    // solutions and exit. Wait up to 60s for them to finish.
+    // Graceful shutdown: drop the sender so submitter threads see channel
+    // closed and drain remaining solutions before exiting.
     println!("Miner shutting down — draining pending submissions...");
     drop(solution_tx);
+    drop(shared_rx);
     let drain_start = std::time::Instant::now();
-    let drain_timeout = std::time::Duration::from_secs(60);
-    loop {
-        // Check if all submitter threads have exited by trying to lock the rx.
-        // When all threads exit, the Arc refcount drops and we know they're done.
-        let remaining = Arc::strong_count(&shared_rx);
-        if remaining <= 1 {
-            // Only our reference remains — all submitters exited.
-            break;
-        }
-        if drain_start.elapsed() > drain_timeout {
-            eprintln!(
-                "Warning: {} submitter thread(s) still running after 60s, proceeding with shutdown",
-                remaining - 1
-            );
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    for handle in submitter_handles {
+        let _ = handle.join();
     }
     let drain_secs = drain_start.elapsed().as_secs();
     if drain_secs > 0 {
