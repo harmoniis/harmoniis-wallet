@@ -598,26 +598,38 @@ pub fn resolve_labeled_db_path(master_wallet_path: &Path, family: &str, label: &
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| PathBuf::from("."));
     let canonical = base_dir.join(format!("{label}_{family}.db"));
-    if canonical.exists() {
-        return canonical;
-    }
-    // Legacy migration: rename {family}.db → main_{family}.db
+
+    // Legacy migration for "main" label: {family}.db → main_{family}.db
     if label == "main" {
         let legacy = base_dir.join(format!("{family}.db"));
         if legacy.exists() {
-            if let Err(e) = std::fs::rename(&legacy, &canonical) {
-                eprintln!(
-                    "Warning: could not migrate {} → {}: {}",
-                    legacy.display(),
-                    canonical.display(),
-                    e
-                );
-                return legacy;
+            let legacy_size = std::fs::metadata(&legacy).map(|m| m.len()).unwrap_or(0);
+            let canonical_size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+
+            // Migrate if legacy has data and canonical is missing or empty.
+            if legacy_size > canonical_size {
+                if canonical.exists() {
+                    let _ = std::fs::remove_file(&canonical);
+                }
+                if let Err(e) = std::fs::rename(&legacy, &canonical) {
+                    eprintln!(
+                        "Warning: could not migrate {} → {}: {}",
+                        legacy.display(),
+                        canonical.display(),
+                        e
+                    );
+                    return legacy;
+                }
+                eprintln!("Migrated {} → {}", legacy.display(), canonical.display());
+                return canonical;
             }
-            eprintln!("Migrated {} → {}", legacy.display(), canonical.display());
-            return canonical;
         }
     }
+
+    if canonical.exists() {
+        return canonical;
+    }
+
     canonical
 }
 
