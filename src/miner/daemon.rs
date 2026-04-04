@@ -11,6 +11,14 @@ use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
+/// A found solution queued for background submission.
+struct SolutionReport {
+    preimage: String,
+    hash: [u8; 32],
+    difficulty_achieved: u32,
+    keep_secret: SecretWebcash,
+}
+
 fn default_wallet_root() -> PathBuf {
     if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
         let trimmed = path.trim();
@@ -346,17 +354,19 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         println!("  {}", line);
     }
 
-    // Initialize protocol client
-    let protocol = MiningProtocol::new(&config.server_url)?;
+    // Initialize protocol client (Arc-shared with background submitter)
+    let protocol = Arc::new(MiningProtocol::new(&config.server_url)?);
 
     // Initialize stats
     let tracker = Arc::new(StatsTracker::new(backend.name()));
     let status_path = stats::status_file_path();
 
-    // Open the webcash wallet for inserting mined coins
-    let webcash_wallet = webylib::Wallet::open(&config.webcash_wallet_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to open webcash wallet: {}", e))?;
+    // Open the webcash wallet for inserting mined coins (Arc-shared)
+    let webcash_wallet = Arc::new(
+        webylib::Wallet::open(&config.webcash_wallet_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to open webcash wallet: {}", e))?,
+    );
     let pending_keep_path = pending_keep_log_path();
     println!("Webcash wallet: {}", config.webcash_wallet_path.display());
     println!("Pending keep log: {}", pending_keep_path.display());
@@ -378,6 +388,60 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let target_refresh_interval = std::time::Duration::from_secs(15);
     let stats_print_interval = std::time::Duration::from_secs(5);
     let mut work_unit_timer;
+    let mut pending_work_units: Option<Vec<WorkUnit>> = None;
+
+    // Background solution submitter — decouples HTTP I/O from the mining loop
+    // so GPUs never idle waiting for network calls.
+    let (solution_tx, mut solution_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SolutionReport>();
+    let sub_tracker = tracker.clone();
+    let sub_protocol = protocol.clone();
+    let sub_wallet = webcash_wallet.clone();
+    let sub_wallet_path = config.webcash_wallet_path.clone();
+    let sub_pending = pending_keep_path.clone();
+    let submitter_handle = tokio::spawn(async move {
+        while let Some(report) = solution_rx.recv().await {
+            match sub_protocol
+                .submit_report(&report.preimage, &report.hash)
+                .await
+            {
+                Ok(resp) => {
+                    sub_tracker.record_accepted();
+                    println!("Mining report accepted! keep={}", report.keep_secret);
+
+                    if let Some(new_diff) = resp.difficulty_target {
+                        eprintln!("Server difficulty hint: {new_diff}");
+                    }
+
+                    claim_accepted_keep_secret(
+                        &sub_wallet,
+                        &sub_wallet_path,
+                        &sub_pending,
+                        &report.keep_secret,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    eprintln!("Mining report rejected: {}", e);
+                    let orphan_line = format!(
+                        "{} 0x{} {} difficulty={}\n",
+                        report.preimage,
+                        hex::encode(&report.hash),
+                        report.keep_secret,
+                        report.difficulty_achieved,
+                    );
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(orphan_log_path())
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            f.write_all(orphan_line.as_bytes())
+                        });
+                }
+            }
+        }
+    });
 
     // Main mining loop
     while !shutdown.load(Ordering::Relaxed) {
@@ -412,22 +476,51 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             continue;
         }
 
-        // Build independent work units for this mining cycle.
-        let mut work_units = Vec::with_capacity(pipeline_depth);
-        for _ in 0..pipeline_depth {
-            work_units.push(WorkUnit::new(
-                target.difficulty,
-                target.mining_amount,
-                target.subsidy_amount,
-            ));
-        }
+        // Overlap work unit creation with mining: while GPUs mine batch N,
+        // create batch N+1 on a background thread. On steady state this hides
+        // the CPU cost entirely behind GPU compute.
+        let t_cycle = std::time::Instant::now();
+
+        // Use pre-built batch from previous cycle if available and difficulty
+        // hasn't changed, otherwise create fresh.
+        let work_units = match pending_work_units.take() {
+            Some(pending) if !pending.is_empty() && pending[0].difficulty == target.difficulty => {
+                pending
+            }
+            _ => {
+                let d = target.difficulty;
+                let a = target.mining_amount;
+                let s = target.subsidy_amount;
+                let n = pipeline_depth;
+                tokio::task::spawn_blocking(move || {
+                    (0..n).map(|_| WorkUnit::new(d, a, s)).collect::<Vec<_>>()
+                })
+                .await?
+            }
+        };
         let midstates: Vec<_> = work_units.iter().map(|wu| wu.midstate.clone()).collect();
 
-        // Mine all work units (backend may run these in parallel).
+        // Start creating NEXT batch in background (overlapped with GPU mining).
+        let next_d = target.difficulty;
+        let next_a = target.mining_amount;
+        let next_s = target.subsidy_amount;
+        let next_n = pipeline_depth;
+        let next_batch_handle = tokio::task::spawn_blocking(move || {
+            (0..next_n).map(|_| WorkUnit::new(next_d, next_a, next_s)).collect::<Vec<_>>()
+        });
+
+        // Mine current batch on GPUs (overlapped with next batch creation).
         work_unit_timer = std::time::Instant::now();
         let chunks = backend
             .mine_work_units(&midstates, &nonce_table, target.difficulty, None)
             .await?;
+        let mine_us = work_unit_timer.elapsed().as_micros();
+
+        // Collect pre-built next batch (should be ready by now since mining
+        // took ~1ms and creation takes ~1ms — they ran in parallel).
+        pending_work_units = next_batch_handle.await.ok();
+
+        let cycle_us = t_cycle.elapsed().as_micros();
         let wu_elapsed = work_unit_timer.elapsed();
         let mut attempts_this_work_unit = 0u64;
         for chunk in &chunks {
@@ -452,7 +545,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             };
             let p_zero_pct = (-expected_solutions).exp() * 100.0;
             println!(
-                "speed={} difficulty={} solutions={}/{} eta={} expected={:.2} p0={:.2}% (work_unit={:.2}s)",
+                "speed={} difficulty={} solutions={}/{} eta={} expected={:.2} p0={:.2}% (mine={}μs cycle={}μs)",
                 stats::format_hash_rate(hps),
                 target.difficulty,
                 snapshot.solutions_accepted,
@@ -460,7 +553,8 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 stats::estimate_time(hps, target.difficulty),
                 expected_solutions,
                 p_zero_pct,
-                wu_elapsed.as_secs_f64(),
+                mine_us,
+                cycle_us,
             );
             last_stats_print = std::time::Instant::now();
         }
@@ -477,57 +571,22 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     hex::encode(&solution.hash)
                 );
 
-                // Submit to server
-                match protocol.submit_report(&preimage, &solution.hash).await {
-                    Ok(resp) => {
-                        tracker.record_accepted();
-                        println!("Mining report accepted! keep={}", wu.keep_secret);
-
-                        // Update difficulty if server says so
-                        if let Some(new_diff) = resp.difficulty_target {
-                            if new_diff != target.difficulty {
-                                println!(
-                                    "Difficulty adjustment: {} → {}",
-                                    target.difficulty, new_diff
-                                );
-                                target.difficulty = new_diff;
-                                tracker.set_difficulty(new_diff);
-                            }
-                        }
-
-                        // Claim and rotate mined keep secret through wallet insert/replace.
-                        claim_accepted_keep_secret(
-                            &webcash_wallet,
-                            &config.webcash_wallet_path,
-                            &pending_keep_path,
-                            &wu.keep_secret,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        eprintln!("Mining report rejected: {}", e);
-
-                        // Save orphaned solution
-                        let orphan_line = format!(
-                            "{} 0x{} {} difficulty={}\n",
-                            preimage,
-                            hex::encode(&solution.hash),
-                            wu.keep_secret,
-                            solution.difficulty_achieved
-                        );
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(orphan_log_path())
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                f.write_all(orphan_line.as_bytes())
-                            });
-                    }
-                }
+                // Queue solution for background submission — never block the
+                // mining loop on HTTP I/O. The submitter task handles network
+                // calls and wallet updates concurrently.
+                let _ = solution_tx.send(SolutionReport {
+                    preimage,
+                    hash: solution.hash,
+                    difficulty_achieved: solution.difficulty_achieved,
+                    keep_secret: wu.keep_secret,
+                });
             }
         }
     }
+
+    // Signal the submitter to drain remaining solutions and exit.
+    drop(solution_tx);
+    let _ = submitter_handle.await;
 
     // Clean up
     println!("Miner shutting down...");
