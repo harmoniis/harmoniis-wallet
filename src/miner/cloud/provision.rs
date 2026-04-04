@@ -205,21 +205,91 @@ pub async fn start(
     Ok(state)
 }
 
-/// Stop mining and recover locally. Instance keeps running (charges continue).
+/// Stop mining, download pending solutions, recover locally.
+///
+/// 1. Send SIGINT for graceful shutdown (lets submitter threads drain)
+/// 2. Wait for miner to exit
+/// 3. Download miner_pending_solutions.log (unsubmitted solutions)
+/// 4. Download miner_pending_keeps.log (accepted but not yet in wallet)
 pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) -> Result<()> {
     println!("Stopping miner on instance {}...", state.instance_id);
+
+    // SIGINT for graceful shutdown — lets submitter threads finish current work.
     let _ = ssh::exec(
         ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "kill $(pgrep hrmw) 2>/dev/null || true",
+        "kill -INT $(pgrep -f 'webminer run') 2>/dev/null || true",
     );
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    println!("Miner stopped.");
+
+    // Wait for graceful shutdown (up to 30s for submitters to drain).
+    println!("  Waiting for pending submissions to complete...");
+    for i in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let check = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            "pgrep -f 'webminer run' > /dev/null 2>&1 && echo RUNNING || echo STOPPED",
+        )
+        .unwrap_or_default();
+        if check.contains("STOPPED") {
+            println!("  Miner stopped gracefully.");
+            break;
+        }
+        if i == 14 {
+            // Force kill after 30s
+            println!("  Force killing...");
+            let _ = ssh::exec(
+                ssh_key,
+                &state.ssh_host,
+                state.ssh_port,
+                "kill -9 $(pgrep -f 'webminer run') 2>/dev/null || true",
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    // Download pending solution files to local wallet dir.
+    let local_wallet_dir = dirs_next::home_dir()
+        .unwrap_or_default()
+        .join(".harmoniis")
+        .join("wallet");
+    std::fs::create_dir_all(&local_wallet_dir).ok();
+
+    for remote_file in [
+        "/root/.harmoniis/wallet/miner_pending_solutions.log",
+        "/root/.harmoniis/wallet/miner_pending_keeps.log",
+        "/root/.harmoniis/wallet/miner_orphans.log",
+    ] {
+        let filename = std::path::Path::new(remote_file)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let local_path = local_wallet_dir.join(&*filename);
+
+        if let Ok(content) = ssh::exec(
+            ssh_key,
+            &state.ssh_host,
+            state.ssh_port,
+            &format!("cat {remote_file} 2>/dev/null"),
+        ) {
+            if !content.trim().is_empty() {
+                // Append to local file (don't overwrite — may have data from previous runs)
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&local_path)?;
+                f.write_all(content.as_bytes())?;
+                let lines = content.lines().count();
+                println!("  Downloaded {filename}: {lines} entries");
+            }
+        }
+    }
+
     println!();
     println!("Recovering mined webcash locally...");
-    // Recovery happens in the CLI handler (needs wallet objects).
-    // This function just stops the remote process.
     println!();
     println!("WARNING: Instance is still running. Vast.ai is still charging.");
     println!("  Use `hrmw webminer cloud destroy` to stop charges.");

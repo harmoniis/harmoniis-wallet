@@ -251,7 +251,14 @@ impl CudaMiner {
             .lock()
             .map_err(|_| anyhow::anyhow!("cuda result slots mutex poisoned"))?;
 
-        self.launch_into_slot(&mut slots, 0, midstate, difficulty, nonce_offset, nonce_count)?;
+        self.launch_into_slot(
+            &mut slots,
+            0,
+            midstate,
+            difficulty,
+            nonce_offset,
+            nonce_count,
+        )?;
         self.stream.synchronize()?;
 
         let mut host_best = [0u64; 1];

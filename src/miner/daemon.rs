@@ -7,8 +7,8 @@ use std::sync::Arc;
 use webylib::SecretWebcash;
 
 use super::protocol::MiningProtocol;
-use super::stats::{self, StatsTracker};
 use super::sha256::Sha256Midstate;
+use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
 
 /// Solution queued for submission on the dedicated OS thread.
@@ -20,7 +20,6 @@ struct SolutionReport {
 }
 
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
-
 
 fn default_wallet_root() -> PathBuf {
     if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
@@ -468,7 +467,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             {
                                 eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
                             }
-                            eprintln!("[submitter-{thread_id}] wallet claim in {}ms", t1.elapsed().as_millis());
+                            eprintln!(
+                                "[submitter-{thread_id}] wallet claim in {}ms",
+                                t1.elapsed().as_millis()
+                            );
                         }
                         Err(e) => {
                             let http_ms = t0.elapsed().as_millis();
@@ -561,16 +563,18 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 let n = pipeline_depth;
                 tokio::task::spawn_blocking(move || {
                     use rayon::prelude::*;
-                    (0..n).into_par_iter().map(|_| WorkUnit::new(d, a, s)).collect()
+                    (0..n)
+                        .into_par_iter()
+                        .map(|_| WorkUnit::new(d, a, s))
+                        .collect()
                 })
                 .await?
             }
         };
 
         // Build midstate refs — Arc avoids cloning 32 Sha256Midstates per cycle.
-        let midstates: Arc<Vec<Sha256Midstate>> = Arc::new(
-            work_units.iter().map(|wu| wu.midstate.clone()).collect(),
-        );
+        let midstates: Arc<Vec<Sha256Midstate>> =
+            Arc::new(work_units.iter().map(|wu| wu.midstate.clone()).collect());
 
         // Start creating NEXT batch in background with rayon (overlapped with
         // GPU mining). On a 122-thread machine, 32 WUs finish in ~30μs.
@@ -580,7 +584,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let next_n = pipeline_depth;
         let next_batch_handle = tokio::task::spawn_blocking(move || {
             use rayon::prelude::*;
-            (0..next_n).into_par_iter().map(|_| WorkUnit::new(next_d, next_a, next_s)).collect::<Vec<_>>()
+            (0..next_n)
+                .into_par_iter()
+                .map(|_| WorkUnit::new(next_d, next_a, next_s))
+                .collect::<Vec<_>>()
         });
 
         // Mine current batch on GPUs (overlapped with next batch creation).
@@ -670,10 +677,37 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Clean up
-    println!("Miner shutting down...");
+    // Graceful shutdown: drop the sender so submitter threads drain remaining
+    // solutions and exit. Wait up to 60s for them to finish.
+    println!("Miner shutting down — draining pending submissions...");
+    drop(solution_tx);
+    let drain_start = std::time::Instant::now();
+    let drain_timeout = std::time::Duration::from_secs(60);
+    loop {
+        // Check if all submitter threads have exited by trying to lock the rx.
+        // When all threads exit, the Arc refcount drops and we know they're done.
+        let remaining = Arc::strong_count(&shared_rx);
+        if remaining <= 1 {
+            // Only our reference remains — all submitters exited.
+            break;
+        }
+        if drain_start.elapsed() > drain_timeout {
+            eprintln!(
+                "Warning: {} submitter thread(s) still running after 60s, proceeding with shutdown",
+                remaining - 1
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let drain_secs = drain_start.elapsed().as_secs();
+    if drain_secs > 0 {
+        println!("  Drained pending submissions in {drain_secs}s");
+    }
+
     let _ = std::fs::remove_file(pid_file_path());
     let _ = tracker.write_to_file(&status_path);
+    println!("Miner stopped.");
 
     Ok(())
 }
