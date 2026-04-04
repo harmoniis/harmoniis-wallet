@@ -16,12 +16,16 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 
 const CUDA_BLOCK_SIZE: u32 = 256;
 
+/// Maximum number of work units batched per GPU in a single sync cycle.
+const MAX_BATCH: usize = 8;
+
 pub struct CudaMiner {
     stream: Arc<CudaStream>,
     kernel: CudaFunction,
     nonce_table_dev: CudaSlice<u32>,
-    // Single packed u64 result on device: [zeros:32 | nonce:32].
-    result_dev: Mutex<CudaSlice<u64>>,
+    /// Pre-allocated result buffers — one per batch slot. Launching N kernels
+    /// into N separate buffers then sync-ing once avoids N-1 redundant syncs.
+    result_slots: Mutex<Vec<CudaSlice<u64>>>,
     nonce_words: Vec<u32>,
     device_name: String,
     ordinal: usize,
@@ -92,13 +96,16 @@ impl CudaMiner {
                 return None;
             }
         };
-        let result_dev = match stream.alloc_zeros::<u64>(1) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("CUDA[{ordinal}]: result buffer alloc failed: {e}");
-                return None;
+        let mut result_slots = Vec::with_capacity(MAX_BATCH);
+        for i in 0..MAX_BATCH {
+            match stream.alloc_zeros::<u64>(1) {
+                Ok(d) => result_slots.push(d),
+                Err(e) => {
+                    eprintln!("CUDA[{ordinal}]: result buffer {i} alloc failed: {e}");
+                    return None;
+                }
             }
-        };
+        }
 
         eprintln!("CUDA[{ordinal}]: {device_name} ready");
 
@@ -106,7 +113,7 @@ impl CudaMiner {
             stream,
             kernel,
             nonce_table_dev,
-            result_dev: Mutex::new(result_dev),
+            result_slots: Mutex::new(result_slots),
             nonce_words,
             device_name,
             ordinal,
@@ -153,6 +160,85 @@ impl CudaMiner {
         })
     }
 
+    /// Launch kernel into a specific result slot (async on stream, no sync).
+    fn launch_into_slot(
+        &self,
+        slots: &mut [CudaSlice<u64>],
+        slot: usize,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+        nonce_offset: u32,
+        nonce_count: u32,
+    ) -> anyhow::Result<()> {
+        self.stream.memset_zeros(&mut slots[slot])?;
+
+        let s = midstate.state_words();
+        let cfg = LaunchConfig {
+            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
+            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let prefix_len = midstate.prefix_len as u32;
+        let mut launch = self.stream.launch_builder(&self.kernel);
+        launch.arg(&self.nonce_table_dev);
+        launch.arg(&s[0]);
+        launch.arg(&s[1]);
+        launch.arg(&s[2]);
+        launch.arg(&s[3]);
+        launch.arg(&s[4]);
+        launch.arg(&s[5]);
+        launch.arg(&s[6]);
+        launch.arg(&s[7]);
+        launch.arg(&difficulty);
+        launch.arg(&prefix_len);
+        launch.arg(&nonce_offset);
+        launch.arg(&nonce_count);
+        launch.arg(&mut slots[slot]);
+        unsafe { launch.launch(cfg) }?;
+        Ok(())
+    }
+
+    /// Mine a batch of midstates with ONE sync call instead of one per midstate.
+    /// Each midstate gets its own result buffer slot, all kernels fire back-to-back
+    /// on the same stream, then a single synchronize collects all results.
+    pub fn mine_batch(
+        &self,
+        midstates: &[Sha256Midstate],
+        difficulty: u32,
+    ) -> anyhow::Result<Vec<MiningChunkResult>> {
+        let mut slots = self
+            .result_slots
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cuda result slots mutex poisoned"))?;
+
+        let batch_size = midstates.len().min(slots.len());
+        let started = std::time::Instant::now();
+
+        // Phase 1: fire all kernels (async, no sync between them).
+        for (i, midstate) in midstates[..batch_size].iter().enumerate() {
+            self.launch_into_slot(&mut slots, i, midstate, difficulty, 0, NONCE_SPACE_SIZE)?;
+        }
+
+        // Phase 2: single sync — wait for ALL kernels to complete.
+        self.stream.synchronize()?;
+
+        // Phase 3: read all results (device memory is stable after sync).
+        let elapsed = started.elapsed();
+        let mut results = Vec::with_capacity(batch_size);
+        for (i, midstate) in midstates[..batch_size].iter().enumerate() {
+            let mut host_best = [0u64; 1];
+            self.stream.memcpy_dtoh(&slots[i], &mut host_best)?;
+            results.push(MiningChunkResult {
+                result: self.best_result_from_packed(midstate, difficulty, host_best[0]),
+                attempted: NONCE_SPACE_SIZE as u64,
+                elapsed,
+            });
+        }
+
+        Ok(results)
+    }
+
     fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
@@ -160,51 +246,16 @@ impl CudaMiner {
         nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
-        let mut result_dev = self
-            .result_dev
+        let mut slots = self
+            .result_slots
             .lock()
-            .map_err(|_| anyhow::anyhow!("cuda result buffer mutex poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("cuda result slots mutex poisoned"))?;
 
-        // Reset packed best result to 0 for this launch.
-        self.stream.memset_zeros(&mut *result_dev)?;
-
-        let s = midstate.state_words();
-        let s0 = s[0];
-        let s1 = s[1];
-        let s2 = s[2];
-        let s3 = s[3];
-        let s4 = s[4];
-        let s5 = s[5];
-        let s6 = s[6];
-        let s7 = s[7];
-        let prefix_len = midstate.prefix_len as u32;
-
-        let cfg = LaunchConfig {
-            grid_dim: (nonce_count.div_ceil(CUDA_BLOCK_SIZE), 1, 1),
-            block_dim: (CUDA_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut launch = self.stream.launch_builder(&self.kernel);
-        launch.arg(&self.nonce_table_dev);
-        launch.arg(&s0);
-        launch.arg(&s1);
-        launch.arg(&s2);
-        launch.arg(&s3);
-        launch.arg(&s4);
-        launch.arg(&s5);
-        launch.arg(&s6);
-        launch.arg(&s7);
-        launch.arg(&difficulty);
-        launch.arg(&prefix_len);
-        launch.arg(&nonce_offset);
-        launch.arg(&nonce_count);
-        launch.arg(&mut *result_dev);
-        unsafe { launch.launch(cfg) }?;
-
+        self.launch_into_slot(&mut slots, 0, midstate, difficulty, nonce_offset, nonce_count)?;
         self.stream.synchronize()?;
+
         let mut host_best = [0u64; 1];
-        self.stream.memcpy_dtoh(&*result_dev, &mut host_best)?;
+        self.stream.memcpy_dtoh(&slots[0], &mut host_best)?;
 
         Ok(self.best_result_from_packed(midstate, difficulty, host_best[0]))
     }

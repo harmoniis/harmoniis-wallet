@@ -176,27 +176,25 @@ impl MinerBackend for MultiCudaMiner {
 
         let gpu_count = self.miners.len();
 
-        // Batch work units per GPU: 1 task per GPU processes all its assigned
-        // work units sequentially. This eliminates per-WU task spawn overhead
-        // and mutex contention between tasks on the same GPU.
+        // Batch dispatch per GPU: fire all kernels into separate result buffers,
+        // sync ONCE, read all results. Eliminates N-1 redundant sync calls per
+        // GPU (the main source of dispatch overhead at sub-ms kernel times).
         let mut tasks = JoinSet::new();
         for gpu_idx in 0..gpu_count {
             let miner = self.miners[gpu_idx].clone();
-            let gpu_work: Vec<(usize, Sha256Midstate)> = midstates
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i % gpu_count == gpu_idx)
-                .map(|(i, m)| (i, m.clone()))
+            let gpu_indices: Vec<usize> = (gpu_idx..midstates.len())
+                .step_by(gpu_count)
                 .collect();
-            let cancel = cancel.clone();
+            let gpu_midstates: Vec<Sha256Midstate> = gpu_indices
+                .iter()
+                .map(|&i| midstates[i].clone())
+                .collect();
             tasks.spawn(async move {
-                let mut results = Vec::with_capacity(gpu_work.len());
-                for (idx, midstate) in &gpu_work {
-                    let chunk = miner
-                        .mine_range_direct(midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel.clone())
-                        .await?;
-                    results.push((*idx, chunk));
-                }
+                let chunks = miner.mine_batch(&gpu_midstates, difficulty)?;
+                let results: Vec<(usize, MiningChunkResult)> = gpu_indices
+                    .into_iter()
+                    .zip(chunks)
+                    .collect();
                 Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
             });
         }
