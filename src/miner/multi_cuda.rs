@@ -156,7 +156,11 @@ impl MinerBackend for MultiCudaMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        self.miners.len().max(1)
+        // Each GPU finishes 1M nonces in <0.1ms. With pipeline_depth = GPU count,
+        // the CPU loop overhead (work unit creation, task spawning) dominates and
+        // throughput doesn't scale with more GPUs. Multiply by 4 so each GPU
+        // processes multiple work units per cycle, keeping it busy longer.
+        (self.miners.len() * 4).max(1)
     }
 
     async fn mine_work_units(
@@ -170,25 +174,41 @@ impl MinerBackend for MultiCudaMiner {
             return Ok(Vec::new());
         }
 
+        let gpu_count = self.miners.len();
+
+        // Batch work units per GPU: 1 task per GPU processes all its assigned
+        // work units sequentially. This eliminates per-WU task spawn overhead
+        // and mutex contention between tasks on the same GPU.
         let mut tasks = JoinSet::new();
-        for (idx, midstate) in midstates.iter().enumerate() {
-            let miner = self.miners[idx % self.miners.len()].clone();
-            let midstate = midstate.clone();
+        for gpu_idx in 0..gpu_count {
+            let miner = self.miners[gpu_idx].clone();
+            let gpu_work: Vec<(usize, Sha256Midstate)> = midstates
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i % gpu_count == gpu_idx)
+                .map(|(i, m)| (i, m.clone()))
+                .collect();
             let cancel = cancel.clone();
             tasks.spawn(async move {
-                let chunk = miner
-                    .mine_range_direct(&midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel)
-                    .await?;
-                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
+                let mut results = Vec::with_capacity(gpu_work.len());
+                for (idx, midstate) in &gpu_work {
+                    let chunk = miner
+                        .mine_range_direct(midstate, difficulty, 0, NONCE_SPACE_SIZE, cancel.clone())
+                        .await?;
+                    results.push((*idx, chunk));
+                }
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
             });
         }
 
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
-            let (idx, chunk) =
+            let gpu_results =
                 joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
-            ordered[idx] = Some(chunk);
+            for (idx, chunk) in gpu_results {
+                ordered[idx] = Some(chunk);
+            }
         }
 
         let mut out = Vec::with_capacity(midstates.len());
