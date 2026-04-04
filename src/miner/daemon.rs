@@ -12,13 +12,6 @@ use super::sha256::Sha256Midstate;
 use super::work_unit::{NonceTable, WorkUnit};
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
-/// A found solution queued for background submission.
-struct SolutionReport {
-    preimage: String,
-    hash: [u8; 32],
-    difficulty_achieved: u32,
-    keep_secret: SecretWebcash,
-}
 
 fn default_wallet_root() -> PathBuf {
     if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
@@ -384,65 +377,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         target.difficulty, target.mining_amount, target.subsidy_amount, target.epoch
     );
 
-    let mut last_target_fetch = std::time::Instant::now();
     let mut last_stats_print = std::time::Instant::now();
     let target_refresh_interval = std::time::Duration::from_secs(15);
     let stats_print_interval = std::time::Duration::from_secs(5);
     let mut work_unit_timer;
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
-
-    // Background solution submitter — decouples HTTP I/O from the mining loop
-    // so GPUs never idle waiting for network calls.
-    let (solution_tx, mut solution_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SolutionReport>();
-    let sub_tracker = tracker.clone();
-    let sub_protocol = protocol.clone();
-    let sub_wallet = webcash_wallet.clone();
-    let sub_wallet_path = config.webcash_wallet_path.clone();
-    let sub_pending = pending_keep_path.clone();
-    let submitter_handle = tokio::spawn(async move {
-        while let Some(report) = solution_rx.recv().await {
-            match sub_protocol
-                .submit_report(&report.preimage, &report.hash)
-                .await
-            {
-                Ok(resp) => {
-                    sub_tracker.record_accepted();
-                    println!("Mining report accepted! keep={}", report.keep_secret);
-
-                    if let Some(new_diff) = resp.difficulty_target {
-                        eprintln!("Server difficulty hint: {new_diff}");
-                    }
-
-                    claim_accepted_keep_secret(
-                        &sub_wallet,
-                        &sub_wallet_path,
-                        &sub_pending,
-                        &report.keep_secret,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    eprintln!("Mining report rejected: {}", e);
-                    let orphan_line = format!(
-                        "{} 0x{} {} difficulty={}\n",
-                        report.preimage,
-                        hex::encode(&report.hash),
-                        report.keep_secret,
-                        report.difficulty_achieved,
-                    );
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(orphan_log_path())
-                        .and_then(|mut f| {
-                            use std::io::Write;
-                            f.write_all(orphan_line.as_bytes())
-                        });
-                }
-            }
-        }
-    });
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
@@ -593,22 +532,58 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     hex::encode(&solution.hash)
                 );
 
-                // Queue solution for background submission — never block the
-                // mining loop on HTTP I/O. The submitter task handles network
-                // calls and wallet updates concurrently.
-                let _ = solution_tx.send(SolutionReport {
-                    preimage,
-                    hash: solution.hash,
-                    difficulty_achieved: solution.difficulty_achieved,
-                    keep_secret: wu.keep_secret,
-                });
+                // Submit inline — solutions are money, never lose them to a
+                // background queue that could be killed before draining.
+                match protocol.submit_report(&preimage, &solution.hash).await {
+                    Ok(resp) => {
+                        tracker.record_accepted();
+                        println!("Mining report accepted! keep={}", wu.keep_secret);
+
+                        if let Some(new_diff) = resp.difficulty_target {
+                            if new_diff != target.difficulty {
+                                println!(
+                                    "Difficulty adjustment: {} → {}",
+                                    target.difficulty, new_diff
+                                );
+                                // Update shared target so next cycle uses new difficulty.
+                                let mut t = shared_target.write().unwrap();
+                                t.difficulty = new_diff;
+                                target.difficulty = new_diff;
+                                tracker.set_difficulty(new_diff);
+                            }
+                        }
+
+                        claim_accepted_keep_secret(
+                            &webcash_wallet,
+                            &config.webcash_wallet_path,
+                            &pending_keep_path,
+                            &wu.keep_secret,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        eprintln!("Mining report rejected: {}", e);
+
+                        let orphan_line = format!(
+                            "{} 0x{} {} difficulty={}\n",
+                            preimage,
+                            hex::encode(&solution.hash),
+                            wu.keep_secret,
+                            solution.difficulty_achieved
+                        );
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(orphan_log_path())
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(orphan_line.as_bytes())
+                            });
+                    }
+                }
             }
         }
     }
-
-    // Signal the submitter to drain remaining solutions and exit.
-    drop(solution_tx);
-    let _ = submitter_handle.await;
 
     // Clean up
     println!("Miner shutting down...");

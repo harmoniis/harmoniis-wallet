@@ -168,7 +168,7 @@ impl MinerBackend for MultiCudaMiner {
         midstates: &[Sha256Midstate],
         _nonce_table: &NonceTable,
         difficulty: u32,
-        cancel: Option<CancelFlag>,
+        _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
         if midstates.is_empty() {
             return Ok(Vec::new());
