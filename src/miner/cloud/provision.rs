@@ -292,10 +292,7 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
     let solutions_path = crate::miner::daemon::pending_solutions_path();
     if solutions_path.exists() {
         println!("  Submitting pending solutions locally...");
-        match crate::miner::daemon::retry_pending_solutions(
-            "https://webcash.tech",
-            std::path::Path::new(""),
-        ) {
+        match crate::miner::daemon::retry_pending_solutions("https://webcash.tech") {
             Ok((submitted, already, failed)) => {
                 if submitted > 0 || failed > 0 {
                     println!(

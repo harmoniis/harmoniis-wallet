@@ -63,10 +63,7 @@ pub fn pending_solutions_path() -> PathBuf {
 /// Reads the file, checks each against miner_pending_keeps.log (already accepted),
 /// submits unsubmitted ones to the server, and inserts accepted keeps into the wallet.
 /// Returns (submitted, already_accepted, failed).
-pub fn retry_pending_solutions(
-    server_url: &str,
-    webcash_wallet_path: &std::path::Path,
-) -> anyhow::Result<(usize, usize, usize)> {
+pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize, usize)> {
     use super::protocol::MiningProtocol;
     use std::collections::HashSet;
 
@@ -168,67 +165,6 @@ pub fn retry_pending_solutions(
     }
 
     Ok((submitted, already, failed))
-}
-
-fn is_duplicate_wallet_row_error(err: &webylib::Error) -> bool {
-    let msg = err.to_string().to_ascii_lowercase();
-    msg.contains("unique constraint failed") || msg.contains("constraint failed")
-}
-
-fn append_pending_keep_secret(
-    path: &std::path::Path,
-    keep_secret: &SecretWebcash,
-) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let line = format!("{}\n", keep_secret);
-
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
-}
-
-async fn claim_accepted_keep_secret(
-    webcash_wallet: &webylib::Wallet,
-    wallet_path: &std::path::Path,
-    pending_path: &std::path::Path,
-    keep_secret: &SecretWebcash,
-) {
-    match webcash_wallet.insert(keep_secret.clone()).await {
-        Ok(()) => println!(
-            "Claimed/replaced mined webcash in wallet: {}",
-            wallet_path.display()
-        ),
-        Err(e) if is_duplicate_wallet_row_error(&e) => {
-            println!(
-                "Mined webcash already exists in wallet: {}",
-                wallet_path.display()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to claim/replacement-insert mined webcash ({}): {}",
-                wallet_path.display(),
-                e
-            );
-            match append_pending_keep_secret(pending_path, keep_secret) {
-                Ok(()) => eprintln!(
-                    "Saved pending mined webcash claim code to {}",
-                    pending_path.display()
-                ),
-                Err(log_err) => eprintln!(
-                    "Warning: also failed to write pending keep log ({}): {}",
-                    pending_path.display(),
-                    log_err
-                ),
-            }
-        }
-    }
 }
 
 /// Check if a miner process is already running.
@@ -481,12 +417,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let tracker = Arc::new(StatsTracker::new(backend.name()));
     let status_path = stats::status_file_path();
 
-    // Open the webcash wallet for inserting mined coins (Arc-shared)
-    let webcash_wallet = Arc::new(
-        webylib::Wallet::open(&config.webcash_wallet_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to open webcash wallet: {}", e))?,
-    );
     let pending_keep_path = pending_keep_log_path();
     println!("Webcash wallet: {}", config.webcash_wallet_path.display());
     println!("Pending keep log: {}", pending_keep_path.display());
@@ -715,7 +645,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         pending_work_units = next_batch_handle.await.ok();
 
         let cycle_us = t_cycle.elapsed().as_micros();
-        let wu_elapsed = work_unit_timer.elapsed();
         let mut attempts_this_work_unit = 0u64;
         for chunk in &chunks {
             attempts_this_work_unit = attempts_this_work_unit.saturating_add(chunk.attempted);
