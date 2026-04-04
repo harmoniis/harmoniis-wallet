@@ -614,11 +614,7 @@ pub fn resolve_labeled_db_path(master_wallet_path: &Path, family: &str, label: &
                 );
                 return legacy;
             }
-            eprintln!(
-                "Migrated {} → {}",
-                legacy.display(),
-                canonical.display()
-            );
+            eprintln!("Migrated {} → {}", legacy.display(), canonical.display());
             return canonical;
         }
     }

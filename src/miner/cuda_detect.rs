@@ -35,7 +35,10 @@ pub fn ensure_cuda_libraries() -> Option<String> {
     }
 
     if version.is_none() {
-        eprintln!("CUDA detect: no CUDA libraries found (searched {} dirs)", cuda_dirs.len());
+        eprintln!(
+            "CUDA detect: no CUDA libraries found (searched {} dirs)",
+            cuda_dirs.len()
+        );
     }
 
     version
@@ -156,10 +159,21 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
             if name.starts_with("nvrtc64_") && name.ends_with(".dll") {
                 let ver = name.trim_start_matches("nvrtc64_").trim_end_matches(".dll");
                 if let Some(major_minor) = parse_nvrtc_version(ver) {
-                    let major = ver.split('_').next()
-                        .and_then(|s| if s.len() >= 2 { s[..s.len()-1].parse::<u32>().ok() } else { None })
+                    let major = ver
+                        .split('_')
+                        .next()
+                        .and_then(|s| {
+                            if s.len() >= 2 {
+                                s[..s.len() - 1].parse::<u32>().ok()
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or(0);
-                    if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                    if best
+                        .as_ref()
+                        .map_or(true, |(best_maj, _)| major > *best_maj)
+                    {
                         best = Some((major, major_minor));
                     }
                 }
@@ -174,7 +188,10 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
                 let major_str = ver.split('.').next().unwrap_or(ver);
                 let major = major_str.parse::<u32>().unwrap_or(0);
                 let display = format!("{major}.x");
-                if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                if best
+                    .as_ref()
+                    .map_or(true, |(best_maj, _)| major > *best_maj)
+                {
                     best = Some((major, display));
                 }
             }

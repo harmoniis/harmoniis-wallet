@@ -63,7 +63,11 @@ impl MultiCudaMiner {
             eprintln!("CUDA: no devices initialized successfully");
             return None;
         }
-        eprintln!("CUDA: {}/{} device(s) initialized", miners.len(), device_count);
+        eprintln!(
+            "CUDA: {}/{} device(s) initialized",
+            miners.len(),
+            device_count
+        );
 
         let mut weights = Vec::with_capacity(miners.len());
         let mut device_names = Vec::with_capacity(miners.len());

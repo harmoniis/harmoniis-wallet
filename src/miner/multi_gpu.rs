@@ -41,11 +41,7 @@ impl MultiGpuMiner {
             let name = miner.adapter_name().to_string();
             eprintln!("GPU[{idx}]: benchmarking {}...", name);
             let hps = miner.benchmark().await.unwrap_or(1.0).max(1.0);
-            eprintln!(
-                "GPU[{idx}]: {} — {:.2} Mh/s",
-                name,
-                hps / 1_000_000.0,
-            );
+            eprintln!("GPU[{idx}]: {} — {:.2} Mh/s", name, hps / 1_000_000.0,);
             aggregate_hash_rate += hps;
             weights.push(hps);
             device_names.push(name);
