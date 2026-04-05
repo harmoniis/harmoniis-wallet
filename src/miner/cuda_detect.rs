@@ -13,28 +13,47 @@ use std::path::{Path, PathBuf};
 pub fn ensure_cuda_libraries() -> Option<String> {
     let mut version = None;
 
-    // 1. Find CUDA toolkit directories
+    // 1. Detect driver CUDA version first (determines which toolkit is compatible).
+    let driver_version = detect_cuda_version_from_smi();
+    let driver_major = driver_version
+        .as_ref()
+        .and_then(|v| v.split('.').next())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    if let Some(ref v) = driver_version {
+        eprintln!("CUDA detect: driver reports CUDA {v}");
+    }
+
+    // 2. Find CUDA toolkit directories
     let cuda_dirs = find_cuda_directories();
+    eprintln!("CUDA detect: scanning {} directories...", cuda_dirs.len());
 
-    // 2. Find the NVRTC library in any of those directories
+    // 3. Find NVRTC libraries, preferring the one matching the driver version.
+    let mut all_found: Vec<(PathBuf, String, u32)> = Vec::new(); // (dir, version, major)
     for dir in &cuda_dirs {
-        if let Some(ver) = find_nvrtc_in(dir) {
-            eprintln!("CUDA detect: found NVRTC {ver} in {}", dir.display());
-            version = Some(ver);
-            prepend_library_path(dir);
-            break;
+        if let Some((ver, major)) = find_nvrtc_in_with_major(dir) {
+            eprintln!("CUDA detect:   found NVRTC {ver} in {}", dir.display());
+            all_found.push((dir.clone(), ver, major));
         }
     }
 
-    // 3. Also try to detect from nvidia-smi
-    if version.is_none() {
-        version = detect_cuda_version_from_smi();
-        if let Some(ref v) = version {
-            eprintln!("CUDA detect: version {v} (from nvidia-smi)");
+    if !all_found.is_empty() {
+        // Prefer the version matching the driver, then newest available.
+        if let Some(dm) = driver_major {
+            all_found.sort_by(|a, b| {
+                let a_match = (a.2 == dm) as u8;
+                let b_match = (b.2 == dm) as u8;
+                b_match.cmp(&a_match).then(b.2.cmp(&a.2))
+            });
         }
-    }
-
-    if version.is_none() {
+        let (dir, ver, _) = &all_found[0];
+        eprintln!("CUDA detect: selected NVRTC {ver} from {}", dir.display());
+        version = Some(ver.clone());
+        prepend_library_path(dir);
+    } else if let Some(v) = driver_version {
+        eprintln!("CUDA detect: no NVRTC library found (driver has CUDA {v})");
+        version = Some(v);
+    } else {
         eprintln!(
             "CUDA detect: no CUDA libraries found (searched {} dirs)",
             cuda_dirs.len()
@@ -142,11 +161,10 @@ fn find_cuda_directories() -> Vec<PathBuf> {
     dirs
 }
 
-/// Check if a directory contains an NVRTC library. Returns version if found.
-/// When multiple versions exist, returns the newest (highest major version).
-fn find_nvrtc_in(dir: &Path) -> Option<String> {
+/// Check if a directory contains an NVRTC library. Returns (version, major).
+fn find_nvrtc_in_with_major(dir: &Path) -> Option<(String, u32)> {
     let entries = std::fs::read_dir(dir).ok()?;
-    let mut best: Option<(u32, String)> = None; // (major_version, display_string)
+    let mut best: Option<(u32, String)> = None;
 
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -154,8 +172,7 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
 
         #[cfg(windows)]
         {
-            // nvrtc64_130_0.dll (CUDA 13.0), nvrtc64_120_0.dll (CUDA 12.0),
-            // nvrtc64_12*.dll (some builds omit patch), nvrtc-builtins64_*.dll (skip)
+            // Versioned: nvrtc64_130_0.dll, nvrtc64_120_0.dll, nvrtc64_112_0.dll
             if name.starts_with("nvrtc64_") && name.ends_with(".dll") {
                 let ver = name.trim_start_matches("nvrtc64_").trim_end_matches(".dll");
                 if let Some(major_minor) = parse_nvrtc_version(ver) {
@@ -170,13 +187,33 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
                             }
                         })
                         .unwrap_or(0);
-                    if best
-                        .as_ref()
-                        .map_or(true, |(best_maj, _)| major > *best_maj)
-                    {
+                    if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
                         best = Some((major, major_minor));
                     }
                 }
+            }
+            // Unversioned: nvrtc64.dll (some toolkit installs)
+            if best.is_none()
+                && (name == "nvrtc64.dll" || name == "nvrtc.dll")
+            {
+                // Can't determine version from filename — try to infer from path.
+                // e.g. C:\...\CUDA\v13.0\bin\nvrtc64.dll → major=13
+                let major = dir
+                    .components()
+                    .filter_map(|c| {
+                        let s = c.as_os_str().to_string_lossy();
+                        s.strip_prefix('v')
+                            .and_then(|v| v.split('.').next())
+                            .and_then(|m| m.parse::<u32>().ok())
+                    })
+                    .last()
+                    .unwrap_or(0);
+                let display = if major > 0 {
+                    format!("{major}.x")
+                } else {
+                    "unknown".to_string()
+                };
+                best = Some((major, display));
             }
         }
 
@@ -188,16 +225,13 @@ fn find_nvrtc_in(dir: &Path) -> Option<String> {
                 let major_str = ver.split('.').next().unwrap_or(ver);
                 let major = major_str.parse::<u32>().unwrap_or(0);
                 let display = format!("{major}.x");
-                if best
-                    .as_ref()
-                    .map_or(true, |(best_maj, _)| major > *best_maj)
-                {
+                if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
                     best = Some((major, display));
                 }
             }
         }
     }
-    best.map(|(_, display)| display)
+    best.map(|(major, display)| (display, major))
 }
 
 /// Parse NVRTC DLL version string: "130_0" → "13.0", "120_0" → "12.0"

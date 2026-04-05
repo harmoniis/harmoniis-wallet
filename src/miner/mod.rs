@@ -519,8 +519,10 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                 dev.label,
                 adapters.len(),
             );
-            let mut initialized = false;
-            // Try each adapter backend (Vulkan → DX12 → Metal) until one works.
+            // Try ALL adapter backends, benchmark each, pick the fastest.
+            // This fixes the DX12→Vulkan regression where Vulkan was 4x slower
+            // on NVIDIA Pascal but got picked first because its probe passed.
+            let mut best_miner: Option<(gpu::GpuMiner, String, f64)> = None;
             for identity in adapters {
                 if !gpu::subprocess_probe(identity) {
                     continue;
@@ -532,17 +534,26 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                 let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
                 if let Some(adapter) = identity.find_matching(found) {
                     if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                        let hps = miner.benchmark().await.unwrap_or(0.0);
                         eprintln!(
-                            "GPU[{}]: {} ready ({})",
+                            "GPU[{}]: {} ({}) — {:.2} Mh/s",
                             dev.id, dev.label, identity.backend,
+                            hps / 1_000_000.0,
                         );
-                        miners.push(miner);
-                        initialized = true;
-                        break;
+                        let is_better = best_miner.as_ref().map_or(true, |(_, _, best_hps)| hps > *best_hps);
+                        if is_better {
+                            best_miner = Some((miner, identity.backend.clone(), hps));
+                        }
                     }
                 }
             }
-            if !initialized {
+            if let Some((miner, backend, hps)) = best_miner {
+                eprintln!(
+                    "GPU[{}]: {} ready ({}, {:.2} Mh/s)",
+                    dev.id, dev.label, backend, hps / 1_000_000.0,
+                );
+                miners.push(miner);
+            } else {
                 eprintln!("GPU[{}]: {} — no working adapter found", dev.id, dev.label);
             }
         }
