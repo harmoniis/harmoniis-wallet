@@ -113,16 +113,17 @@ impl VastClient {
         format!("Bearer {}", self.api_key)
     }
 
-    /// Search for GPU offers, sorted by best TFlops/$/hr.
-    pub async fn search_offers(&self, num_gpus: u32, limit: u32) -> Result<Vec<Offer>> {
+    /// Search for GPU offers — any GPU count, sorted by TFlops/$/hr, reliability >= 99.5%.
+    pub async fn search_offers(&self, limit: u32) -> Result<Vec<Offer>> {
         let body = json!({
-            "num_gpus": {"eq": num_gpus},
+            "num_gpus": {"gte": 1},
             "cuda_max_good": {"gte": 12.0},
             "verified": {"eq": true},
             "rentable": {"eq": true},
             "rented": {"eq": false},
-            "reliability": {"gte": 0.98},
+            "reliability": {"gte": 0.995},
             "inet_down": {"gte": 200},
+            "duration": {"gte": 86400.0},
             "order": [["flops_per_dphtotal", "desc"]],
             "limit": limit,
             "type": "on-demand"
@@ -194,20 +195,9 @@ impl VastClient {
         Ok(offers)
     }
 
-    /// Find top offers across 2x, 4x, 8x GPU configs (max 8 GPUs).
-    /// Returns up to 20 offers sorted by composite score.
+    /// Find top offers — any GPU count, reliability >= 99.5%, sorted by TFlops/$/hr.
     pub async fn find_best_offers(&self) -> Result<Vec<Offer>> {
-        let (o2, o4, o8) = tokio::try_join!(
-            self.search_offers(2, 8),
-            self.search_offers(4, 8),
-            self.search_offers(8, 8),
-        )?;
-
-        let mut candidates: Vec<Offer> = o2
-            .into_iter()
-            .chain(o4.into_iter())
-            .chain(o8.into_iter())
-            .collect();
+        let mut candidates = self.search_offers(40).await?;
 
         candidates.sort_by(|a, b| {
             b.composite_score()
