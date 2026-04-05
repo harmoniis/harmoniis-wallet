@@ -664,10 +664,42 @@ async fn install_hrmw_remote(
     )
     .context("hrmw install failed")?;
 
-    // Step 3: Verify
-    let version = ssh::exec(ssh_key, host, port, &format!("{REMOTE_HRMW} --version"))
-        .context("hrmw verification failed")?;
-    println!("  {}", version.trim());
+    // Step 3: Verify — if it fails, show the actual error for debugging.
+    match ssh::exec(
+        ssh_key,
+        host,
+        port,
+        &format!("{REMOTE_HRMW} --version 2>&1"),
+    ) {
+        Ok(version) if version.contains("hrmw") => {
+            println!("  {}", version.trim());
+        }
+        Ok(output) => {
+            // Binary exists but can't run — likely missing shared library.
+            let ldd = ssh::exec(
+                ssh_key,
+                host,
+                port,
+                &format!("ldd {REMOTE_HRMW} 2>&1 | grep 'not found'"),
+            )
+            .unwrap_or_default();
+            let glibc =
+                ssh::exec(ssh_key, host, port, "ldd --version 2>&1 | head -1").unwrap_or_default();
+            anyhow::bail!(
+                "hrmw binary cannot run.\n  Output: {}\n  Missing libs: {}\n  GLIBC: {}",
+                output.trim(),
+                if ldd.trim().is_empty() {
+                    "none"
+                } else {
+                    ldd.trim()
+                },
+                glibc.trim()
+            );
+        }
+        Err(e) => {
+            anyhow::bail!("hrmw verification failed: {e}");
+        }
+    }
 
     Ok(())
 }

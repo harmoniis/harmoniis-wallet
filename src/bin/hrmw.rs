@@ -4021,11 +4021,7 @@ async fn main() -> anyhow::Result<()> {
                     let active = cloud_config::load_instances()?;
                     if !active.is_empty() {
                         provision::print_active_summary(&active);
-                        print!(
-                            "{} instance(s) running. Start {} more? [y/N] ",
-                            active.len(),
-                            count
-                        );
+                        print!("{} instance(s) running. Start more? [y/N] ", active.len());
                         use std::io::Write;
                         std::io::stdout().flush()?;
                         let mut input = String::new();
@@ -4035,6 +4031,23 @@ async fn main() -> anyhow::Result<()> {
                             return Ok(());
                         }
                     }
+
+                    // Ask how many instances if not specified with -n.
+                    let count = if count == 1 {
+                        print!("How many instances? [1] ");
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        let input = input.trim();
+                        if input.is_empty() {
+                            1
+                        } else {
+                            input.parse::<usize>().unwrap_or(1).max(1)
+                        }
+                    } else {
+                        count
+                    };
 
                     // Allocate slots (avoids label collision with active instances).
                     let slots = slots::allocate_slots(&wallet, &label, count, &active)?;
