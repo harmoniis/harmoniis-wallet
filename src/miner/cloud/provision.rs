@@ -19,20 +19,44 @@ const REMOTE_WALLET: &str = "/root/cloudminer_webcash.db";
 pub fn print_offers_table(offers: &[super::vast::Offer]) {
     println!();
     println!(
-        "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10}  {:>10}",
-        "#", "GPUs", "GPU", "TFLOPS", "$/hr", "FLOPS/$", "Offer ID"
+        "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8}",
+        "#", "GPUs", "GPU", "TFLOPS", "$/hr", "FLOPS/$", "Score"
     );
     println!("{}", "-".repeat(75));
     for (i, o) in offers.iter().enumerate() {
         println!(
-            "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1}  {:>10}",
+            "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}",
             i + 1,
             format!("{}x", o.num_gpus),
             o.gpu_name,
             o.tflops(),
             o.dph_total,
             o.flops_per_dollar(),
-            o.id,
+            o.composite_score(),
+        );
+    }
+    println!();
+}
+
+/// Print a summary of active cloud mining instances.
+pub fn print_active_summary(instances: &[config::InstanceState]) {
+    if instances.is_empty() {
+        return;
+    }
+    println!("Active cloud mining instances:");
+    println!(
+        "{:<3} {:<20} {:<6} {:<16} {:>8}",
+        "#", "Label", "GPUs", "GPU", "$/hr"
+    );
+    println!("{}", "-".repeat(60));
+    for (i, s) in instances.iter().enumerate() {
+        println!(
+            "{:<3} {:<20} {:<6} {:<16} {:>8.2}",
+            i + 1,
+            s.label,
+            format!("{}x", s.num_gpus),
+            s.gpu_name,
+            s.cost_per_hour,
         );
     }
     println!();

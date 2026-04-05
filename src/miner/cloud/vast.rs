@@ -38,6 +38,16 @@ impl Offer {
     pub fn flops_per_dollar(&self) -> f64 {
         self.flops_per_dphtotal
     }
+
+    /// Composite score weighting both efficiency AND absolute speed.
+    /// Formula: TFlops^1.5 / sqrt($/hr)
+    /// Higher = better. Rewards fast GPUs while still penalizing high cost.
+    pub fn composite_score(&self) -> f64 {
+        if self.dph_total <= 0.0 {
+            return 0.0;
+        }
+        self.tflops().powf(1.5) / self.dph_total.sqrt()
+    }
 }
 
 /// Instance details from Vast.ai.
@@ -181,23 +191,32 @@ impl VastClient {
         Ok(offers)
     }
 
-    /// Find top offers: 3x 8-GPU + 1x 10-GPU, sorted by TFlops/$/hr.
+    /// Find top offers across 2x, 4x, 8x, 10x GPU configs.
+    /// Sorted by composite score (TFlops^1.5 / sqrt($/hr)).
     pub async fn find_best_offers(&self) -> Result<Vec<Offer>> {
-        let (offers_8, offers_10) =
-            tokio::try_join!(self.search_offers(8, 3), self.search_offers(10, 1),)?;
+        let (o2, o4, o8, o10) = tokio::try_join!(
+            self.search_offers(2, 2),
+            self.search_offers(4, 2),
+            self.search_offers(8, 3),
+            self.search_offers(10, 1),
+        )?;
 
-        let mut candidates: Vec<Offer> = offers_8
+        let mut candidates: Vec<Offer> = o2
             .into_iter()
-            .take(3)
-            .chain(offers_10.into_iter().take(1))
+            .take(2)
+            .chain(o4.into_iter().take(2))
+            .chain(o8.into_iter().take(3))
+            .chain(o10.into_iter().take(1))
             .collect();
 
         candidates.sort_by(|a, b| {
-            b.flops_per_dollar()
-                .partial_cmp(&a.flops_per_dollar())
+            b.composite_score()
+                .partial_cmp(&a.composite_score())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // Keep top 8 to avoid overwhelming the user.
+        candidates.truncate(8);
         Ok(candidates)
     }
 

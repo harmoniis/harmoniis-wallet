@@ -6,5 +6,7 @@
 
 pub mod config;
 pub mod provision;
+pub mod recovery;
+pub mod slots;
 pub mod ssh;
 pub mod vast;

@@ -4011,33 +4011,53 @@ async fn main() -> anyhow::Result<()> {
                     machine,
                     count,
                 } => {
-                    // Each instance gets its own label → own derivation slot → no overlap.
-                    // Single instance: uses the label as-is (e.g. "cloudminer").
-                    // Multiple instances: appends index (e.g. "cloudminer-0", "cloudminer-1").
-                    for i in 0..count {
-                        let instance_label = if count == 1 {
-                            label.clone()
-                        } else {
-                            format!("{label}-{i}")
-                        };
+                    use harmoniis_wallet::miner::cloud::slots;
 
-                        if count > 1 {
-                            println!("\n=== Instance {}/{} ({instance_label}) ===", i + 1, count);
+                    // Concurrency guard — prevents two terminals from racing.
+                    let _lock = cloud_config::acquire_start_lock()
+                        .context("Another cloud start is in progress")?;
+
+                    // Check for existing instances.
+                    let active = cloud_config::load_instances()?;
+                    if !active.is_empty() {
+                        provision::print_active_summary(&active);
+                        print!(
+                            "{} instance(s) running. Start {} more? [y/N] ",
+                            active.len(),
+                            count
+                        );
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            println!("Cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    // Allocate slots (avoids label collision with active instances).
+                    let slots = slots::allocate_slots(&wallet, &label, count, &active)?;
+
+                    for (i, slot) in slots.iter().enumerate() {
+                        if slots.len() > 1 {
+                            println!(
+                                "\n=== Instance {}/{} ({}) ===",
+                                i + 1,
+                                slots.len(),
+                                slot.label
+                            );
                         }
 
-                        let _wc =
-                            resolve_webcash_wallet(&wallet_path, &wallet, Some(&instance_label))
-                                .await?;
-                        let db_path = labeled_wallet_display_path(
-                            &wallet_path,
-                            "webcash",
-                            Some(&instance_label),
-                        );
+                        let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&slot.label))
+                            .await?;
+                        let db_path =
+                            labeled_wallet_display_path(&wallet_path, "webcash", Some(&slot.label));
 
                         if let Err(e) =
-                            provision::start(&instance_label, machine, &db_path, &ssh_key).await
+                            provision::start(&slot.label, machine, &db_path, &ssh_key).await
                         {
-                            eprintln!("Instance {}/{} failed: {e}", i + 1, count);
+                            eprintln!("Instance {}/{} failed: {e}", i + 1, slots.len());
                         }
                     }
                 }

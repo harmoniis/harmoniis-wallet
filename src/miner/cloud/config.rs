@@ -146,6 +146,48 @@ pub fn clear_state() -> Result<()> {
     Ok(())
 }
 
+// ── Concurrency guard ─────────────────────────────────────────────────────
+
+/// Exclusive file lock for cloud start operations.
+/// Prevents two terminals from starting instances concurrently.
+/// Released automatically when dropped.
+pub struct StartLockGuard {
+    _file: std::fs::File,
+}
+
+/// Acquire an exclusive lock for cloud start.
+/// Returns Err if another `cloud start` is already in progress.
+pub fn acquire_start_lock() -> Result<StartLockGuard> {
+    let dir = cloud_dir();
+    std::fs::create_dir_all(&dir)?;
+    let lock_path = dir.join("start.lock");
+    let file = std::fs::File::create(&lock_path).context("failed to create start.lock")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            anyhow::bail!(
+                "Another `cloud start` is already in progress.\n\
+                 If this is a stale lock, remove ~/.harmoniis/cloud/start.lock"
+            );
+        }
+    }
+
+    Ok(StartLockGuard { _file: file })
+}
+
+#[cfg(unix)]
+impl Drop for StartLockGuard {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+// ── API key resolution ────────────────────────────────────────────────────
+
 /// Resolve the API key from config, env, or prompt.
 /// Resolve the Vast.ai API key from config, env, or interactive prompt.
 ///
