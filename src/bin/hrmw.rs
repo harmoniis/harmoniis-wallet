@@ -4054,13 +4054,16 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // Recover once (all instances share the same wallet)
+                    // Recover all mined webcash from the cloudminer wallet.
+                    // Uses gap-limit 500 to catch high-index derivations from
+                    // long mining sessions with many solutions.
                     let label = &targets[0].label;
+                    println!();
                     println!("Recovering mined webcash...");
                     let labeled_wc =
                         resolve_webcash_wallet(&wallet_path, &wallet, Some(label)).await?;
                     let recovery = labeled_wc
-                        .recover_from_wallet(50)
+                        .recover_from_wallet(500)
                         .await
                         .context("webcash recovery failed")?;
                     println!("{recovery}");

@@ -205,16 +205,26 @@ pub async fn start(
     Ok(state)
 }
 
-/// Stop mining, download pending solutions, recover locally.
+/// Stop a cloud mining instance and collect its solution files.
 ///
-/// 1. Send SIGINT for graceful shutdown (lets submitter threads drain)
-/// 2. Wait for miner to exit
-/// 3. Download miner_pending_solutions.log (unsubmitted solutions)
-/// 4. Download miner_pending_keeps.log (accepted but not yet in wallet)
+/// 1. Download solution files while miner is still running (safety snapshot)
+/// 2. SIGINT — miner drains submitter queue, writes final solutions to disk
+/// 3. Wait up to 15s for graceful exit, then force kill
+/// 4. Download again — catches solutions written between step 1 and shutdown
+///
+/// No retry here — `hrmw webminer collect` handles server submission.
+/// No recovery here — caller handles `recover + transfer`.
 pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) -> Result<()> {
-    println!("Stopping miner on instance {}...", state.instance_id);
+    println!(
+        "Stopping instance {} ({}x {})...",
+        state.instance_id, state.num_gpus, state.gpu_name
+    );
 
-    // SIGINT for graceful shutdown — lets submitter threads finish current work.
+    // Step 1: Snapshot solution files while miner is still running.
+    println!("  Downloading solution files...");
+    append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
+
+    // Step 2: SIGINT — miner enters graceful shutdown, drains submitter queue.
     let _ = ssh::exec(
         ssh_key,
         &state.ssh_host,
@@ -222,24 +232,21 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         "kill -INT $(pgrep -f 'webminer run') 2>/dev/null || true",
     );
 
-    // Wait for graceful shutdown (up to 30s for submitters to drain).
-    println!("  Waiting for pending submissions to complete...");
-    for i in 0..15 {
+    // Step 3: Wait for miner to exit (up to 15s, then force kill).
+    for i in 0..8 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let check = ssh::exec(
+        if ssh::exec(
             ssh_key,
             &state.ssh_host,
             state.ssh_port,
-            "pgrep -f 'webminer run' > /dev/null 2>&1 && echo RUNNING || echo STOPPED",
+            "pgrep -f 'webminer run' > /dev/null 2>&1 && echo R || echo S",
         )
-        .unwrap_or_default();
-        if check.contains("STOPPED") {
-            println!("  Miner stopped gracefully.");
+        .unwrap_or_default()
+        .contains('S')
+        {
             break;
         }
-        if i == 14 {
-            // Force kill after 30s
-            println!("  Force killing...");
+        if i == 7 {
             let _ = ssh::exec(
                 ssh_key,
                 &state.ssh_host,
@@ -250,117 +257,77 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         }
     }
 
-    // Download pending solution files to local wallet dir.
-    let local_wallet_dir = dirs_next::home_dir()
+    // Step 4: Download again — miner may have written more solutions during drain.
+    append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
+
+    println!("  Instance {} stopped.", state.instance_id);
+    Ok(())
+}
+
+// ── Shared: append remote log files to local with deduplication ────────────
+
+const REMOTE_LOG_FILES: [&str; 2] = [
+    "/root/.harmoniis/wallet/miner_pending_solutions.log",
+    "/root/.harmoniis/wallet/miner_pending_keeps.log",
+];
+
+/// Append remote solution/keep files to local copies.
+/// Deduplicates by line — safe to call repeatedly from any number of instances.
+fn append_remote_logs(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) {
+    let local_dir = dirs_next::home_dir()
         .unwrap_or_default()
         .join(".harmoniis")
         .join("wallet");
-    std::fs::create_dir_all(&local_wallet_dir).ok();
+    let _ = std::fs::create_dir_all(&local_dir);
 
-    for remote_file in [
-        "/root/.harmoniis/wallet/miner_pending_solutions.log",
-        "/root/.harmoniis/wallet/miner_pending_keeps.log",
-        "/root/.harmoniis/wallet/miner_orphans.log",
-    ] {
+    for remote_file in REMOTE_LOG_FILES {
         let filename = std::path::Path::new(remote_file)
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        let local_path = local_wallet_dir.join(&*filename);
 
-        if let Ok(content) = ssh::exec(
+        let content = match ssh::exec(
             ssh_key,
-            &state.ssh_host,
-            state.ssh_port,
+            host,
+            port,
             &format!("cat {remote_file} 2>/dev/null"),
         ) {
-            if !content.trim().is_empty() {
-                // Merge remote with local, deduplicate by line content.
-                use std::collections::HashSet;
-                let existing: HashSet<String> = std::fs::read_to_string(&local_path)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(|l| l.to_string())
-                    .filter(|l| !l.trim().is_empty())
-                    .collect();
-                let mut new_lines = 0usize;
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&local_path)?;
-                for line in content.lines() {
-                    if !line.trim().is_empty() && !existing.contains(line) {
-                        writeln!(f, "{}", line)?;
-                        new_lines += 1;
-                    }
-                }
-                if new_lines > 0 {
-                    println!("  Downloaded {filename}: {new_lines} new entries");
+            Ok(c) if !c.trim().is_empty() => c,
+            _ => continue,
+        };
+
+        let local_path = local_dir.join(&*filename);
+        use std::collections::HashSet;
+        let existing: HashSet<String> = std::fs::read_to_string(&local_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
+        let mut new_count = 0usize;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&local_path)
+        {
+            use std::io::Write;
+            for line in content.lines() {
+                if !line.trim().is_empty() && !existing.contains(line) {
+                    let _ = writeln!(f, "{}", line);
+                    new_count += 1;
                 }
             }
         }
+        if new_count > 0 {
+            println!("    {filename}: +{new_count}");
+        }
     }
-
-    // Fire-and-forget: retry unsubmitted solutions in background thread.
-    // Recovery via deterministic secret runs in parallel in the CLI handler.
-    // The retry just ensures unsubmitted solutions get reported to the server —
-    // the user's webcash is already recoverable via the labeled wallet secret.
-    let solutions_path = crate::miner::daemon::pending_solutions_path();
-    if solutions_path.exists() {
-        println!("  Retrying unsubmitted solutions in background...");
-        std::thread::spawn(|| {
-            match crate::miner::daemon::retry_pending_solutions("https://webcash.tech") {
-                Ok((submitted, already, failed)) => {
-                    if submitted > 0 || already > 0 || failed > 0 {
-                        println!(
-                            "  Background retry: {submitted} submitted, {already} already accepted, {failed} failed"
-                        );
-                    }
-                }
-                Err(e) => eprintln!("  Background retry failed: {e}"),
-            }
-        });
-    }
-
-    println!();
-    println!("Recovering mined webcash locally...");
-    println!();
-    println!("WARNING: Instance is still running. Vast.ai is still charging.");
-    println!("  Use `hrmw webminer cloud destroy` to stop charges.");
-
-    Ok(())
 }
 
-/// Download pending solution files from a running instance (non-destructive backup).
+/// Backup pending files from a running instance (called by `cloud status`).
 pub fn backup_pending_files(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) {
-    let local_wallet_dir = dirs_next::home_dir()
-        .unwrap_or_default()
-        .join(".harmoniis")
-        .join("wallet");
-    let _ = std::fs::create_dir_all(&local_wallet_dir);
-
-    for remote_file in [
-        "/root/.harmoniis/wallet/miner_pending_solutions.log",
-        "/root/.harmoniis/wallet/miner_pending_keeps.log",
-    ] {
-        if let Ok(content) = ssh::exec(
-            ssh_key,
-            &state.ssh_host,
-            state.ssh_port,
-            &format!("cat {remote_file} 2>/dev/null"),
-        ) {
-            if !content.trim().is_empty() {
-                let filename = std::path::Path::new(remote_file)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let local_path = local_wallet_dir.join(&*filename);
-                // Write (overwrite with latest remote state).
-                let _ = std::fs::write(&local_path, content.as_bytes());
-            }
-        }
-    }
+    append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
 }
 
 /// Destroy a single instance. Stops charges.
