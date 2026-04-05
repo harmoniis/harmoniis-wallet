@@ -4282,6 +4282,14 @@ mod self_update {
         Some(rest[..end].to_string())
     }
 
+    /// Path where we cache the installed tarball checksum.
+    fn installed_checksum_path() -> std::path::PathBuf {
+        dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".harmoniis")
+            .join("installed_checksum")
+    }
+
     /// Remove stale `.old` / `.old.exe` left by a previous Windows upgrade.
     fn cleanup_old_binaries() {
         let Ok(current_exe) = std::env::current_exe() else {
@@ -4329,10 +4337,43 @@ mod self_update {
             .context("could not find `tag_name` in release JSON")?;
         let latest_version = tag.strip_prefix('v').unwrap_or(&tag);
 
-        // 2. Already up to date?
+        // 2. Same version? Download tarball checksum and compare with local binary.
+        //    Detects rebuilt releases (same version tag, different binary).
         if latest_version == CURRENT_VERSION {
-            println!("Already up to date (v{CURRENT_VERSION}).");
-            return Ok(());
+            let sha_name = format!("harmoniis-wallet-{latest_version}-{platform}.tar.gz.sha256");
+            let sha_url = format!(
+                "https://github.com/harmoniis/harmoniis-wallet/releases/download/{tag}/{sha_name}"
+            );
+            // Fetch remote tarball checksum.
+            let remote_tarball_sha = curl(&["-sSL", &sha_url])
+                .ok()
+                .and_then(|b| {
+                    String::from_utf8(b)
+                        .ok()
+                        .and_then(|s| s.split_whitespace().next().map(|h| h.to_lowercase()))
+                })
+                .unwrap_or_default();
+
+            if remote_tarball_sha.is_empty() {
+                println!("Already up to date (v{CURRENT_VERSION}).");
+                return Ok(());
+            }
+
+            // Compare with checksum saved at install time.
+            let local_cached_sha = std::fs::read_to_string(installed_checksum_path())
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+
+            if remote_tarball_sha == local_cached_sha {
+                println!("Already up to date (v{CURRENT_VERSION}).");
+                return Ok(());
+            }
+
+            if !local_cached_sha.is_empty() {
+                println!("Release updated — downloading new build...");
+            }
+            // Fall through to download + install.
         }
         println!("Latest version  : {latest_version}");
 
@@ -4505,6 +4546,20 @@ mod self_update {
 
         // Clean up temp directory.
         let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        // Save the remote tarball checksum so future same-version checks work.
+        let sha_name = format!("harmoniis-wallet-{latest_version}-{platform}.tar.gz.sha256");
+        let sha_url = format!(
+            "https://github.com/harmoniis/harmoniis-wallet/releases/download/{tag}/{sha_name}"
+        );
+        if let Ok(sha_bytes) = curl(&["-sSL", &sha_url]) {
+            if let Some(sha) = String::from_utf8_lossy(&sha_bytes)
+                .split_whitespace()
+                .next()
+            {
+                let _ = std::fs::write(installed_checksum_path(), sha.to_lowercase());
+            }
+        }
 
         println!();
         println!("Upgraded hrmw: v{CURRENT_VERSION} -> v{latest_version}");
