@@ -4052,37 +4052,7 @@ async fn main() -> anyhow::Result<()> {
                     // Allocate slots (avoids label collision with active instances).
                     let slots = slots::allocate_slots(&wallet, &label, count, &active)?;
 
-                    // Pre-select offers: if multiple instances, assign top N offers
-                    // to avoid all instances competing for the same machine.
-                    let pre_selected_machines: Vec<Option<u64>> = if machine.is_some() {
-                        // User specified --machine: use it for all (may fail on 2nd+).
-                        slots.iter().map(|_| machine).collect()
-                    } else if slots.len() > 1 {
-                        // Multiple instances: search once, assign top N different offers.
-                        use harmoniis_wallet::miner::cloud::vast::VastClient;
-                        let cfg = cloud_config::load_config()?;
-                        let api_key = cloud_config::resolve_api_key(&cfg)?;
-                        let client = VastClient::new(&api_key);
-                        let offers = client.find_best_offers().await?;
-                        if offers.is_empty() {
-                            anyhow::bail!("No GPU offers found.");
-                        }
-                        provision::print_offers_table(&offers);
-                        println!(
-                            "Starting {} instances on the top {} offers.",
-                            slots.len(),
-                            slots.len().min(offers.len())
-                        );
-                        offers
-                            .iter()
-                            .take(slots.len())
-                            .map(|o| Some(o.id))
-                            .collect()
-                    } else {
-                        // Single instance: let provision::start handle offer selection.
-                        vec![None]
-                    };
-
+                    // Each instance gets its own offer selection (fresh search each time).
                     for (i, slot) in slots.iter().enumerate() {
                         if slots.len() > 1 {
                             println!(
@@ -4098,11 +4068,8 @@ async fn main() -> anyhow::Result<()> {
                         let db_path =
                             labeled_wallet_display_path(&wallet_path, "webcash", Some(&slot.label));
 
-                        let instance_machine = pre_selected_machines.get(i).copied().flatten();
-
                         if let Err(e) =
-                            provision::start(&slot.label, instance_machine, &db_path, &ssh_key)
-                                .await
+                            provision::start(&slot.label, machine, &db_path, &ssh_key).await
                         {
                             eprintln!("Instance {}/{} failed: {e}", i + 1, slots.len());
                         }

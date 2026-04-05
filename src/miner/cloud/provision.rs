@@ -20,7 +20,7 @@ pub fn print_offers_table(offers: &[super::vast::Offer]) {
     println!();
     println!(
         "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8}",
-        "#", "GPUs", "GPU", "TFLOPS", "$/hr", "FLOPS/$", "Score"
+        "#", "GPUs", "GPU", "TFLOPS", "$/hr", "TF/$/hr", "Score"
     );
     println!("{}", "-".repeat(75));
     for (i, o) in offers.iter().enumerate() {
