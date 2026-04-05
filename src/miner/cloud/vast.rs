@@ -121,7 +121,7 @@ impl VastClient {
             "verified": {"eq": true},
             "rentable": {"eq": true},
             "rented": {"eq": false},
-            "reliability": {"gte": 0.95},
+            "reliability": {"gte": 0.98},
             "inet_down": {"gte": 200},
             "order": [["flops_per_dphtotal", "desc"]],
             "limit": limit,

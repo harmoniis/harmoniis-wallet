@@ -591,9 +591,9 @@ fn upload_file(
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    // 42 × 10s = 7 minutes max wait for instance to start.
-    for i in 0..42 {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    // 12 × 5s = 1 minute max. If not running in 1 min, bad machine — move on.
+    for i in 0..12 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         match client.get_instance(instance_id).await {
             Ok(inst) if inst.is_running() => return Ok(inst),
             Ok(inst) => {
@@ -609,15 +609,15 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             Err(_) => {}
         }
     }
-    println!("  Instance did not start in 7 minutes — destroying...");
+    println!("  Instance did not start in 1 minute — destroying...");
     let _ = client.destroy_instance(instance_id).await;
     config::remove_instance(instance_id).ok();
     anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 
 async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
-    // 60 × 5s = 5 minutes max wait for SSH.
-    for _ in 0..60 {
+    // 24 × 5s = 2 minutes max. Instance is running — SSH should be fast.
+    for _ in 0..24 {
         if let Ok(out) = ssh::exec(ssh_key, host, port, "echo ok") {
             if out.contains("ok") {
                 return Ok(());
@@ -625,7 +625,7 @@ async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-    anyhow::bail!("SSH not ready after 5 minutes")
+    anyhow::bail!("SSH not ready after 2 minutes")
 }
 
 async fn install_hrmw_remote(
