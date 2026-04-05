@@ -187,15 +187,16 @@ fn find_nvrtc_in_with_major(dir: &Path) -> Option<(String, u32)> {
                             }
                         })
                         .unwrap_or(0);
-                    if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                    if best
+                        .as_ref()
+                        .map_or(true, |(best_maj, _)| major > *best_maj)
+                    {
                         best = Some((major, major_minor));
                     }
                 }
             }
             // Unversioned: nvrtc64.dll (some toolkit installs)
-            if best.is_none()
-                && (name == "nvrtc64.dll" || name == "nvrtc.dll")
-            {
+            if best.is_none() && (name == "nvrtc64.dll" || name == "nvrtc.dll") {
                 // Can't determine version from filename — try to infer from path.
                 // e.g. C:\...\CUDA\v13.0\bin\nvrtc64.dll → major=13
                 let major = dir
@@ -225,7 +226,10 @@ fn find_nvrtc_in_with_major(dir: &Path) -> Option<(String, u32)> {
                 let major_str = ver.split('.').next().unwrap_or(ver);
                 let major = major_str.parse::<u32>().unwrap_or(0);
                 let display = format!("{major}.x");
-                if best.as_ref().map_or(true, |(best_maj, _)| major > *best_maj) {
+                if best
+                    .as_ref()
+                    .map_or(true, |(best_maj, _)| major > *best_maj)
+                {
                     best = Some((major, display));
                 }
             }

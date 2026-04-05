@@ -537,10 +537,14 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                         let hps = miner.benchmark().await.unwrap_or(0.0);
                         eprintln!(
                             "GPU[{}]: {} ({}) — {:.2} Mh/s",
-                            dev.id, dev.label, identity.backend,
+                            dev.id,
+                            dev.label,
+                            identity.backend,
                             hps / 1_000_000.0,
                         );
-                        let is_better = best_miner.as_ref().map_or(true, |(_, _, best_hps)| hps > *best_hps);
+                        let is_better = best_miner
+                            .as_ref()
+                            .map_or(true, |(_, _, best_hps)| hps > *best_hps);
                         if is_better {
                             best_miner = Some((miner, identity.backend.clone(), hps));
                         }
@@ -550,7 +554,10 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
             if let Some((miner, backend, hps)) = best_miner {
                 eprintln!(
                     "GPU[{}]: {} ready ({}, {:.2} Mh/s)",
-                    dev.id, dev.label, backend, hps / 1_000_000.0,
+                    dev.id,
+                    dev.label,
+                    backend,
+                    hps / 1_000_000.0,
                 );
                 miners.push(miner);
             } else {
