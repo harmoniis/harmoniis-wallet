@@ -39,14 +39,17 @@ impl Offer {
         self.flops_per_dphtotal
     }
 
-    /// Composite score weighting both efficiency AND absolute speed.
-    /// Formula: TFlops^1.5 / sqrt($/hr)
-    /// Higher = better. Rewards fast GPUs while still penalizing high cost.
+    /// Composite score: efficiency first, speed as tiebreaker.
+    /// Formula: FLOPS/$ * (1 + TFlops/1000)
+    /// The TFlops/1000 term adds ~10-60% bonus for faster GPUs
+    /// without letting raw speed dominate cost efficiency.
     pub fn composite_score(&self) -> f64 {
         if self.dph_total <= 0.0 {
             return 0.0;
         }
-        self.tflops().powf(1.5) / self.dph_total.sqrt()
+        let efficiency = self.flops_per_dollar();
+        let speed_bonus = 1.0 + self.tflops() / 1000.0;
+        efficiency * speed_bonus
     }
 }
 
