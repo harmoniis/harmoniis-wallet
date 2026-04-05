@@ -4011,16 +4011,31 @@ async fn main() -> anyhow::Result<()> {
                     machine,
                     count,
                 } => {
-                    // Derive the labeled webcash wallet (shared across all instances)
-                    let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&label)).await?;
-                    let db_path =
-                        labeled_wallet_display_path(&wallet_path, "webcash", Some(&label));
-
+                    // Each instance gets its own label → own derivation slot → no overlap.
+                    // Single instance: uses the label as-is (e.g. "cloudminer").
+                    // Multiple instances: appends index (e.g. "cloudminer-0", "cloudminer-1").
                     for i in 0..count {
+                        let instance_label = if count == 1 {
+                            label.clone()
+                        } else {
+                            format!("{label}-{i}")
+                        };
+
                         if count > 1 {
-                            println!("\n=== Instance {}/{} ===", i + 1, count);
+                            println!("\n=== Instance {}/{} ({instance_label}) ===", i + 1, count);
                         }
-                        if let Err(e) = provision::start(&label, machine, &db_path, &ssh_key).await
+
+                        let _wc =
+                            resolve_webcash_wallet(&wallet_path, &wallet, Some(&instance_label))
+                                .await?;
+                        let db_path = labeled_wallet_display_path(
+                            &wallet_path,
+                            "webcash",
+                            Some(&instance_label),
+                        );
+
+                        if let Err(e) =
+                            provision::start(&instance_label, machine, &db_path, &ssh_key).await
                         {
                             eprintln!("Instance {}/{} failed: {e}", i + 1, count);
                         }
@@ -4054,46 +4069,58 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // Recover all mined webcash from the cloudminer wallet.
-                    // Uses gap-limit 500 to catch high-index derivations from
-                    // long mining sessions with many solutions.
-                    let label = &targets[0].label;
+                    // Recover from EACH instance's labeled wallet and transfer to main.
+                    // Each instance has its own label → own derivation depth → no overlap.
                     println!();
-                    println!("Recovering mined webcash...");
-                    let labeled_wc =
-                        resolve_webcash_wallet(&wallet_path, &wallet, Some(label)).await?;
-                    let recovery = labeled_wc
-                        .recover_from_wallet(500)
-                        .await
-                        .context("webcash recovery failed")?;
-                    println!("{recovery}");
+                    let mut total_transferred = 0.0f64;
+                    let mut unique_labels: Vec<String> = targets
+                        .iter()
+                        .map(|s| s.label.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    unique_labels.sort();
 
-                    let labeled_balance = labeled_wc.balance().await?;
-                    println!("Mining wallet balance: {labeled_balance}");
+                    for label in &unique_labels {
+                        println!("Recovering {label}...");
+                        let labeled_wc =
+                            resolve_webcash_wallet(&wallet_path, &wallet, Some(label)).await?;
+                        let recovery = labeled_wc
+                            .recover_from_wallet(50)
+                            .await
+                            .context("webcash recovery failed")?;
+                        println!("{recovery}");
 
-                    if labeled_balance != "0" && !labeled_balance.is_empty() {
-                        println!("Transferring to main wallet...");
-                        let payment = labeled_wc
-                            .pay(
-                                WebcashAmount::from_str(&labeled_balance)?,
-                                "cloud-mining-collect",
-                            )
-                            .await
-                            .context("failed to pay from mining wallet")?;
-                        let token = extract_webcash_token(&payment)?;
-                        let main_wc = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
-                        let parsed = SecretWebcash::parse(&token)
-                            .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
-                        main_wc
-                            .insert(parsed)
-                            .await
-                            .context("failed to insert into main wallet")?;
-                        let main_balance = main_wc.balance().await?;
-                        println!("Transferred {labeled_balance} webcash to main wallet.");
-                        println!("Main wallet balance: {main_balance}");
-                    } else {
-                        println!("No webcash mined yet.");
+                        let labeled_balance = labeled_wc.balance().await?;
+                        if labeled_balance != "0" && !labeled_balance.is_empty() {
+                            println!("  Balance: {labeled_balance} — transferring to main...");
+                            let payment = labeled_wc
+                                .pay(
+                                    WebcashAmount::from_str(&labeled_balance)?,
+                                    "cloud-mining-collect",
+                                )
+                                .await
+                                .context("failed to pay from mining wallet")?;
+                            let token = extract_webcash_token(&payment)?;
+                            let main_wc =
+                                resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
+                            let parsed = SecretWebcash::parse(&token)
+                                .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                            main_wc
+                                .insert(parsed)
+                                .await
+                                .context("failed to insert into main wallet")?;
+                            total_transferred += labeled_balance.parse::<f64>().unwrap_or(0.0);
+                        }
                     }
+
+                    let main_wc = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
+                    let main_balance = main_wc.balance().await?;
+                    if total_transferred > 0.0 {
+                        println!();
+                        println!("Total transferred: {total_transferred} webcash");
+                    }
+                    println!("Main wallet balance: {main_balance}");
                 }
                 CloudCmd::Destroy { instance } => {
                     let instances = cloud_config::load_instances()?;
