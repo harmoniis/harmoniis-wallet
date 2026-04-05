@@ -275,15 +275,29 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
             &format!("cat {remote_file} 2>/dev/null"),
         ) {
             if !content.trim().is_empty() {
-                // Append to local file (don't overwrite — may have data from previous runs)
+                // Merge remote with local, deduplicate by line content.
+                use std::collections::HashSet;
+                let existing: HashSet<String> = std::fs::read_to_string(&local_path)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|l| l.to_string())
+                    .filter(|l| !l.trim().is_empty())
+                    .collect();
+                let mut new_lines = 0usize;
                 use std::io::Write;
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&local_path)?;
-                f.write_all(content.as_bytes())?;
-                let lines = content.lines().count();
-                println!("  Downloaded {filename}: {lines} entries");
+                for line in content.lines() {
+                    if !line.trim().is_empty() && !existing.contains(line) {
+                        writeln!(f, "{}", line)?;
+                        new_lines += 1;
+                    }
+                }
+                if new_lines > 0 {
+                    println!("  Downloaded {filename}: {new_lines} new entries");
+                }
             }
         }
     }

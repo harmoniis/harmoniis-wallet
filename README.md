@@ -146,12 +146,27 @@ $ hrmw webminer cloud stop
   Main wallet balance: 74,033 webcash
 ```
 
+**Collecting unclaimed solutions:**
+
+```bash
+hrmw webminer collect                    # submit pending solutions to the server
+```
+
+Use `collect` when mined solutions weren't fully reported to the webcash server. This happens when:
+- Cloud instance was destroyed before all solutions were submitted (mining finds solutions faster than the server accepts them)
+- Network timeout during solution submission
+- Local miner was killed abruptly (Ctrl+C during submission)
+- `cloud stop` completed but background retry was still running
+
+The command reads `miner_pending_solutions.log`, checks which solutions were already accepted, and submits the rest in parallel (4 threads). Run `hrmw webcash recover` afterward to pick up the newly accepted webcash.
+
 **How it works:**
 - SSH key derived from wallet vault (deterministic, no key files to manage)
 - Cloud miner uses a labeled wallet (`cloudminer_webcash.db`) — separate from main
 - `cloud stop` recovers mined webcash locally via deterministic secret (no file download needed)
-- Pending solutions backed up on every `cloud status` check
-- Graceful shutdown: SIGINT → submitter threads drain → download pending files → retry locally
+- Pending solutions backed up on every `cloud status` check (deduplicated)
+- Graceful shutdown: SIGINT → submitter threads drain → download pending files → background retry
+- `hrmw webminer collect` retries any remaining unsubmitted solutions
 
 ## Contract Usage
 

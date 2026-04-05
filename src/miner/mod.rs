@@ -5,6 +5,7 @@
 //! is computed once, and each nonce attempt processes a single additional block.
 
 pub mod cloud;
+pub mod collect;
 pub mod composite;
 pub mod cpu;
 #[cfg(feature = "cuda")]

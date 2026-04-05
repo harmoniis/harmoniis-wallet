@@ -1141,6 +1141,8 @@ enum WebminerCmd {
         #[arg(long, name = "webcash-wallet")]
         webcash_wallet: Option<PathBuf>,
     },
+    /// Submit pending mined solutions that weren't reported to the server
+    Collect,
     /// Cloud mining on Vast.ai GPU instances
     Cloud {
         #[command(subcommand)]
@@ -3971,6 +3973,19 @@ async fn main() -> anyhow::Result<()> {
                 devices: device,
             };
             daemon::run_mining_loop(config).await?;
+        }
+        Cmd::Webminer(WebminerCmd::Collect) => {
+            let r = harmoniis_wallet::miner::collect::run("https://webcash.tech")?;
+            println!("Pending solutions: {}", r.pending);
+            println!("Already accepted:  {}", r.already_accepted);
+            println!("Submitted:         {}", r.submitted);
+            println!("Failed:            {}", r.failed);
+            if r.pending == 0 {
+                println!("Nothing to collect.");
+            } else if r.submitted > 0 {
+                println!();
+                println!("Run `hrmw webcash recover` to pick up newly accepted webcash.");
+            }
         }
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
             use harmoniis_wallet::miner::cloud::{
