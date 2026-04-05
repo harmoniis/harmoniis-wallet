@@ -148,12 +148,24 @@ pub async fn start(
         .ok_or_else(|| anyhow::anyhow!("No SSH connection info"))?;
     println!("  SSH: root@{ssh_host}:{ssh_port}");
 
-    // Wait for SSH to accept connections
-    wait_for_ssh(ssh_key, &ssh_host, ssh_port).await?;
+    // Wait for SSH to accept connections.
+    // If SSH fails, destroy instance to stop charges.
+    if let Err(e) = wait_for_ssh(ssh_key, &ssh_host, ssh_port).await {
+        eprintln!("  SSH failed — destroying instance to stop charges...");
+        let _ = client.destroy_instance(instance_id).await;
+        config::remove_instance(instance_id).ok();
+        return Err(e);
+    }
 
-    // 5. Install GLIBC + hrmw via SSH
+    // 5. Install GLIBC + hrmw via SSH.
+    // If install fails, destroy instance to stop charges.
     println!("[5/6] Installing hrmw...");
-    install_hrmw_remote(ssh_key, &ssh_host, ssh_port).await?;
+    if let Err(e) = install_hrmw_remote(ssh_key, &ssh_host, ssh_port).await {
+        eprintln!("  Install failed — destroying instance to stop charges...");
+        let _ = client.destroy_instance(instance_id).await;
+        config::remove_instance(instance_id).ok();
+        return Err(e);
+    }
 
     // Verify GPUs
     match ssh::exec(
@@ -446,15 +458,20 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
                 let speed = line
                     .split("speed=")
                     .nth(1)
-                    .and_then(|s| s.split_whitespace().next())
-                    .unwrap_or("?");
+                    .map(|s| {
+                        let mut parts = s.split_whitespace();
+                        let num = parts.next().unwrap_or("?");
+                        let unit = parts.next().unwrap_or("");
+                        format!("{num} {unit}")
+                    })
+                    .unwrap_or_else(|| "?".to_string());
                 let solutions = line
                     .split("solutions=")
                     .nth(1)
                     .and_then(|s| s.split_whitespace().next())
                     .unwrap_or("?");
-                println!("  Speed:    {speed}");
-                println!("  Solutions: {solutions}");
+                println!("  Speed:      {speed}");
+                println!("  Solutions:  {solutions} (accepted/found)");
             }
         }
         // Count total mined
@@ -574,7 +591,8 @@ fn upload_file(
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    for i in 0..30 {
+    // 42 × 10s = 7 minutes max wait for instance to start.
+    for i in 0..42 {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         match client.get_instance(instance_id).await {
             Ok(inst) if inst.is_running() => return Ok(inst),
@@ -591,14 +609,15 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             Err(_) => {}
         }
     }
-    println!("  Instance did not start in 5 minutes — destroying...");
+    println!("  Instance did not start in 7 minutes — destroying...");
     let _ = client.destroy_instance(instance_id).await;
     config::remove_instance(instance_id).ok();
     anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 
 async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
-    for _ in 0..30 {
+    // 60 × 5s = 5 minutes max wait for SSH.
+    for _ in 0..60 {
         if let Ok(out) = ssh::exec(ssh_key, host, port, "echo ok") {
             if out.contains("ok") {
                 return Ok(());
@@ -606,7 +625,7 @@ async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-    anyhow::bail!("SSH not ready after 2.5 minutes")
+    anyhow::bail!("SSH not ready after 5 minutes")
 }
 
 async fn install_hrmw_remote(
