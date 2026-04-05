@@ -647,6 +647,8 @@ pub async fn resolve_webcash_wallet(
     let webcash_wallet = WebcashWallet::open(&db_path)
         .await
         .with_context(|| format!("failed to open webcash wallet at {}", db_path.display()))?;
+    // Always store master secret (idempotent). The noisy println in webylib
+    // should be fixed upstream — TODO: remove println from webylib::store_master_secret.
     webcash_wallet
         .store_master_secret(&secret)
         .await

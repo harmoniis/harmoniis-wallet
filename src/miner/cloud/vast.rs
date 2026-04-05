@@ -191,22 +191,20 @@ impl VastClient {
         Ok(offers)
     }
 
-    /// Find top offers across 2x, 4x, 8x, 10x GPU configs.
+    /// Find top offers across 2x, 4x, 8x GPU configs (max 8 GPUs).
     /// Sorted by composite score (TFlops^1.5 / sqrt($/hr)).
     pub async fn find_best_offers(&self) -> Result<Vec<Offer>> {
-        let (o2, o4, o8, o10) = tokio::try_join!(
-            self.search_offers(2, 2),
-            self.search_offers(4, 2),
+        let (o2, o4, o8) = tokio::try_join!(
+            self.search_offers(2, 3),
+            self.search_offers(4, 3),
             self.search_offers(8, 3),
-            self.search_offers(10, 1),
         )?;
 
         let mut candidates: Vec<Offer> = o2
             .into_iter()
-            .take(2)
-            .chain(o4.into_iter().take(2))
+            .take(3)
+            .chain(o4.into_iter().take(3))
             .chain(o8.into_iter().take(3))
-            .chain(o10.into_iter().take(1))
             .collect();
 
         candidates.sort_by(|a, b| {
