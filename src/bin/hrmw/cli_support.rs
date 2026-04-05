@@ -647,12 +647,19 @@ pub async fn resolve_webcash_wallet(
     let webcash_wallet = WebcashWallet::open(&db_path)
         .await
         .with_context(|| format!("failed to open webcash wallet at {}", db_path.display()))?;
-    // Always store master secret (idempotent). The noisy println in webylib
-    // should be fixed upstream — TODO: remove println from webylib::store_master_secret.
-    webcash_wallet
-        .store_master_secret(&secret)
-        .await
-        .context("failed to store webcash master secret")?;
+    // Suppress webylib's noisy "Master secret stored" println during store.
+    // We print our own context-specific message if needed.
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        // Redirect stdout to /dev/null for this call
+        #[cfg(unix)]
+        let _guard = suppress_stdout();
+        webcash_wallet
+            .store_master_secret(&secret)
+            .await
+            .context("failed to store webcash master secret")?;
+    }
     Ok(webcash_wallet)
 }
 
@@ -1036,4 +1043,33 @@ fn default_terms_markdown() -> String {
 pub fn next_contract_id() -> String {
     let n: u32 = rand::thread_rng().gen_range(1..999_999);
     format!("CTR_{}_{:06}", chrono::Utc::now().format("%Y"), n)
+}
+
+/// Temporarily suppress stdout (redirects fd 1 to /dev/null).
+/// Returns a guard that restores stdout on drop.
+#[cfg(unix)]
+fn suppress_stdout() -> StdoutGuard {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let saved_fd = unsafe { libc::dup(1) };
+    if let Ok(devnull) = std::fs::File::open("/dev/null") {
+        unsafe { libc::dup2(devnull.as_raw_fd(), 1) };
+    }
+    StdoutGuard { saved_fd }
+}
+
+#[cfg(unix)]
+struct StdoutGuard {
+    saved_fd: i32,
+}
+
+#[cfg(unix)]
+impl Drop for StdoutGuard {
+    fn drop(&mut self) {
+        if self.saved_fd >= 0 {
+            unsafe {
+                libc::dup2(self.saved_fd, 1);
+                libc::close(self.saved_fd);
+            }
+        }
+    }
 }
