@@ -471,7 +471,7 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
                     .and_then(|s| s.split_whitespace().next())
                     .unwrap_or("?");
                 println!("  Speed:      {speed}");
-                println!("  Solutions:  {solutions} (accepted/found)");
+                println!("  Solutions:  {solutions} (collected/found)");
             }
         }
         // Count total mined
