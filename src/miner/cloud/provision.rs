@@ -288,20 +288,25 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         }
     }
 
-    // Retry any unsubmitted solutions locally.
+    // Fire-and-forget: retry unsubmitted solutions in background thread.
+    // Recovery via deterministic secret runs in parallel in the CLI handler.
+    // The retry just ensures unsubmitted solutions get reported to the server —
+    // the user's webcash is already recoverable via the labeled wallet secret.
     let solutions_path = crate::miner::daemon::pending_solutions_path();
     if solutions_path.exists() {
-        println!("  Submitting pending solutions locally...");
-        match crate::miner::daemon::retry_pending_solutions("https://webcash.tech") {
-            Ok((submitted, already, failed)) => {
-                if submitted > 0 || failed > 0 {
-                    println!(
-                        "  Pending solutions: {submitted} submitted, {already} already accepted, {failed} failed"
-                    );
+        println!("  Retrying unsubmitted solutions in background...");
+        std::thread::spawn(|| {
+            match crate::miner::daemon::retry_pending_solutions("https://webcash.tech") {
+                Ok((submitted, already, failed)) => {
+                    if submitted > 0 || already > 0 || failed > 0 {
+                        println!(
+                            "  Background retry: {submitted} submitted, {already} already accepted, {failed} failed"
+                        );
+                    }
                 }
+                Err(e) => eprintln!("  Background retry failed: {e}"),
             }
-            Err(e) => eprintln!("  Warning: retry pending solutions failed: {e}"),
-        }
+        });
     }
 
     println!();
