@@ -1157,9 +1157,9 @@ enum CloudCmd {
         /// Label for the mining wallet
         #[arg(long, default_value = "cloudminer")]
         label: String,
-        /// Use a specific Vast.ai offer ID instead of auto-selecting
-        #[arg(long)]
-        machine: Option<u64>,
+        /// Use a specific Vast.ai offer ID (from the # column or Vast.ai website)
+        #[arg(long, alias = "machine")]
+        offer: Option<u64>,
         /// Number of instances to provision
         #[arg(short = 'n', long, default_value = "1")]
         count: usize,
@@ -4008,7 +4008,7 @@ async fn main() -> anyhow::Result<()> {
             match cloud_cmd {
                 CloudCmd::Start {
                     label,
-                    machine,
+                    offer: machine,
                     count,
                 } => {
                     use harmoniis_wallet::miner::cloud::slots;

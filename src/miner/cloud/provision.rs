@@ -115,7 +115,7 @@ pub async fn start(
 
     // 2. Select offer
     let offer_id = if let Some(id) = machine_id {
-        println!("[2/6] Using specified machine: {id}");
+        println!("[2/6] Using offer: {id}");
         id
     } else {
         println!("[2/6] Searching for best GPU offers...");
