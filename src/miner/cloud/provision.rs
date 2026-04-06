@@ -591,8 +591,8 @@ fn upload_file(
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    // 12 × 5s = 1 minute max. If not running in 1 min, bad machine — move on.
-    for i in 0..12 {
+    // 36 × 5s = 3 minutes max. If not running in 3 min, bad machine — move on.
+    for i in 0..36 {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         match client.get_instance(instance_id).await {
             Ok(inst) if inst.is_running() => return Ok(inst),
@@ -609,7 +609,7 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             Err(_) => {}
         }
     }
-    println!("  Instance did not start in 1 minute — destroying...");
+    println!("  Instance did not start in 3 minutes — destroying...");
     let _ = client.destroy_instance(instance_id).await;
     config::remove_instance(instance_id).ok();
     anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
