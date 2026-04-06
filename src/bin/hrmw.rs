@@ -4093,7 +4093,7 @@ async fn main() -> anyhow::Result<()> {
                         instances.iter().collect()
                     };
 
-                    // Stop all target miners (continue on individual failures)
+                    // Stop all miners and download solution files (fast — just SSH).
                     for state in &targets {
                         if let Err(e) = provision::stop(state, &ssh_key).await {
                             eprintln!(
@@ -4103,10 +4103,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // Recover from EACH instance's labeled wallet and transfer to main.
-                    // Each instance has its own label → own derivation depth → no overlap.
-                    println!();
-                    let mut total_transferred = 0.0f64;
+                    // Recover from each instance's labeled wallet and transfer to main.
                     let mut unique_labels: Vec<String> = targets
                         .iter()
                         .map(|s| s.label.clone())
@@ -4115,6 +4112,8 @@ async fn main() -> anyhow::Result<()> {
                         .collect();
                     unique_labels.sort();
 
+                    println!();
+                    let mut total_transferred = 0.0f64;
                     for label in &unique_labels {
                         println!("Recovering {label}...");
                         let labeled_wc =
@@ -4160,14 +4159,72 @@ async fn main() -> anyhow::Result<()> {
                     let instances = cloud_config::load_instances()?;
                     if instances.is_empty() {
                         println!("No active instances.");
-                    } else if let Some(n) = instance {
-                        let idx = n.checked_sub(1).context("-n must be >= 1")?;
-                        let state = instances
-                            .get(idx)
-                            .ok_or_else(|| anyhow::anyhow!("Instance #{n} not found."))?;
-                        provision::destroy(state).await?;
                     } else {
-                        provision::destroy_all().await?;
+                        let targets: Vec<&InstanceState> = if let Some(n) = instance {
+                            let idx = n.checked_sub(1).context("-n must be >= 1")?;
+                            vec![instances
+                                .get(idx)
+                                .ok_or_else(|| anyhow::anyhow!("Instance #{n} not found."))?]
+                        } else {
+                            instances.iter().collect()
+                        };
+
+                        // Download solution files BEFORE destroying (fast SSH).
+                        for state in &targets {
+                            provision::backup_pending_files(state, &ssh_key);
+                        }
+
+                        // Destroy instances immediately (stops charges).
+                        if let Some(n) = instance {
+                            let state = &targets[0];
+                            provision::destroy(state).await?;
+                        } else {
+                            provision::destroy_all().await?;
+                        }
+
+                        // Recover locally after destroy (instances gone, but we have the files).
+                        let mut unique_labels: Vec<String> = targets
+                            .iter()
+                            .map(|s| s.label.clone())
+                            .collect::<std::collections::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        unique_labels.sort();
+
+                        let mut total_transferred = 0.0f64;
+                        for label in &unique_labels {
+                            println!("Recovering {label}...");
+                            let labeled_wc =
+                                resolve_webcash_wallet(&wallet_path, &wallet, Some(label)).await?;
+                            let recovery = labeled_wc
+                                .recover_from_wallet(50)
+                                .await
+                                .context("recovery failed")?;
+                            println!("{recovery}");
+
+                            let balance = labeled_wc.balance().await?;
+                            if balance != "0" && !balance.is_empty() {
+                                println!("  Transferring {balance} to main...");
+                                let payment = labeled_wc
+                                    .pay(WebcashAmount::from_str(&balance)?, "cloud-mining-collect")
+                                    .await?;
+                                let token = extract_webcash_token(&payment)?;
+                                let main_wc =
+                                    resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
+                                let parsed = SecretWebcash::parse(&token)
+                                    .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                                main_wc.insert(parsed).await?;
+                                total_transferred += balance.parse::<f64>().unwrap_or(0.0);
+                            }
+                        }
+
+                        if total_transferred > 0.0 {
+                            let main_wc =
+                                resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
+                            let main_balance = main_wc.balance().await?;
+                            println!("Transferred: {total_transferred} webcash");
+                            println!("Main wallet: {main_balance}");
+                        }
                     }
                 }
                 CloudCmd::Status { instance } => {
