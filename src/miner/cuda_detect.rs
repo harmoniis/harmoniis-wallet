@@ -35,7 +35,10 @@ pub fn ensure_cuda_libraries() -> Option<String> {
     let mut all_found: Vec<(PathBuf, String, u32)> = Vec::new(); // (dir, version, major)
     for dir in &cuda_dirs {
         if let Some((ver, major)) = find_nvrtc_in_with_major(dir) {
-            eprintln!("CUDA detect:   found NVRTC {ver} (major={major}) in {}", dir.display());
+            eprintln!(
+                "CUDA detect:   found NVRTC {ver} (major={major}) in {}",
+                dir.display()
+            );
             all_found.push((dir.clone(), ver, major));
         }
     }
@@ -73,7 +76,11 @@ pub fn ensure_cuda_libraries() -> Option<String> {
                     let name = entry.file_name();
                     let name_lower = name.to_string_lossy().to_lowercase();
                     if name_lower.contains("nvrtc") {
-                        eprintln!("CUDA detect:   candidate: {}/{}", dir.display(), name.to_string_lossy());
+                        eprintln!(
+                            "CUDA detect:   candidate: {}/{}",
+                            dir.display(),
+                            name.to_string_lossy()
+                        );
                     }
                 }
             }
@@ -174,7 +181,8 @@ fn find_cuda_directories() -> Vec<PathBuf> {
                     // Only add dirs that look CUDA-related (performance: don't
                     // scan every PATH directory on the system).
                     let lower = entry.to_lowercase();
-                    if lower.contains("cuda") || lower.contains("nvrtc") || lower.contains("nvidia") {
+                    if lower.contains("cuda") || lower.contains("nvrtc") || lower.contains("nvidia")
+                    {
                         dirs.push(p);
                     }
                 }
