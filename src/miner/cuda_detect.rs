@@ -27,12 +27,15 @@ pub fn ensure_cuda_libraries() -> Option<String> {
     // 2. Find CUDA toolkit directories
     let cuda_dirs = find_cuda_directories();
     eprintln!("CUDA detect: scanning {} directories...", cuda_dirs.len());
+    for dir in &cuda_dirs {
+        eprintln!("CUDA detect:   dir: {}", dir.display());
+    }
 
     // 3. Find NVRTC libraries, preferring the one matching the driver version.
     let mut all_found: Vec<(PathBuf, String, u32)> = Vec::new(); // (dir, version, major)
     for dir in &cuda_dirs {
         if let Some((ver, major)) = find_nvrtc_in_with_major(dir) {
-            eprintln!("CUDA detect:   found NVRTC {ver} in {}", dir.display());
+            eprintln!("CUDA detect:   found NVRTC {ver} (major={major}) in {}", dir.display());
             all_found.push((dir.clone(), ver, major));
         }
     }
@@ -45,17 +48,45 @@ pub fn ensure_cuda_libraries() -> Option<String> {
                 let b_match = (b.2 == dm) as u8;
                 b_match.cmp(&a_match).then(b.2.cmp(&a.2))
             });
+            let best = &all_found[0];
+            if best.2 != dm {
+                eprintln!(
+                    "CUDA detect: WARNING — toolkit NVRTC is v{}, but driver only supports CUDA {}.x",
+                    best.1, dm,
+                );
+                eprintln!(
+                    "CUDA detect: install CUDA {dm}.x toolkit, or update GPU driver to support CUDA {}",
+                    best.1,
+                );
+            }
         }
         let (dir, ver, _) = &all_found[0];
         eprintln!("CUDA detect: selected NVRTC {ver} from {}", dir.display());
         version = Some(ver.clone());
         prepend_library_path(dir);
-    } else if let Some(v) = driver_version {
-        eprintln!("CUDA detect: no NVRTC library found (driver has CUDA {v})");
-        version = Some(v);
+    } else if let Some(ref v) = driver_version {
+        eprintln!("CUDA detect: no NVRTC library found in any scanned directory");
+        // List nvrtc-related files in scanned dirs to help debug
+        for dir in &cuda_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_lower = name.to_string_lossy().to_lowercase();
+                    if name_lower.contains("nvrtc") {
+                        eprintln!("CUDA detect:   candidate: {}/{}", dir.display(), name.to_string_lossy());
+                    }
+                }
+            }
+        }
+        if let Some(dm) = driver_major {
+            eprintln!(
+                "CUDA detect: install CUDA {dm}.x toolkit from https://developer.nvidia.com/cuda-toolkit-archive"
+            );
+        }
+        version = Some(v.clone());
     } else {
         eprintln!(
-            "CUDA detect: no CUDA libraries found (searched {} dirs)",
+            "CUDA detect: no CUDA driver or libraries found (searched {} dirs)",
             cuda_dirs.len()
         );
     }
@@ -73,18 +104,24 @@ fn find_cuda_directories() -> Vec<PathBuf> {
         "CUDA_HOME",
         "CUDA_ROOT",
         "CUDA_TOOLKIT_ROOT_DIR",
+        "NVRTC_DLL",
     ] {
         if let Ok(val) = std::env::var(var) {
+            eprintln!("CUDA detect: {var}={val}");
             let p = PathBuf::from(&val);
             // CUDA Toolkit: bin/ has DLLs on Windows, lib64/ has .so on Linux
             let bin = p.join("bin");
             let lib64 = p.join("lib64");
+            let lib_x64 = p.join("lib").join("x64");
             let lib = p.join("lib").join("x86_64-linux-gnu");
             if bin.is_dir() {
                 dirs.push(bin);
             }
             if lib64.is_dir() {
                 dirs.push(lib64);
+            }
+            if lib_x64.is_dir() {
+                dirs.push(lib_x64);
             }
             if lib.is_dir() {
                 dirs.push(lib);
@@ -125,6 +162,22 @@ fn find_cuda_directories() -> Vec<PathBuf> {
             let sys32 = PathBuf::from(&sysroot).join("System32");
             if sys32.is_dir() {
                 dirs.push(sys32);
+            }
+        }
+
+        // Scan Windows PATH — CUDA installer adds toolkit bin/ to PATH.
+        // This catches installations at non-standard locations.
+        if let Ok(path) = std::env::var("PATH") {
+            for entry in path.split(';') {
+                let p = PathBuf::from(entry.trim());
+                if p.is_dir() && !dirs.contains(&p) {
+                    // Only add dirs that look CUDA-related (performance: don't
+                    // scan every PATH directory on the system).
+                    let lower = entry.to_lowercase();
+                    if lower.contains("cuda") || lower.contains("nvrtc") || lower.contains("nvidia") {
+                        dirs.push(p);
+                    }
+                }
             }
         }
     }
