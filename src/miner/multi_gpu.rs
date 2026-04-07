@@ -131,10 +131,9 @@ impl MinerBackend for MultiGpuMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        // Each GPU gets one full 1M-nonce work unit. Unlike the CUDA backend,
-        // wgpu cannot overlap dispatches on the same device (shared input/result
-        // buffers, single command queue). Pipeline depth = GPU count.
-        self.miners.len().max(1)
+        // Match CUDA: 4x GPU count. Each GPU processes multiple work units
+        // per cycle, keeping it busy longer and amortizing per-cycle overhead.
+        (self.miners.len() * 4).max(1)
     }
 
     async fn mine_work_units(
@@ -142,55 +141,55 @@ impl MinerBackend for MultiGpuMiner {
         midstates: &[Sha256Midstate],
         nonce_table: &NonceTable,
         difficulty: u32,
-        cancel: Option<CancelFlag>,
+        _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
-        // Single GPU or single midstate: direct call, zero overhead.
-        if self.miners.len() <= 1 || midstates.len() <= 1 {
-            let mut out = Vec::with_capacity(midstates.len());
-            for midstate in midstates {
-                out.push(
-                    self.mine_range(
-                        midstate,
-                        nonce_table,
-                        difficulty,
-                        0,
-                        NONCE_SPACE_SIZE,
-                        cancel.clone(),
-                    )
-                    .await?,
-                );
-            }
-            return Ok(out);
+        if midstates.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Multi-GPU: each GPU gets its own full 1M nonce work unit in parallel.
+        let gpu_count = self.miners.len();
+
+        // Batch per GPU: 1 task per GPU processes all its assigned work units
+        // sequentially (matching CUDA's mine_batch pattern). Reduces task
+        // spawn overhead and ensures each GPU stays busy.
         let mut tasks = JoinSet::new();
-        for (idx, midstate) in midstates.iter().enumerate() {
-            let miner = self.miners[idx % self.miners.len()].clone();
-            let midstate = midstate.clone();
+        for gpu_idx in 0..gpu_count {
+            let miner = self.miners[gpu_idx].clone();
+            let gpu_indices: Vec<usize> = (gpu_idx..midstates.len())
+                .step_by(gpu_count)
+                .collect();
+            let gpu_midstates: Vec<Sha256Midstate> = gpu_indices
+                .iter()
+                .map(|&i| midstates[i].clone())
+                .collect();
             let nonce_table = nonce_table.clone();
-            let cancel = cancel.clone();
             tasks.spawn(async move {
-                let chunk = miner
-                    .mine_range(
-                        &midstate,
-                        &nonce_table,
-                        difficulty,
-                        0,
-                        NONCE_SPACE_SIZE,
-                        cancel,
-                    )
-                    .await?;
-                Ok::<(usize, MiningChunkResult), anyhow::Error>((idx, chunk))
+                let mut results = Vec::with_capacity(gpu_midstates.len());
+                for (local_idx, midstate) in gpu_midstates.iter().enumerate() {
+                    let chunk = miner
+                        .mine_range(
+                            midstate,
+                            &nonce_table,
+                            difficulty,
+                            0,
+                            NONCE_SPACE_SIZE,
+                            None,
+                        )
+                        .await?;
+                    results.push((gpu_indices[local_idx], chunk));
+                }
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
             });
         }
 
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
         while let Some(joined) = tasks.join_next().await {
-            let (idx, chunk) =
+            let gpu_results =
                 joined.map_err(|e| anyhow::anyhow!("GPU task join error: {}", e))??;
-            ordered[idx] = Some(chunk);
+            for (idx, chunk) in gpu_results {
+                ordered[idx] = Some(chunk);
+            }
         }
         ordered
             .into_iter()
