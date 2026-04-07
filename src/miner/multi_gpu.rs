@@ -162,22 +162,10 @@ impl MinerBackend for MultiGpuMiner {
                 .iter()
                 .map(|&i| midstates[i].clone())
                 .collect();
-            let nonce_table = nonce_table.clone();
             tasks.spawn(async move {
-                let mut results = Vec::with_capacity(gpu_midstates.len());
-                for (local_idx, midstate) in gpu_midstates.iter().enumerate() {
-                    let chunk = miner
-                        .mine_range(
-                            midstate,
-                            &nonce_table,
-                            difficulty,
-                            0,
-                            NONCE_SPACE_SIZE,
-                            None,
-                        )
-                        .await?;
-                    results.push((gpu_indices[local_idx], chunk));
-                }
+                let chunks = miner.mine_batch(&gpu_midstates, difficulty).await?;
+                let results: Vec<(usize, MiningChunkResult)> =
+                    gpu_indices.into_iter().zip(chunks).collect();
                 Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
             });
         }

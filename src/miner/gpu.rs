@@ -242,16 +242,22 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     ok
 }
 
+/// Maximum work units batched per GPU in a single submit (matches CUDA MAX_BATCH).
+const MAX_BATCH: usize = 8;
+
+/// One slot = one concurrent dispatch with its own input/result/staging/bind_group.
+struct BatchSlot {
+    input_buffer: wgpu::Buffer,
+    result_buffer: wgpu::Buffer,
+    staging_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct GpuMiner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
-    input_buffer: wgpu::Buffer,
-    result_buffer: wgpu::Buffer,
-    /// Pre-allocated staging buffer for result readback — avoids GPU memory
-    /// allocation on every dispatch (the biggest wgpu overhead vs CUDA).
-    staging_buffer: wgpu::Buffer,
+    slots: Vec<BatchSlot>,
     nonce_words: Vec<u32>,
     adapter_name: String,
     adapter_backend: wgpu::Backend,
@@ -414,47 +420,56 @@ impl GpuMiner {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        // Pre-allocate persistent input and result buffers (reused every dispatch).
-        let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("input"),
-            size: (INPUT_WORDS * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("result"),
-            size: RESULT_BUFFER_SIZE,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: RESULT_BUFFER_SIZE,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("miner_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: nonce_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: input_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: result_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        // Pre-allocate MAX_BATCH slots (input + result + staging + bind_group).
+        // This enables mine_batch: encode N dispatches in one command buffer,
+        // submit once, sync once — matching CUDA's batched sync-once pattern.
+        let mut slots = Vec::with_capacity(MAX_BATCH);
+        for i in 0..MAX_BATCH {
+            let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("input_{i}")),
+                size: (INPUT_WORDS * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("result_{i}")),
+                size: RESULT_BUFFER_SIZE,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("staging_{i}")),
+                size: RESULT_BUFFER_SIZE,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("bind_{i}")),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: nonce_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: input_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: result_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            slots.push(BatchSlot {
+                input_buffer,
+                result_buffer,
+                staging_buffer,
+                bind_group,
+            });
+        }
 
         let limits = device.limits();
         let max_dispatch_nonces = limits
@@ -467,10 +482,7 @@ impl GpuMiner {
             device,
             queue,
             pipeline,
-            bind_group,
-            input_buffer,
-            result_buffer,
-            staging_buffer,
+            slots,
             nonce_words,
             adapter_name,
             adapter_backend: info.backend,
@@ -486,6 +498,129 @@ impl GpuMiner {
         self.max_dispatch_nonces
     }
 
+    /// Mine a batch of midstates with ONE submit + ONE sync (matches CUDA
+    /// mine_batch). All dispatches are encoded into a single command buffer.
+    pub async fn mine_batch(
+        &self,
+        midstates: &[Sha256Midstate],
+        difficulty: u32,
+    ) -> anyhow::Result<Vec<MiningChunkResult>> {
+        let batch_size = midstates.len().min(self.slots.len());
+        if batch_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: write inputs + clear results for all slots.
+        for (i, midstate) in midstates[..batch_size].iter().enumerate() {
+            let slot = &self.slots[i];
+            let mut input_data = [0u32; INPUT_WORDS];
+            input_data[..8].copy_from_slice(midstate.state_words());
+            input_data[8] = difficulty;
+            input_data[9] = midstate.prefix_len as u32;
+            input_data[10] = 0; // nonce_offset
+            input_data[11] = NONCE_SPACE_SIZE; // nonce_count
+            self.queue
+                .write_buffer(&slot.input_buffer, 0, bytemuck::cast_slice(&input_data));
+            self.queue
+                .write_buffer(&slot.result_buffer, 0, &[0u8; RESULT_WORDS * 4]);
+        }
+
+        // Phase 2: encode ALL dispatches + copies in ONE command buffer.
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("batch_encoder"),
+            });
+
+        let num_workgroups = NONCE_SPACE_SIZE.div_ceil(WORKGROUP_SIZE);
+        for i in 0..batch_size {
+            let slot = &self.slots[i];
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &slot.bind_group, &[]);
+                pass.dispatch_workgroups(num_workgroups, 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(
+                &slot.result_buffer,
+                0,
+                &slot.staging_buffer,
+                0,
+                RESULT_BUFFER_SIZE,
+            );
+        }
+
+        // Phase 3: ONE submit, ONE sync.
+        let submission = self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map all staging buffers for reading.
+        let mut receivers = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.slots[i]
+                .staging_buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+            receivers.push(rx);
+        }
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
+
+        // Phase 4: read all results.
+        let started = std::time::Instant::now();
+        let mut results = Vec::with_capacity(batch_size);
+        for (i, rx) in receivers.into_iter().enumerate() {
+            rx.await??;
+            let data = self.slots[i].staging_buffer.slice(..).get_mapped_range();
+            let words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
+            let best_zeros = words[0];
+            let nonce_id = words[1];
+            drop(data);
+            self.slots[i].staging_buffer.unmap();
+
+            let result = self.verify_result(&midstates[i], difficulty, best_zeros, nonce_id);
+            results.push(MiningChunkResult {
+                result,
+                attempted: NONCE_SPACE_SIZE as u64,
+                elapsed: started.elapsed(),
+            });
+        }
+        Ok(results)
+    }
+
+    fn verify_result(
+        &self,
+        midstate: &Sha256Midstate,
+        difficulty: u32,
+        best_zeros: u32,
+        nonce_id: u32,
+    ) -> Option<MiningResult> {
+        if best_zeros < difficulty || nonce_id >= NONCE_SPACE_SIZE {
+            return None;
+        }
+        let n1 = (nonce_id / 1000) as usize;
+        let n2 = (nonce_id % 1000) as usize;
+        let state_words =
+            midstate.finalize_words_from_nonce_u32(self.nonce_words[n1], self.nonce_words[n2]);
+        let achieved = leading_zero_bits_words(&state_words);
+        if achieved < difficulty {
+            return None;
+        }
+        Some(MiningResult {
+            nonce1_idx: n1 as u16,
+            nonce2_idx: n2 as u16,
+            hash: state_words_to_bytes(&state_words),
+            difficulty_achieved: achieved,
+        })
+    }
+
     async fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
@@ -493,7 +628,7 @@ impl GpuMiner {
         nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<Option<MiningResult>> {
-        // Write input params to pre-allocated buffer (no allocation).
+        let slot = &self.slots[0];
         let mut input_data = [0u32; INPUT_WORDS];
         input_data[..8].copy_from_slice(midstate.state_words());
         input_data[8] = difficulty;
@@ -501,41 +636,34 @@ impl GpuMiner {
         input_data[10] = nonce_offset;
         input_data[11] = nonce_count;
         self.queue
-            .write_buffer(&self.input_buffer, 0, bytemuck::cast_slice(&input_data));
-
-        // Clear result buffer.
+            .write_buffer(&slot.input_buffer, 0, bytemuck::cast_slice(&input_data));
         self.queue
-            .write_buffer(&self.result_buffer, 0, &[0u8; RESULT_WORDS * 4]);
+            .write_buffer(&slot.result_buffer, 0, &[0u8; RESULT_WORDS * 4]);
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("miner_encoder"),
             });
-
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("sha256_mine"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-
-            let num_workgroups = nonce_count.div_ceil(WORKGROUP_SIZE);
-            pass.dispatch_workgroups(num_workgroups, 1, 1);
+            pass.set_bind_group(0, &slot.bind_group, &[]);
+            pass.dispatch_workgroups(nonce_count.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
-
-        // Copy result to persistent staging buffer (no per-dispatch allocation).
         encoder.copy_buffer_to_buffer(
-            &self.result_buffer,
+            &slot.result_buffer,
             0,
-            &self.staging_buffer,
+            &slot.staging_buffer,
             0,
             RESULT_BUFFER_SIZE,
         );
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
-        let buffer_slice = self.staging_buffer.slice(..);
+        let buffer_slice = slot.staging_buffer.slice(..);
         let (tx, rx) = tokio::sync::oneshot::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
@@ -547,39 +675,13 @@ impl GpuMiner {
         rx.await??;
 
         let data = buffer_slice.get_mapped_range();
-        let result_words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
-
-        let best_zeros = result_words[0];
-        let nonce_id = result_words[1];
-
+        let words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
+        let best_zeros = words[0];
+        let nonce_id = words[1];
         drop(data);
-        self.staging_buffer.unmap();
+        slot.staging_buffer.unmap();
 
-        // Host-side re-verification (matches CUDA's best_result_from_packed):
-        // re-compute hash from the nonce to guarantee correctness.
-        if best_zeros < difficulty {
-            return Ok(None);
-        }
-        if nonce_id >= NONCE_SPACE_SIZE {
-            return Ok(None);
-        }
-
-        let n1 = (nonce_id / 1000) as usize;
-        let n2 = (nonce_id % 1000) as usize;
-        let state_words =
-            midstate.finalize_words_from_nonce_u32(self.nonce_words[n1], self.nonce_words[n2]);
-        let achieved = leading_zero_bits_words(&state_words);
-
-        if achieved < difficulty {
-            return Ok(None);
-        }
-
-        Ok(Some(MiningResult {
-            nonce1_idx: n1 as u16,
-            nonce2_idx: n2 as u16,
-            hash: state_words_to_bytes(&state_words),
-            difficulty_achieved: achieved,
-        }))
+        Ok(self.verify_result(midstate, difficulty, best_zeros, nonce_id))
     }
 }
 
