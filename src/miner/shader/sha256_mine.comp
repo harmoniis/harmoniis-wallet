@@ -1,0 +1,171 @@
+// SHA-256 mining compute shader — GLSL 450 for Vulkan SPIR-V passthrough.
+//
+// Compiled offline with glslangValidator + spirv-opt to get:
+// - [[unroll]] on the 64-round loop (naga can't unroll)
+// - Constant folding and dead code elimination
+// - Straight-line code for optimal GPU register allocation
+//
+// Bindings match the WGSL version exactly:
+//   binding 0: nonce_table — 1000 × uint
+//   binding 1: input       — 12 × uint
+//   binding 2: output      — 3 × uint (atomicMax)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer NonceTable {
+    uint nonce_table[1000];
+};
+
+layout(set = 0, binding = 1) readonly buffer Input {
+    uint input_data[12];
+};
+
+layout(set = 0, binding = 2) buffer Output {
+    uint output_data[3];
+};
+
+const uint K[64] = uint[64](
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+);
+
+uint rotr(uint x, uint n) {
+    return (x >> n) | (x << (32u - n));
+}
+
+uint ch(uint x, uint y, uint z) {
+    return (x & y) ^ (~x & z);
+}
+
+uint maj(uint x, uint y, uint z) {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+uint ep0(uint x) {
+    return rotr(x, 2u) ^ rotr(x, 13u) ^ rotr(x, 22u);
+}
+
+uint ep1(uint x) {
+    return rotr(x, 6u) ^ rotr(x, 11u) ^ rotr(x, 25u);
+}
+
+uint sig0(uint x) {
+    return rotr(x, 7u) ^ rotr(x, 18u) ^ (x >> 3u);
+}
+
+uint sig1(uint x) {
+    return rotr(x, 17u) ^ rotr(x, 19u) ^ (x >> 10u);
+}
+
+void main() {
+    uint difficulty   = input_data[8];
+    uint prefix_len   = input_data[9];
+    uint nonce_offset = input_data[10];
+    uint nonce_count  = input_data[11];
+
+    if (gl_GlobalInvocationID.x >= nonce_count) {
+        return;
+    }
+
+    uint thread_id = nonce_offset + gl_GlobalInvocationID.x;
+    if (thread_id >= 1000000u) {
+        return;
+    }
+
+    uint nonce1_idx = thread_id / 1000u;
+    uint nonce2_idx = thread_id % 1000u;
+
+    // Load midstate
+    uint s0 = input_data[0]; uint s1 = input_data[1];
+    uint s2 = input_data[2]; uint s3 = input_data[3];
+    uint s4 = input_data[4]; uint s5 = input_data[5];
+    uint s6 = input_data[6]; uint s7 = input_data[7];
+
+    // Rolling 16-word message schedule
+    uint w[16];
+    w[0]  = nonce_table[nonce1_idx];
+    w[1]  = nonce_table[nonce2_idx];
+    w[2]  = 0x66513d3du;
+    w[3]  = 0x80000000u;
+    w[4]  = 0u; w[5]  = 0u; w[6]  = 0u; w[7]  = 0u;
+    w[8]  = 0u; w[9]  = 0u; w[10] = 0u; w[11] = 0u;
+    w[12] = 0u; w[13] = 0u; w[14] = 0u;
+    w[15] = (prefix_len + 12u) * 8u;
+
+    uint a = s0; uint b = s1; uint c = s2; uint d = s3;
+    uint e = s4; uint f = s5; uint g = s6; uint h = s7;
+
+    // 64 SHA-256 compression rounds — [[unroll]] tells glslang to emit
+    // the SPIR-V Unroll loop control, and spirv-opt fully unrolls it.
+    [[unroll]]
+    for (uint i = 0u; i < 64u; i++) {
+        uint wi;
+        if (i < 16u) {
+            wi = w[i];
+        } else {
+            uint s0v = sig0(w[(i + 1u) & 15u]);
+            uint s1v = sig1(w[(i + 14u) & 15u]);
+            wi = w[i & 15u] + s0v + s1v + w[(i + 9u) & 15u];
+            w[i & 15u] = wi;
+        }
+
+        uint t1 = h + ep1(e) + ch(e, f, g) + K[i] + wi;
+        uint t2 = ep0(a) + maj(a, b, c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+
+    // Final hash
+    uint h0 = s0 + a;
+
+    // Quick reject on first word
+    if (h0 != 0u) {
+        uint lz = findMSB(h0);
+        lz = (lz == 0xFFFFFFFFu) ? 32u : (31u - lz);  // findMSB → leading zeros
+        if (lz < difficulty) {
+            return;
+        }
+        uint prev = atomicMax(output_data[0], lz);
+        if (lz > prev) {
+            atomicExchange(output_data[1], thread_id);
+        }
+        return;
+    }
+
+    // h0 == 0: at least 32 leading zero bits
+    uint zeros = 32u;
+    uint tail[7] = uint[7](s1+b, s2+c, s3+d, s4+e, s5+f, s6+g, s7+h);
+    for (uint i = 0u; i < 7u; i++) {
+        if (tail[i] == 0u) {
+            zeros += 32u;
+        } else {
+            uint msb = findMSB(tail[i]);
+            zeros += (msb == 0xFFFFFFFFu) ? 32u : (31u - msb);
+            break;
+        }
+    }
+
+    if (zeros >= difficulty) {
+        uint prev = atomicMax(output_data[0], zeros);
+        if (zeros > prev) {
+            atomicExchange(output_data[1], thread_id);
+        }
+    }
+}

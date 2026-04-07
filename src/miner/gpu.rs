@@ -125,7 +125,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
             },
         )
     })?;
-    let _info = adapter.get_info();
+    let probe_info = adapter.get_info();
     // Probe runs in a subprocess — keep quiet.
     let (device, _queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
@@ -137,10 +137,27 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("probe_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
-    });
+    let shader = if probe_info.backend == wgpu::Backend::Vulkan {
+        let spirv_bytes: &[u8] = include_bytes!("shader/sha256_mine_opt.spv");
+        let spirv_words: Vec<u32> = spirv_bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        unsafe {
+            device.create_shader_module_passthrough(
+                wgpu::ShaderModuleDescriptorPassthrough {
+                    label: Some("probe_shader_spirv"),
+                    spirv: Some(std::borrow::Cow::Owned(spirv_words)),
+                    ..Default::default()
+                },
+            )
+        }
+    } else {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("probe_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
+        })
+    };
 
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
@@ -361,11 +378,32 @@ impl GpuMiner {
             }
         };
 
-        let shader_source = include_str!("shader/sha256_mine.wgsl");
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sha256_mine"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
+        // On Vulkan: load pre-compiled, unrolled SPIR-V (bypasses naga).
+        // On Metal/DX12: fall back to WGSL (naga translates to MSL/HLSL).
+        let shader_module = if info.backend == wgpu::Backend::Vulkan {
+            let spirv_bytes: &[u8] = include_bytes!("shader/sha256_mine_opt.spv");
+            let spirv_words: Vec<u32> = spirv_bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            eprintln!("GPU: using optimized SPIR-V shader (unrolled, {} words)", spirv_words.len());
+            unsafe {
+                device.create_shader_module_passthrough(
+                    wgpu::ShaderModuleDescriptorPassthrough {
+                        label: Some("sha256_mine_spirv"),
+                        spirv: Some(std::borrow::Cow::Owned(spirv_words)),
+                        ..Default::default()
+                    },
+                )
+            }
+        } else {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("sha256_mine"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shader/sha256_mine.wgsl").into(),
+                ),
+            })
+        };
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("miner_bind_group_layout"),

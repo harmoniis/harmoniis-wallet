@@ -100,7 +100,7 @@ actix       = { version = "0.13", optional = true }
 actix-rt    = { version = "2", optional = true }
 
 # Mining
-wgpu        = { version = "28", optional = true }
+wgpu        = { version = "28", optional = true, features = ["spirv"] }
 rayon       = "1.10"
 base64      = "0.22"
 num-bigint  = "0.4"
