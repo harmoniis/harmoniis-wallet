@@ -402,6 +402,16 @@ pub async fn select_backend_for_devices(
 ) -> anyhow::Result<Box<dyn MinerBackend>> {
     let all = enumerate_all_devices().await;
 
+    // Enumerate adapters ONCE (same fix as init_wgpu_miners_from_devices).
+    #[cfg(feature = "gpu")]
+    let mut available_adapters = {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: gpu::COMPUTE_BACKENDS,
+            ..Default::default()
+        });
+        instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await
+    };
+
     let mut backends: Vec<Arc<dyn MinerBackend>> = Vec::new();
 
     for &id in device_ids {
@@ -418,19 +428,25 @@ pub async fn select_backend_for_devices(
             }
             #[cfg(feature = "gpu")]
             DeviceKind::Wgpu { adapters } => {
-                // Try each adapter for this physical GPU until one works.
-                // Order: Vulkan first, then DX12, then Metal (as enumerated).
                 let mut result: Option<(Arc<dyn MinerBackend>, String)> = None;
                 for identity in adapters {
                     if !gpu::subprocess_probe(identity) {
                         continue;
                     }
-                    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                        backends: gpu::COMPUTE_BACKENDS,
-                        ..Default::default()
+                    // Find adapter from single enumeration (no re-enumerate).
+                    let pos = available_adapters.iter().position(|a| {
+                        let info = a.get_info();
+                        let bm = format!("{:?}", info.backend).to_lowercase() == identity.backend;
+                        if !identity.pci_bus.is_empty() {
+                            info.device_pci_bus_id.trim() == identity.pci_bus && bm
+                        } else {
+                            info.vendor == identity.vendor
+                                && info.device == identity.device
+                                && bm
+                        }
                     });
-                    let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-                    if let Some(adapter) = identity.find_matching(found) {
+                    if let Some(idx) = pos {
+                        let adapter = available_adapters.swap_remove(idx);
                         if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
                             result = Some((Arc::new(m) as _, identity.backend.clone()));
                             break;
@@ -466,10 +482,8 @@ pub async fn select_backend_for_devices(
 
 /// Initialize wgpu GPU miners from the unified device list.
 ///
-/// Uses `enumerate_all_devices()` to discover physical GPUs (PCI bus ID
-/// dedup), then probes and initializes each wgpu device.  This is the single
-/// source of truth for wgpu adapter discovery — `multi_gpu.rs` no longer has
-/// its own enumeration logic.
+/// Discovers physical GPUs via PCI bus ID, probes each, benchmarks all
+/// backends (Vulkan vs DX12), and picks the fastest per device.
 #[cfg(feature = "gpu")]
 pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     let devices = enumerate_all_devices().await;
