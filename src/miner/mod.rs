@@ -332,11 +332,9 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             ..Default::default()
         });
         let adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+        eprintln!("GPU: wgpu returned {} adapter(s) from enumerate_adapters", adapters.len());
 
         // Group adapters by physical device using PCI bus ID as the key.
-        // PCI bus ID (e.g. "0000:01:00.0") is unique per PCIe slot —
-        // provided by VK_EXT_pci_bus_info on all modern Vulkan drivers.
-        // On platforms without PCI (Metal), fall back to adapter name.
         let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
             BTreeMap::new();
 
@@ -350,9 +348,16 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             let phys_key = if !pci_bus.is_empty() {
                 format!("pci:{pci_bus}")
             } else {
-                // Metal/non-PCI: use name as key (no identical-card issue on Mac).
                 format!("name:{}", info.name)
             };
+
+            eprintln!(
+                "GPU:   adapter: {} ({:?}) pci_bus={} → key={}",
+                info.name,
+                info.backend,
+                if pci_bus.is_empty() { "(none)" } else { &pci_bus },
+                phys_key,
+            );
 
             device_groups
                 .entry(phys_key)
@@ -501,7 +506,18 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                         if is_better {
                             best_miner = Some((miner, identity.backend.clone(), hps));
                         }
+                    } else {
+                        eprintln!(
+                            "GPU[{}]: {} ({}) — try_from_adapter failed",
+                            dev.id, dev.label, identity.backend,
+                        );
                     }
+                } else {
+                    eprintln!(
+                        "GPU[{}]: {} ({}) — find_matching failed (pci_bus={})",
+                        dev.id, dev.label, identity.backend,
+                        if identity.pci_bus.is_empty() { "(none)" } else { &identity.pci_bus },
+                    );
                 }
             }
             if let Some((miner, backend, hps)) = best_miner {
