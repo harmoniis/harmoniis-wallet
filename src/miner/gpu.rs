@@ -38,15 +38,21 @@ pub const COMPUTE_BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN
     .union(wgpu::Backends::DX12)
     .union(wgpu::Backends::METAL);
 
-/// Identity triple that uniquely identifies a wgpu adapter across processes.
+/// Identity that uniquely identifies a wgpu adapter across processes.
 ///
-/// Unlike enumeration indices, `(vendor, device, backend)` is deterministic
-/// regardless of enumeration order — safe for subprocess probing.
+/// Uses PCI bus ID (e.g. "0000:01:00.0") as the primary physical device
+/// key — unique per PCIe slot, provided by VK_EXT_pci_bus_info on all
+/// modern Vulkan drivers (RADV, NVIDIA, ANV since 2018+).
+///
+/// Falls back to (vendor, device, backend) only on platforms without PCI
+/// (Metal/macOS, mobile).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AdapterIdentity {
     pub vendor: u32,
     pub device: u32,
     pub backend: String,
+    /// PCI bus address (e.g. "0000:01:00.0"). Empty on Metal/non-PCI.
+    pub pci_bus: String,
 }
 
 impl AdapterIdentity {
@@ -56,16 +62,29 @@ impl AdapterIdentity {
             vendor: info.vendor,
             device: info.device,
             backend: format!("{:?}", info.backend).to_lowercase(),
+            pci_bus: info.device_pci_bus_id.trim().to_string(),
         }
     }
 
     /// Find the matching adapter from a list by identity.
+    ///
+    /// When PCI bus ID is available, matches on it (distinguishes identical
+    /// cards in different PCIe slots). Falls back to vendor+device+backend
+    /// on platforms without PCI bus info (Metal).
     pub fn find_matching(&self, adapters: Vec<wgpu::Adapter>) -> Option<wgpu::Adapter> {
         adapters.into_iter().find(|a| {
             let info = a.get_info();
-            info.vendor == self.vendor
-                && info.device == self.device
-                && format!("{:?}", info.backend).to_lowercase() == self.backend
+            let backend_match =
+                format!("{:?}", info.backend).to_lowercase() == self.backend;
+            if !self.pci_bus.is_empty() {
+                // PCI bus ID is the definitive physical device key.
+                info.device_pci_bus_id.trim() == self.pci_bus && backend_match
+            } else {
+                // Fallback for Metal/non-PCI platforms.
+                info.vendor == self.vendor
+                    && info.device == self.device
+                    && backend_match
+            }
         })
     }
 
@@ -95,10 +114,11 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     let adapters = instance.enumerate_adapters(COMPUTE_BACKENDS).await;
     let adapter = identity.find_matching(adapters).ok_or_else(|| {
         anyhow::anyhow!(
-            "no adapter matches vendor={} device={} backend={}",
+            "no adapter matches vendor={} device={} backend={} pci_bus={}",
             identity.vendor,
             identity.device,
             identity.backend,
+            if identity.pci_bus.is_empty() { "(any)" } else { &identity.pci_bus },
         )
     })?;
     let _info = adapter.get_info();
@@ -184,14 +204,18 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
             return false;
         }
     };
-    let status = std::process::Command::new(exe)
-        .arg("gpu-probe")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("gpu-probe")
         .arg("--vendor")
         .arg(identity.vendor.to_string())
         .arg("--device")
         .arg(identity.device.to_string())
         .arg("--backend")
-        .arg(&identity.backend)
+        .arg(&identity.backend);
+    if !identity.pci_bus.is_empty() {
+        cmd.arg("--pci-bus").arg(&identity.pci_bus);
+    }
+    let status = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -638,31 +662,34 @@ mod tests {
             vendor: 4098,
             device: 26591,
             backend: "vulkan".into(),
+            pci_bus: "0000:01:00.0".into(),
         };
         let dx12 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
             backend: "dx12".into(),
+            pci_bus: "0000:01:00.0".into(),
         };
         assert_eq!(vulkan.device_key(), dx12.device_key());
     }
 
     #[test]
     fn device_key_same_for_rebinned_cards() {
-        // RX 590 and RX 580 share PCI device ID 0x67DF (26591).
-        // device_key() treats them as the same model — which is correct for
-        // PCI-level identification.  Multi-GPU dedup uses adapter NAME instead
-        // to distinguish physically separate cards of the same model.
         let rx590 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
             backend: "vulkan".into(),
+            pci_bus: "0000:01:00.0".into(),
         };
         let rx580 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
             backend: "vulkan".into(),
+            pci_bus: "0000:02:00.0".into(),
         };
+        // device_key uses vendor:device, so same model = same key.
+        // Physical device distinction comes from PCI bus ID in the
+        // enumerate_all_devices grouping, not from device_key.
         assert_eq!(rx590.device_key(), rx580.device_key());
     }
 
@@ -672,6 +699,7 @@ mod tests {
             vendor: 0,
             device: 0,
             backend: "metal".into(),
+            pci_bus: String::new(),
         };
         assert!(id.device_key().starts_with("unknown:"));
     }

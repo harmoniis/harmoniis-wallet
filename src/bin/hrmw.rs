@@ -251,6 +251,9 @@ enum Cmd {
         /// Backend name: vulkan, dx12, metal
         #[arg(long)]
         backend: String,
+        /// PCI bus address (e.g. "0000:01:00.0") — identifies the exact physical GPU
+        #[arg(long, default_value = "")]
+        pci_bus: String,
     },
 }
 
@@ -4278,6 +4281,7 @@ async fn main() -> anyhow::Result<()> {
             vendor,
             device,
             backend,
+            pci_bus,
         } => {
             #[cfg(feature = "gpu")]
             {
@@ -4285,6 +4289,7 @@ async fn main() -> anyhow::Result<()> {
                     vendor,
                     device,
                     backend,
+                    pci_bus,
                 };
                 harmoniis_wallet::miner::gpu::probe_adapter(&identity).await?;
             }
