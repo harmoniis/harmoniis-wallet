@@ -74,16 +74,13 @@ impl AdapterIdentity {
     pub fn find_matching(&self, adapters: Vec<wgpu::Adapter>) -> Option<wgpu::Adapter> {
         adapters.into_iter().find(|a| {
             let info = a.get_info();
-            let backend_match =
-                format!("{:?}", info.backend).to_lowercase() == self.backend;
+            let backend_match = format!("{:?}", info.backend).to_lowercase() == self.backend;
             if !self.pci_bus.is_empty() {
                 // PCI bus ID is the definitive physical device key.
                 info.device_pci_bus_id.trim() == self.pci_bus && backend_match
             } else {
                 // Fallback for Metal/non-PCI platforms.
-                info.vendor == self.vendor
-                    && info.device == self.device
-                    && backend_match
+                info.vendor == self.vendor && info.device == self.device && backend_match
             }
         })
     }
@@ -121,7 +118,11 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
             identity.vendor,
             identity.device,
             identity.backend,
-            if identity.pci_bus.is_empty() { "(any)" } else { &identity.pci_bus },
+            if identity.pci_bus.is_empty() {
+                "(any)"
+            } else {
+                &identity.pci_bus
+            },
         )
     })?;
     let _info = adapter.get_info();
