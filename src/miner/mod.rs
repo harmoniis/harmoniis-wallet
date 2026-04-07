@@ -466,6 +466,28 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
         eprintln!("GPU: {wgpu_count} physical device(s) found, probing...");
     }
 
+    // Enumerate adapters ONCE and reuse. Creating a new Instance per device
+    // and re-enumerating caused adapters to be in a different state after
+    // a previous device already claimed one — the root cause of "detected
+    // N but only 1 loaded".
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: gpu::COMPUTE_BACKENDS,
+        ..Default::default()
+    });
+    let all_adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+    eprintln!("GPU: {} adapter(s) available for init", all_adapters.len());
+
+    // Index adapters by PCI bus + backend for O(1) lookup.
+    let mut adapter_map: std::collections::HashMap<(String, String), wgpu::Adapter> =
+        std::collections::HashMap::new();
+    for adapter in all_adapters {
+        let info = adapter.get_info();
+        let pci = info.device_pci_bus_id.trim().to_string();
+        let backend = format!("{:?}", info.backend).to_lowercase();
+        let key = (pci, backend);
+        adapter_map.entry(key).or_insert(adapter);
+    }
+
     let mut miners = Vec::new();
 
     for dev in &devices {
@@ -478,19 +500,14 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                 adapters.len(),
             );
             // Try ALL adapter backends, benchmark each, pick the fastest.
-            // This fixes the DX12→Vulkan regression where Vulkan was 4x slower
-            // on NVIDIA Pascal but got picked first because its probe passed.
             let mut best_miner: Option<(gpu::GpuMiner, String, f64)> = None;
             for identity in adapters {
                 if !gpu::subprocess_probe(identity) {
                     continue;
                 }
-                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                    backends: gpu::COMPUTE_BACKENDS,
-                    ..Default::default()
-                });
-                let found = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-                if let Some(adapter) = identity.find_matching(found) {
+                // Look up adapter from the single enumeration (not re-enumerate).
+                let key = (identity.pci_bus.clone(), identity.backend.clone());
+                if let Some(adapter) = adapter_map.remove(&key) {
                     if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
                         let hps = miner.benchmark().await.unwrap_or(0.0);
                         eprintln!(
@@ -508,13 +525,13 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                         }
                     } else {
                         eprintln!(
-                            "GPU[{}]: {} ({}) — try_from_adapter failed",
+                            "GPU[{}]: {} ({}) — device init failed",
                             dev.id, dev.label, identity.backend,
                         );
                     }
                 } else {
                     eprintln!(
-                        "GPU[{}]: {} ({}) — find_matching failed (pci_bus={})",
+                        "GPU[{}]: {} ({}) — adapter not found (pci_bus={})",
                         dev.id, dev.label, identity.backend,
                         if identity.pci_bus.is_empty() { "(none)" } else { &identity.pci_bus },
                     );
