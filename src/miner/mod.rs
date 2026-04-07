@@ -293,9 +293,10 @@ pub struct DeviceInfo {
 
 /// Enumerate all physical GPU devices across all backends.
 ///
-/// Each physical GPU gets exactly one device ID, regardless of how many
-/// adapters (Vulkan, DX12, Metal) it exposes.  Adapters are grouped by
-/// GPU name and stored internally for automatic fallback.
+/// Each physical GPU gets exactly one device ID. Adapters are grouped
+/// by PCI bus ID (unique per PCIe slot). Multiple backends (Vulkan +
+/// DX12) for the same physical GPU are stored together for automatic
+/// fallback and benchmark-based selection.
 ///
 /// Order: CUDA devices first, then wgpu devices.
 pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
@@ -321,18 +322,7 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
         }
     }
 
-    // 2. wgpu — group adapters by physical device.
-    //
-    //    Primary key: `device_pci_bus_id` (e.g. "0000:01:00.0") — unique per
-    //    PCIe slot, even for identical cards.  Available on Vulkan via
-    //    VkPhysicalDevicePCIBusInfoPropertiesEXT.
-    //
-    //    Fallback (DX12/Metal or when bus ID is empty): `(vendor, device, name)`
-    //    tuple.  This correctly groups Vulkan+DX12 adapters for the same card
-    //    but cannot distinguish two identical cards (rare edge case).
-    //
-    //    Each physical device gets one entry with all its adapters stored for
-    //    automatic fallback during init.
+    // 2. wgpu — group adapters by PCI bus ID.
     #[cfg(feature = "gpu")]
     {
         use std::collections::BTreeMap;
@@ -343,73 +333,35 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
         });
         let adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
 
-        // Pass 1: collect all adapter info and PCI bus IDs.
-        struct AdapterEntry {
-            name: String,
-            vendor: u32,
-            device: u32,
-            pci_bus: String,
-            identity: gpu::AdapterIdentity,
-        }
-        let mut entries = Vec::new();
+        // Group adapters by physical device using PCI bus ID as the key.
+        // PCI bus ID (e.g. "0000:01:00.0") is unique per PCIe slot —
+        // provided by VK_EXT_pci_bus_info on all modern Vulkan drivers.
+        // On platforms without PCI (Metal), fall back to adapter name.
+        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
+            BTreeMap::new();
+
         for adapter in adapters {
             let info = adapter.get_info();
             if info.device_type == wgpu::DeviceType::Cpu {
                 continue;
             }
-            entries.push(AdapterEntry {
-                name: info.name.clone(),
-                vendor: info.vendor,
-                device: info.device,
-                pci_bus: info.device_pci_bus_id.trim().to_string(),
-                identity: gpu::AdapterIdentity::from_info(&info),
-            });
-        }
 
-        // Build a lookup: (vendor, device, name) → PCI bus ID from any
-        // adapter that reports one (Vulkan usually does, DX12 often doesn't).
-        let mut known_bus_ids: std::collections::HashMap<(u32, u32, String), String> =
-            std::collections::HashMap::new();
-        for e in &entries {
-            if !e.pci_bus.is_empty() {
-                known_bus_ids
-                    .entry((e.vendor, e.device, e.name.clone()))
-                    .or_insert_with(|| e.pci_bus.clone());
-            }
-        }
-
-        // Pass 2: group by physical device key.
-        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
-            BTreeMap::new();
-        for e in entries {
-            // Use PCI bus ID if this adapter has one, or borrow from another
-            // adapter for the same (vendor, device, name) that does.
-            let bus = if !e.pci_bus.is_empty() {
-                e.pci_bus.clone()
+            let pci_bus = info.device_pci_bus_id.trim().to_string();
+            let phys_key = if !pci_bus.is_empty() {
+                format!("pci:{pci_bus}")
             } else {
-                known_bus_ids
-                    .get(&(e.vendor, e.device, e.name.clone()))
-                    .cloned()
-                    .unwrap_or_default()
-            };
-
-            let phys_key = if !bus.is_empty() {
-                format!("pci:{bus}")
-            } else {
-                format!("dev:{}:{}:{}", e.vendor, e.device, e.name)
+                // Metal/non-PCI: use name as key (no identical-card issue on Mac).
+                format!("name:{}", info.name)
             };
 
             device_groups
                 .entry(phys_key)
-                .or_insert_with(|| (e.name.clone(), Vec::new()))
+                .or_insert_with(|| (info.name.clone(), Vec::new()))
                 .1
-                .push(e.identity);
+                .push(gpu::AdapterIdentity::from_info(&info));
         }
 
         for (_phys_key, (name, adapters_for_device)) in device_groups {
-            if adapters_for_device.is_empty() {
-                continue;
-            }
             devices.push(DeviceInfo {
                 id: next_id,
                 label: name,

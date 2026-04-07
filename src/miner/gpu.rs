@@ -88,12 +88,15 @@ impl AdapterIdentity {
         })
     }
 
-    /// Dedup key for the physical device (ignores backend).
+    /// Physical device key (ignores backend).
     ///
     /// Two backends (Vulkan + DX12) for the same GPU produce the same key.
+    /// Uses PCI bus ID when available, falls back to vendor:device.
     pub fn device_key(&self) -> String {
-        if self.vendor != 0 || self.device != 0 {
-            format!("pci:{}:{}", self.vendor, self.device)
+        if !self.pci_bus.is_empty() {
+            format!("pci:{}", self.pci_bus)
+        } else if self.vendor != 0 || self.device != 0 {
+            format!("dev:{}:{}", self.vendor, self.device)
         } else {
             format!("unknown:{}", self.backend)
         }
@@ -674,27 +677,43 @@ mod tests {
     }
 
     #[test]
-    fn device_key_same_for_rebinned_cards() {
-        let rx590 = AdapterIdentity {
+    fn device_key_distinguishes_identical_cards_by_pci_bus() {
+        let gpu1 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
             backend: "vulkan".into(),
             pci_bus: "0000:01:00.0".into(),
         };
-        let rx580 = AdapterIdentity {
+        let gpu2 = AdapterIdentity {
             vendor: 4098,
             device: 26591,
             backend: "vulkan".into(),
-            pci_bus: "0000:02:00.0".into(),
+            pci_bus: "0000:41:00.0".into(),
         };
-        // device_key uses vendor:device, so same model = same key.
-        // Physical device distinction comes from PCI bus ID in the
-        // enumerate_all_devices grouping, not from device_key.
-        assert_eq!(rx590.device_key(), rx580.device_key());
+        // Same model, different PCIe slots → different device keys.
+        assert_ne!(gpu1.device_key(), gpu2.device_key());
     }
 
     #[test]
-    fn device_key_fallback_when_no_pci_ids() {
+    fn device_key_same_card_different_backends() {
+        let vulkan = AdapterIdentity {
+            vendor: 4098,
+            device: 26591,
+            backend: "vulkan".into(),
+            pci_bus: "0000:01:00.0".into(),
+        };
+        let dx12 = AdapterIdentity {
+            vendor: 4098,
+            device: 26591,
+            backend: "dx12".into(),
+            pci_bus: "0000:01:00.0".into(),
+        };
+        // Same PCI bus → same device key (regardless of backend).
+        assert_eq!(vulkan.device_key(), dx12.device_key());
+    }
+
+    #[test]
+    fn device_key_fallback_when_no_pci_bus() {
         let id = AdapterIdentity {
             vendor: 0,
             device: 0,
@@ -702,32 +721,5 @@ mod tests {
             pci_bus: String::new(),
         };
         assert!(id.device_key().starts_with("unknown:"));
-    }
-
-    #[test]
-    fn name_dedup_allows_different_cards_with_same_device_id() {
-        // RX 590 + RX 580 share PCI device ID 0x67DF but have different names.
-        // Multi-GPU dedup by adapter name (not PCI ID) allows both.
-        let adapter_names = vec![
-            "Radeon RX 590 Series", // Vulkan
-            "Radeon RX 580 Series", // Vulkan
-            "Radeon RX 590 Series", // DX12 — same name as Vulkan, should dedup
-            "Radeon RX 580 Series", // DX12 — same name as Vulkan, should dedup
-            "Microsoft Basic Render Driver",
-        ];
-
-        let mut used_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut selected = Vec::new();
-        for name in &adapter_names {
-            if !used_names.contains(name) {
-                used_names.insert(name);
-                selected.push(*name);
-            }
-        }
-
-        // RX 590, RX 580, and Basic Render Driver = 3 unique
-        assert_eq!(selected.len(), 3);
-        assert!(selected.contains(&"Radeon RX 590 Series"));
-        assert!(selected.contains(&"Radeon RX 580 Series"));
     }
 }
