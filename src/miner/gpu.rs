@@ -144,13 +144,11 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         unsafe {
-            device.create_shader_module_passthrough(
-                wgpu::ShaderModuleDescriptorPassthrough {
-                    label: Some("probe_shader_spirv"),
-                    spirv: Some(std::borrow::Cow::Owned(spirv_words)),
-                    ..Default::default()
-                },
-            )
+            device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                label: Some("probe_shader_spirv"),
+                spirv: Some(std::borrow::Cow::Owned(spirv_words)),
+                ..Default::default()
+            })
         }
     } else {
         device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -386,22 +384,21 @@ impl GpuMiner {
                 .chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
-            eprintln!("GPU: using optimized SPIR-V shader (unrolled, {} words)", spirv_words.len());
+            eprintln!(
+                "GPU: using optimized SPIR-V shader (unrolled, {} words)",
+                spirv_words.len()
+            );
             unsafe {
-                device.create_shader_module_passthrough(
-                    wgpu::ShaderModuleDescriptorPassthrough {
-                        label: Some("sha256_mine_spirv"),
-                        spirv: Some(std::borrow::Cow::Owned(spirv_words)),
-                        ..Default::default()
-                    },
-                )
+                device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                    label: Some("sha256_mine_spirv"),
+                    spirv: Some(std::borrow::Cow::Owned(spirv_words)),
+                    ..Default::default()
+                })
             }
         } else {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("sha256_mine"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shader/sha256_mine.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
             })
         };
 

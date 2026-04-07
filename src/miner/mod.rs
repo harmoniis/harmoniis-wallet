@@ -440,9 +440,7 @@ pub async fn select_backend_for_devices(
                         if !identity.pci_bus.is_empty() {
                             info.device_pci_bus_id.trim() == identity.pci_bus && bm
                         } else {
-                            info.vendor == identity.vendor
-                                && info.device == identity.device
-                                && bm
+                            info.vendor == identity.vendor && info.device == identity.device && bm
                         }
                     });
                     if let Some(idx) = pos {

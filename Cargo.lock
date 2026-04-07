@@ -2643,6 +2643,7 @@ dependencies = [
  "log",
  "num-traits",
  "once_cell",
+ "petgraph",
  "rustc-hash",
  "spirv",
  "thiserror 2.0.18",
