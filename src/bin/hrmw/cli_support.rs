@@ -1049,7 +1049,7 @@ pub fn next_contract_id() -> String {
 /// Returns a guard that restores stdout on drop.
 #[cfg(unix)]
 fn suppress_stdout() -> StdoutGuard {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::io::AsRawFd;
     let saved_fd = unsafe { libc::dup(1) };
     if let Ok(devnull) = std::fs::File::open("/dev/null") {
         unsafe { libc::dup2(devnull.as_raw_fd(), 1) };

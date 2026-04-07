@@ -4178,7 +4178,7 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         // Destroy instances immediately (stops charges).
-                        if let Some(n) = instance {
+                        if let Some(_n) = instance {
                             let state = &targets[0];
                             provision::destroy(state).await?;
                         } else {

@@ -139,7 +139,7 @@ impl MinerBackend for MultiGpuMiner {
     async fn mine_work_units(
         &self,
         midstates: &[Sha256Midstate],
-        nonce_table: &NonceTable,
+        _nonce_table: &NonceTable,
         difficulty: u32,
         _cancel: Option<CancelFlag>,
     ) -> anyhow::Result<Vec<MiningChunkResult>> {
