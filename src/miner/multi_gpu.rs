@@ -155,13 +155,9 @@ impl MinerBackend for MultiGpuMiner {
         let mut tasks = JoinSet::new();
         for gpu_idx in 0..gpu_count {
             let miner = self.miners[gpu_idx].clone();
-            let gpu_indices: Vec<usize> = (gpu_idx..midstates.len())
-                .step_by(gpu_count)
-                .collect();
-            let gpu_midstates: Vec<Sha256Midstate> = gpu_indices
-                .iter()
-                .map(|&i| midstates[i].clone())
-                .collect();
+            let gpu_indices: Vec<usize> = (gpu_idx..midstates.len()).step_by(gpu_count).collect();
+            let gpu_midstates: Vec<Sha256Midstate> =
+                gpu_indices.iter().map(|&i| midstates[i].clone()).collect();
             tasks.spawn(async move {
                 let chunks = miner.mine_batch(&gpu_midstates, difficulty).await?;
                 let results: Vec<(usize, MiningChunkResult)> =

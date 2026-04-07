@@ -1075,7 +1075,7 @@ impl From<WebminerBackendArg> for harmoniis_wallet::miner::BackendChoice {
 enum WebminerCmd {
     /// List all available GPU mining devices
     ListDevices,
-    /// Start mining in the background
+    /// Start mining (background by default, --foreground for live logs)
     Start {
         /// Webcash server URL
         #[arg(long, default_value = "https://webcash.tech")]
@@ -1098,6 +1098,15 @@ enum WebminerCmd {
         /// Comma-separated device IDs to mine on (from list-devices)
         #[arg(long, value_delimiter = ',')]
         device: Option<Vec<usize>>,
+        /// Run in foreground with live logs (default: background daemon)
+        #[arg(short = 'f', long)]
+        foreground: bool,
+        /// Master wallet path (defaults to global --wallet)
+        #[arg(long)]
+        wallet: Option<PathBuf>,
+        /// Webcash wallet path (defaults to sibling webcash wallet path)
+        #[arg(long, name = "webcash-wallet")]
+        webcash_wallet: Option<PathBuf>,
     },
     /// Stop the running miner
     Stop,
@@ -1117,32 +1126,6 @@ enum WebminerCmd {
         /// Exit non-zero when a target is missed
         #[arg(long)]
         strict: bool,
-    },
-    /// Run miner in foreground with live logs
-    Run {
-        /// Webcash server URL
-        #[arg(long, default_value = "https://webcash.tech")]
-        server: String,
-        /// Maximum difficulty to mine at
-        #[arg(long, default_value_t = 80)]
-        max_difficulty: u32,
-        #[arg(long, value_enum, default_value_t = WebminerBackendArg::Auto)]
-        backend: WebminerBackendArg,
-        #[arg(long)]
-        cpu_only: bool,
-        #[arg(long)]
-        cpu_threads: Option<usize>,
-        #[arg(long)]
-        accept_terms: bool,
-        /// Comma-separated device IDs to mine on (from list-devices)
-        #[arg(long, value_delimiter = ',')]
-        device: Option<Vec<usize>>,
-        /// Master wallet path (defaults to global --wallet / ~/.harmoniis/wallet/master.db)
-        #[arg(long)]
-        wallet: Option<PathBuf>,
-        /// Webcash wallet path (defaults to sibling webcash wallet path)
-        #[arg(long, name = "webcash-wallet")]
-        webcash_wallet: Option<PathBuf>,
     },
     /// Submit pending mined solutions that weren't reported to the server
     Collect,
@@ -3909,49 +3892,7 @@ async fn main() -> anyhow::Result<()> {
             cpu_threads,
             accept_terms,
             device,
-        }) => {
-            use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
-            let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
-            let webcash_wallet_path = labeled_wallet_display_path(&wallet_path, "webcash", None);
-            let backend_choice = if cpu_only {
-                BackendChoice::Cpu
-            } else {
-                backend.into()
-            };
-            let config = MinerConfig {
-                server_url: server,
-                wallet_path: wallet_path.clone(),
-                webcash_wallet_path,
-                max_difficulty,
-                backend: backend_choice,
-                cpu_threads,
-                accept_terms,
-                devices: device,
-            };
-            daemon::start(&config)?;
-        }
-        Cmd::Webminer(WebminerCmd::Stop) => {
-            harmoniis_wallet::miner::daemon::stop()?;
-        }
-        Cmd::Webminer(WebminerCmd::Status) => {
-            harmoniis_wallet::miner::daemon::status()?;
-        }
-        Cmd::Webminer(WebminerCmd::Bench {
-            cpu_threads,
-            cpu_target_mhs,
-            gpu_target_mhs,
-            strict,
-        }) => {
-            run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
-        }
-        Cmd::Webminer(WebminerCmd::Run {
-            server,
-            max_difficulty,
-            backend,
-            cpu_only,
-            cpu_threads,
-            accept_terms,
-            device,
+            foreground,
             wallet: run_wallet,
             webcash_wallet,
         }) => {
@@ -3975,7 +3916,25 @@ async fn main() -> anyhow::Result<()> {
                 accept_terms,
                 devices: device,
             };
-            daemon::run_mining_loop(config).await?;
+            if foreground {
+                daemon::run_mining_loop(config).await?;
+            } else {
+                daemon::start(&config)?;
+            }
+        }
+        Cmd::Webminer(WebminerCmd::Stop) => {
+            harmoniis_wallet::miner::daemon::stop()?;
+        }
+        Cmd::Webminer(WebminerCmd::Status) => {
+            harmoniis_wallet::miner::daemon::status()?;
+        }
+        Cmd::Webminer(WebminerCmd::Bench {
+            cpu_threads,
+            cpu_target_mhs,
+            gpu_target_mhs,
+            strict,
+        }) => {
+            run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
         }
         Cmd::Webminer(WebminerCmd::Collect) => {
             let r = harmoniis_wallet::miner::collect::run("https://webcash.tech")?;

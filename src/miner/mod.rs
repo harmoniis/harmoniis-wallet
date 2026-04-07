@@ -332,7 +332,10 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             ..Default::default()
         });
         let adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-        eprintln!("GPU: wgpu returned {} adapter(s) from enumerate_adapters", adapters.len());
+        eprintln!(
+            "GPU: wgpu returned {} adapter(s) from enumerate_adapters",
+            adapters.len()
+        );
 
         // Group adapters by physical device using PCI bus ID as the key.
         // When PCI bus ID is empty (Metal), use a per-adapter counter so
@@ -363,7 +366,11 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
                 "GPU:   adapter: {} ({:?}) pci_bus={} → key={}",
                 info.name,
                 info.backend,
-                if pci_bus.is_empty() { "(none)" } else { &pci_bus },
+                if pci_bus.is_empty() {
+                    "(none)"
+                } else {
+                    &pci_bus
+                },
                 phys_key,
             );
 
@@ -484,7 +491,10 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     });
     let mut available_adapters: Vec<wgpu::Adapter> =
         instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-    eprintln!("GPU: {} adapter(s) available for init", available_adapters.len());
+    eprintln!(
+        "GPU: {} adapter(s) available for init",
+        available_adapters.len()
+    );
 
     let mut miners = Vec::new();
 
@@ -545,8 +555,14 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                 } else {
                     eprintln!(
                         "GPU[{}]: {} ({}) — adapter not found (pci_bus={})",
-                        dev.id, dev.label, identity.backend,
-                        if identity.pci_bus.is_empty() { "(none)" } else { &identity.pci_bus },
+                        dev.id,
+                        dev.label,
+                        identity.backend,
+                        if identity.pci_bus.is_empty() {
+                            "(none)"
+                        } else {
+                            &identity.pci_bus
+                        },
                     );
                 }
             }

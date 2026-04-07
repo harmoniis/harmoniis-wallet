@@ -351,7 +351,10 @@ impl GpuMiner {
                 {
                     Ok(ok) => ok,
                     Err(e) => {
-                        eprintln!("GPU adapter '{}' failed downlevel limits too: {}", adapter_name, e);
+                        eprintln!(
+                            "GPU adapter '{}' failed downlevel limits too: {}",
+                            adapter_name, e
+                        );
                         return None;
                     }
                 }

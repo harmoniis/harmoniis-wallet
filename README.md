@@ -77,8 +77,8 @@ Wallet data at `~/.harmoniis/` is **never removed** by the uninstaller.
 
 ```bash
 hrmw webminer bench                     # benchmark CPU + GPU
-hrmw webminer run --accept-terms        # foreground mining (local GPU)
-hrmw webminer start --accept-terms      # background mining
+hrmw webminer start --accept-terms      # background mining (daemon)
+hrmw webminer start -f --accept-terms   # foreground mining (live logs)
 hrmw webminer status                    # check miner status
 hrmw webminer stop                      # stop background miner
 ```
@@ -333,7 +333,7 @@ Notes:
 Foreground (recommended for live logs):
 
 ```bash
-hrmw webminer run --accept-terms
+hrmw webminer start -f --accept-terms
 ```
 
 Backend order in `auto`: `CUDA -> Vulkan/wgpu -> CPU`.
@@ -341,9 +341,9 @@ Backend order in `auto`: `CUDA -> Vulkan/wgpu -> CPU`.
 Examples:
 
 ```bash
-hrmw webminer run --backend auto --accept-terms
-hrmw webminer run --backend gpu --accept-terms
-hrmw webminer run --backend cpu --cpu-threads 8 --accept-terms
+hrmw webminer start -f --backend auto --accept-terms
+hrmw webminer start -f --backend gpu --accept-terms
+hrmw webminer start -f --backend cpu --cpu-threads 8 --accept-terms
 hrmw webminer bench --cpu-threads 8
 ```
 
