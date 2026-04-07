@@ -340,7 +340,7 @@ impl GpuMiner {
                     "GPU adapter '{}' failed default limits ({}), retrying with downlevel limits",
                     adapter_name, err_default
                 );
-                adapter
+                match adapter
                     .request_device(&wgpu::DeviceDescriptor {
                         label: Some("webminer-downlevel"),
                         required_features: wgpu::Features::empty(),
@@ -348,7 +348,13 @@ impl GpuMiner {
                         ..Default::default()
                     })
                     .await
-                    .ok()?
+                {
+                    Ok(ok) => ok,
+                    Err(e) => {
+                        eprintln!("GPU adapter '{}' failed downlevel limits too: {}", adapter_name, e);
+                        return None;
+                    }
+                }
             }
         };
 

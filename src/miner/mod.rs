@@ -335,8 +335,11 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
         eprintln!("GPU: wgpu returned {} adapter(s) from enumerate_adapters", adapters.len());
 
         // Group adapters by physical device using PCI bus ID as the key.
+        // When PCI bus ID is empty (Metal), use a per-adapter counter so
+        // identical cards are NOT merged into one device.
         let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
             BTreeMap::new();
+        let mut no_pci_counter = 0usize;
 
         for adapter in adapters {
             let info = adapter.get_info();
@@ -348,7 +351,12 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             let phys_key = if !pci_bus.is_empty() {
                 format!("pci:{pci_bus}")
             } else {
-                format!("name:{}", info.name)
+                // No PCI bus: each adapter is treated as a separate device.
+                // On Metal this is fine (Mac rarely has identical cards).
+                // On Vulkan this shouldn't happen (VK_EXT_pci_bus_info).
+                let key = format!("idx:{no_pci_counter}:{}", info.name);
+                no_pci_counter += 1;
+                key
             };
 
             eprintln!(
@@ -474,19 +482,9 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
         backends: gpu::COMPUTE_BACKENDS,
         ..Default::default()
     });
-    let all_adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-    eprintln!("GPU: {} adapter(s) available for init", all_adapters.len());
-
-    // Index adapters by PCI bus + backend for O(1) lookup.
-    let mut adapter_map: std::collections::HashMap<(String, String), wgpu::Adapter> =
-        std::collections::HashMap::new();
-    for adapter in all_adapters {
-        let info = adapter.get_info();
-        let pci = info.device_pci_bus_id.trim().to_string();
-        let backend = format!("{:?}", info.backend).to_lowercase();
-        let key = (pci, backend);
-        adapter_map.entry(key).or_insert(adapter);
-    }
+    let mut available_adapters: Vec<wgpu::Adapter> =
+        instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
+    eprintln!("GPU: {} adapter(s) available for init", available_adapters.len());
 
     let mut miners = Vec::new();
 
@@ -506,8 +504,23 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                     continue;
                 }
                 // Look up adapter from the single enumeration (not re-enumerate).
-                let key = (identity.pci_bus.clone(), identity.backend.clone());
-                if let Some(adapter) = adapter_map.remove(&key) {
+                // find_matching uses PCI bus ID when available, falls back to
+                // vendor+device+backend. Consumed adapters are removed from the
+                // list so identical cards don't double-match.
+                let pos = available_adapters.iter().position(|a| {
+                    let info = a.get_info();
+                    let backend_match =
+                        format!("{:?}", info.backend).to_lowercase() == identity.backend;
+                    if !identity.pci_bus.is_empty() {
+                        info.device_pci_bus_id.trim() == identity.pci_bus && backend_match
+                    } else {
+                        info.vendor == identity.vendor
+                            && info.device == identity.device
+                            && backend_match
+                    }
+                });
+                if let Some(idx) = pos {
+                    let adapter = available_adapters.swap_remove(idx);
                     if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
                         let hps = miner.benchmark().await.unwrap_or(0.0);
                         eprintln!(
