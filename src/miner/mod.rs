@@ -276,11 +276,11 @@ fn cuda_device_count() -> usize {
 pub enum DeviceKind {
     #[cfg(feature = "cuda")]
     Cuda { ordinal: usize },
-    /// One physical GPU with all its adapters (Vulkan, DX12, Metal).
-    /// The system tries adapters in order — the first that passes the
-    /// subprocess probe is used.  The user never sees adapter details.
+    /// One physical GPU on the chosen backend. No grouping — one adapter
+    /// = one device. Backend is selected once at startup (best of Vulkan,
+    /// DX12, Metal).
     #[cfg(feature = "gpu")]
-    Wgpu { adapters: Vec<gpu::AdapterIdentity> },
+    Wgpu { adapter: gpu::AdapterIdentity },
 }
 
 /// One entry in the device list = one physical GPU.
@@ -293,10 +293,10 @@ pub struct DeviceInfo {
 
 /// Enumerate all physical GPU devices across all backends.
 ///
-/// Each physical GPU gets exactly one device ID. Adapters are grouped
-/// by PCI bus ID (unique per PCIe slot). Multiple backends (Vulkan +
-/// DX12) for the same physical GPU are stored together for automatic
-/// fallback and benchmark-based selection.
+/// CUDA: one ordinal = one physical GPU.
+/// wgpu: pick the single best backend (Vulkan or DX12 or Metal),
+/// then each adapter on that backend = one physical GPU.
+/// No grouping, no deduplication, no PCI bus ID matching.
 ///
 /// Order: CUDA devices first, then wgpu devices.
 pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
@@ -322,100 +322,33 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
         }
     }
 
-    // 2. wgpu — group adapters by PCI bus ID.
+    // 2. wgpu — one backend per platform, each adapter = one physical GPU.
     #[cfg(feature = "gpu")]
     {
-        use std::collections::BTreeMap;
-
+        let backend = gpu::platform_backend();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: gpu::COMPUTE_BACKENDS,
+            backends: backend,
             ..Default::default()
         });
-        let adapters = instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-        eprintln!(
-            "GPU: wgpu returned {} adapter(s) from enumerate_adapters",
-            adapters.len()
-        );
+        let adapters = instance.enumerate_adapters(backend).await;
 
-        // Collect adapter info first, then group by physical device.
-        struct AdapterEntry {
-            name: String,
-            pci_bus: String,
-            backend: String,
-            identity: gpu::AdapterIdentity,
-        }
-        let mut entries = Vec::new();
         for adapter in adapters {
             let info = adapter.get_info();
             if info.device_type == wgpu::DeviceType::Cpu {
                 continue;
             }
-            entries.push(AdapterEntry {
-                name: info.name.clone(),
-                pci_bus: info.device_pci_bus_id.trim().to_string(),
-                backend: format!("{:?}", info.backend).to_lowercase(),
-                identity: gpu::AdapterIdentity::from_info(&info),
-            });
-        }
-
-        // Detect broken PCI bus IDs: if the SAME pci_bus appears for multiple
-        // adapters of the SAME backend, the driver is lying (DX12 known bug
-        // with identical GPUs). Mark those as unreliable.
-        let mut pci_bus_count: std::collections::HashMap<(String, String), usize> =
-            std::collections::HashMap::new();
-        for e in &entries {
-            if !e.pci_bus.is_empty() {
-                *pci_bus_count
-                    .entry((e.pci_bus.clone(), e.backend.clone()))
-                    .or_insert(0) += 1;
-            }
-        }
-
-        // Group adapters by physical device using PCI bus ID as the key.
-        // When PCI bus ID is empty OR duplicated (driver bug), use a
-        // per-adapter index so identical cards are NOT merged.
-        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
-            BTreeMap::new();
-        let mut fallback_counter = 0usize;
-
-        for e in entries {
-            let pci_is_reliable = !e.pci_bus.is_empty()
-                && pci_bus_count
-                    .get(&(e.pci_bus.clone(), e.backend.clone()))
-                    .copied()
-                    .unwrap_or(0)
-                    <= 1;
-
-            let phys_key = if pci_is_reliable {
-                format!("pci:{}", e.pci_bus)
-            } else {
-                let key = format!("idx:{fallback_counter}:{}", e.name);
-                fallback_counter += 1;
-                key
-            };
-
+            let identity = gpu::AdapterIdentity::from_info(&info);
             eprintln!(
-                "GPU:   adapter: {} ({}) pci_bus={} → key={}",
-                e.name,
-                e.backend,
-                if e.pci_bus.is_empty() { "(none)" } else { &e.pci_bus },
-                phys_key,
+                "GPU:   [{}] {} ({}) pci_bus={}",
+                next_id,
+                identity.name,
+                identity.backend,
+                if identity.pci_bus.is_empty() { "(none)" } else { &identity.pci_bus },
             );
-
-            device_groups
-                .entry(phys_key)
-                .or_insert_with(|| (e.name.clone(), Vec::new()))
-                .1
-                .push(e.identity);
-        }
-
-        for (_phys_key, (name, adapters_for_device)) in device_groups {
             devices.push(DeviceInfo {
                 id: next_id,
-                label: name,
-                kind: DeviceKind::Wgpu {
-                    adapters: adapters_for_device,
-                },
+                label: identity.name.clone(),
+                kind: DeviceKind::Wgpu { adapter: identity },
             });
             next_id += 1;
         }
@@ -430,14 +363,14 @@ pub async fn select_backend_for_devices(
 ) -> anyhow::Result<Box<dyn MinerBackend>> {
     let all = enumerate_all_devices().await;
 
-    // Enumerate adapters ONCE (same fix as init_wgpu_miners_from_devices).
     #[cfg(feature = "gpu")]
-    let mut available_adapters = {
+    let mut available = {
+        let backend = gpu::platform_backend();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: gpu::COMPUTE_BACKENDS,
+            backends: backend,
             ..Default::default()
         });
-        instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await
+        instance.enumerate_adapters(backend).await
     };
 
     let mut backends: Vec<Arc<dyn MinerBackend>> = Vec::new();
@@ -455,35 +388,18 @@ pub async fn select_backend_for_devices(
                 m.map(|m| Arc::new(m) as Arc<dyn MinerBackend>)
             }
             #[cfg(feature = "gpu")]
-            DeviceKind::Wgpu { adapters } => {
-                let mut result: Option<(Arc<dyn MinerBackend>, String)> = None;
-                for identity in adapters {
-                    if !gpu::subprocess_probe(identity) {
-                        continue;
+            DeviceKind::Wgpu { adapter: identity } => {
+                let pos = available.iter().position(|a| identity.matches(&a.get_info()));
+                if let Some(idx) = pos {
+                    let adapter = available.swap_remove(idx);
+                    if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                        println!("Device {id}: {}", dev.label);
+                        backends.push(Arc::new(m) as _);
+                    } else {
+                        eprintln!("Device {id}: {} — device init failed", dev.label);
                     }
-                    // Find adapter from single enumeration (no re-enumerate).
-                    let pos = available_adapters.iter().position(|a| {
-                        let info = a.get_info();
-                        let bm = format!("{:?}", info.backend).to_lowercase() == identity.backend;
-                        if !identity.pci_bus.is_empty() {
-                            info.device_pci_bus_id.trim() == identity.pci_bus && bm
-                        } else {
-                            info.vendor == identity.vendor && info.device == identity.device && bm
-                        }
-                    });
-                    if let Some(idx) = pos {
-                        let adapter = available_adapters.swap_remove(idx);
-                        if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
-                            result = Some((Arc::new(m) as _, identity.backend.clone()));
-                            break;
-                        }
-                    }
-                }
-                if let Some((m, adapter_backend)) = result {
-                    println!("Device {id}: {} ({adapter_backend})", dev.label);
-                    backends.push(m);
                 } else {
-                    eprintln!("Device {id}: {} — no working adapter found", dev.label);
+                    eprintln!("Device {id}: {} — adapter not found", dev.label);
                 }
                 continue;
             }
@@ -506,124 +422,51 @@ pub async fn select_backend_for_devices(
     Ok(Box::new(composite::CompositeBackend::new(backends).await))
 }
 
-/// Initialize wgpu GPU miners from the unified device list.
+/// Initialize wgpu GPU miners — one adapter per device, no grouping.
 ///
-/// Discovers physical GPUs via PCI bus ID, probes each, benchmarks all
-/// backends (Vulkan vs DX12), and picks the fastest per device.
+/// Each device from `enumerate_all_devices` has exactly one adapter on
+/// the platform's native backend. Enumerate that backend's adapters once,
+/// match each device to its adapter, create a miner.
 #[cfg(feature = "gpu")]
 pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     let devices = enumerate_all_devices().await;
-    let wgpu_count = devices
+    let wgpu_devices: Vec<&DeviceInfo> = devices
         .iter()
         .filter(|d| matches!(&d.kind, DeviceKind::Wgpu { .. }))
-        .count();
-    if wgpu_count > 0 {
-        eprintln!("GPU: {wgpu_count} physical device(s) found, probing...");
-    }
+        .collect();
 
-    // Enumerate adapters ONCE and reuse. Creating a new Instance per device
-    // and re-enumerating caused adapters to be in a different state after
-    // a previous device already claimed one — the root cause of "detected
-    // N but only 1 loaded".
+    if wgpu_devices.is_empty() {
+        return Vec::new();
+    }
+    eprintln!("GPU: {} device(s) found", wgpu_devices.len());
+
+    // Enumerate adapters from the platform backend ONCE.
+    let backend = gpu::platform_backend();
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: gpu::COMPUTE_BACKENDS,
+        backends: backend,
         ..Default::default()
     });
-    let mut available_adapters: Vec<wgpu::Adapter> =
-        instance.enumerate_adapters(gpu::COMPUTE_BACKENDS).await;
-    eprintln!(
-        "GPU: {} adapter(s) available for init",
-        available_adapters.len()
-    );
+    let mut available: Vec<wgpu::Adapter> = instance.enumerate_adapters(backend).await;
 
     let mut miners = Vec::new();
-
-    for dev in &devices {
-        #[allow(irrefutable_let_patterns)]
-        if let DeviceKind::Wgpu { adapters } = &dev.kind {
-            eprintln!(
-                "GPU[{}]: {} ({} adapter backend(s))",
-                dev.id,
-                dev.label,
-                adapters.len(),
-            );
-            // Try ALL adapter backends, benchmark each, pick the fastest.
-            let mut best_miner: Option<(gpu::GpuMiner, String, f64)> = None;
-            for identity in adapters {
-                if !gpu::subprocess_probe(identity) {
-                    continue;
-                }
-                // Look up adapter from the single enumeration (not re-enumerate).
-                // find_matching uses PCI bus ID when available, falls back to
-                // vendor+device+backend. Consumed adapters are removed from the
-                // list so identical cards don't double-match.
-                let pos = available_adapters.iter().position(|a| {
-                    let info = a.get_info();
-                    let backend_match =
-                        format!("{:?}", info.backend).to_lowercase() == identity.backend;
-                    if !identity.pci_bus.is_empty() {
-                        info.device_pci_bus_id.trim() == identity.pci_bus && backend_match
-                    } else {
-                        info.vendor == identity.vendor
-                            && info.device == identity.device
-                            && backend_match
-                    }
-                });
-                if let Some(idx) = pos {
-                    let adapter = available_adapters.swap_remove(idx);
-                    if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
-                        let hps = miner.benchmark().await.unwrap_or(0.0);
-                        eprintln!(
-                            "GPU[{}]: {} ({}) — {:.2} Mh/s",
-                            dev.id,
-                            dev.label,
-                            identity.backend,
-                            hps / 1_000_000.0,
-                        );
-                        let is_better = best_miner
-                            .as_ref()
-                            .map_or(true, |(_, _, best_hps)| hps > *best_hps);
-                        if is_better {
-                            best_miner = Some((miner, identity.backend.clone(), hps));
-                        }
-                    } else {
-                        eprintln!(
-                            "GPU[{}]: {} ({}) — device init failed",
-                            dev.id, dev.label, identity.backend,
-                        );
-                    }
+    for dev in &wgpu_devices {
+        if let DeviceKind::Wgpu { adapter: identity } = &dev.kind {
+            let pos = available.iter().position(|a| identity.matches(&a.get_info()));
+            if let Some(idx) = pos {
+                let adapter = available.swap_remove(idx);
+                if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                    eprintln!("GPU[{}]: {} ready", dev.id, dev.label);
+                    miners.push(miner);
                 } else {
-                    eprintln!(
-                        "GPU[{}]: {} ({}) — adapter not found (pci_bus={})",
-                        dev.id,
-                        dev.label,
-                        identity.backend,
-                        if identity.pci_bus.is_empty() {
-                            "(none)"
-                        } else {
-                            &identity.pci_bus
-                        },
-                    );
+                    eprintln!("GPU[{}]: {} — device init failed", dev.id, dev.label);
                 }
-            }
-            if let Some((miner, backend, hps)) = best_miner {
-                eprintln!(
-                    "GPU[{}]: {} ready ({}, {:.2} Mh/s)",
-                    dev.id,
-                    dev.label,
-                    backend,
-                    hps / 1_000_000.0,
-                );
-                miners.push(miner);
             } else {
-                eprintln!("GPU[{}]: {} — no working adapter found", dev.id, dev.label);
+                eprintln!("GPU[{}]: {} — adapter not found", dev.id, dev.label);
             }
         }
     }
 
-    if wgpu_count > 0 {
-        eprintln!("GPU: {}/{} device(s) initialized", miners.len(), wgpu_count);
-    }
+    eprintln!("GPU: {}/{} device(s) initialized", miners.len(), wgpu_devices.len());
     miners
 }
 

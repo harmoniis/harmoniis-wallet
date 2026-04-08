@@ -4245,6 +4245,7 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "gpu")]
             {
                 let identity = harmoniis_wallet::miner::gpu::AdapterIdentity {
+                    name: String::new(), // probe matches by pci_bus/vendor/device, not name
                     vendor,
                     device,
                     backend,
