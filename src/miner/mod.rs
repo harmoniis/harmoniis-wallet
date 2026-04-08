@@ -337,48 +337,76 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             adapters.len()
         );
 
-        // Group adapters by physical device using PCI bus ID as the key.
-        // When PCI bus ID is empty (Metal), use a per-adapter counter so
-        // identical cards are NOT merged into one device.
-        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
-            BTreeMap::new();
-        let mut no_pci_counter = 0usize;
-
+        // Collect adapter info first, then group by physical device.
+        struct AdapterEntry {
+            name: String,
+            pci_bus: String,
+            backend: String,
+            identity: gpu::AdapterIdentity,
+        }
+        let mut entries = Vec::new();
         for adapter in adapters {
             let info = adapter.get_info();
             if info.device_type == wgpu::DeviceType::Cpu {
                 continue;
             }
+            entries.push(AdapterEntry {
+                name: info.name.clone(),
+                pci_bus: info.device_pci_bus_id.trim().to_string(),
+                backend: format!("{:?}", info.backend).to_lowercase(),
+                identity: gpu::AdapterIdentity::from_info(&info),
+            });
+        }
 
-            let pci_bus = info.device_pci_bus_id.trim().to_string();
-            let phys_key = if !pci_bus.is_empty() {
-                format!("pci:{pci_bus}")
+        // Detect broken PCI bus IDs: if the SAME pci_bus appears for multiple
+        // adapters of the SAME backend, the driver is lying (DX12 known bug
+        // with identical GPUs). Mark those as unreliable.
+        let mut pci_bus_count: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            if !e.pci_bus.is_empty() {
+                *pci_bus_count
+                    .entry((e.pci_bus.clone(), e.backend.clone()))
+                    .or_insert(0) += 1;
+            }
+        }
+
+        // Group adapters by physical device using PCI bus ID as the key.
+        // When PCI bus ID is empty OR duplicated (driver bug), use a
+        // per-adapter index so identical cards are NOT merged.
+        let mut device_groups: BTreeMap<String, (String, Vec<gpu::AdapterIdentity>)> =
+            BTreeMap::new();
+        let mut fallback_counter = 0usize;
+
+        for e in entries {
+            let pci_is_reliable = !e.pci_bus.is_empty()
+                && pci_bus_count
+                    .get(&(e.pci_bus.clone(), e.backend.clone()))
+                    .copied()
+                    .unwrap_or(0)
+                    <= 1;
+
+            let phys_key = if pci_is_reliable {
+                format!("pci:{}", e.pci_bus)
             } else {
-                // No PCI bus: each adapter is treated as a separate device.
-                // On Metal this is fine (Mac rarely has identical cards).
-                // On Vulkan this shouldn't happen (VK_EXT_pci_bus_info).
-                let key = format!("idx:{no_pci_counter}:{}", info.name);
-                no_pci_counter += 1;
+                let key = format!("idx:{fallback_counter}:{}", e.name);
+                fallback_counter += 1;
                 key
             };
 
             eprintln!(
-                "GPU:   adapter: {} ({:?}) pci_bus={} → key={}",
-                info.name,
-                info.backend,
-                if pci_bus.is_empty() {
-                    "(none)"
-                } else {
-                    &pci_bus
-                },
+                "GPU:   adapter: {} ({}) pci_bus={} → key={}",
+                e.name,
+                e.backend,
+                if e.pci_bus.is_empty() { "(none)" } else { &e.pci_bus },
                 phys_key,
             );
 
             device_groups
                 .entry(phys_key)
-                .or_insert_with(|| (info.name.clone(), Vec::new()))
+                .or_insert_with(|| (e.name.clone(), Vec::new()))
                 .1
-                .push(gpu::AdapterIdentity::from_info(&info));
+                .push(e.identity);
         }
 
         for (_phys_key, (name, adapters_for_device)) in device_groups {
