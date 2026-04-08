@@ -797,9 +797,7 @@ mod tests {
         let b = platform_backend();
         // Should be exactly one backend flag.
         assert!(
-            b == wgpu::Backends::VULKAN
-                || b == wgpu::Backends::DX12
-                || b == wgpu::Backends::METAL
+            b == wgpu::Backends::VULKAN || b == wgpu::Backends::DX12 || b == wgpu::Backends::METAL
         );
     }
 

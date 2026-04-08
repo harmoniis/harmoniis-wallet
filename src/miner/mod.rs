@@ -343,7 +343,11 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
                 next_id,
                 identity.name,
                 identity.backend,
-                if identity.pci_bus.is_empty() { "(none)" } else { &identity.pci_bus },
+                if identity.pci_bus.is_empty() {
+                    "(none)"
+                } else {
+                    &identity.pci_bus
+                },
             );
             devices.push(DeviceInfo {
                 id: next_id,
@@ -389,7 +393,9 @@ pub async fn select_backend_for_devices(
             }
             #[cfg(feature = "gpu")]
             DeviceKind::Wgpu { adapter: identity } => {
-                let pos = available.iter().position(|a| identity.matches(&a.get_info()));
+                let pos = available
+                    .iter()
+                    .position(|a| identity.matches(&a.get_info()));
                 if let Some(idx) = pos {
                     let adapter = available.swap_remove(idx);
                     if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
@@ -451,7 +457,9 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     let mut miners = Vec::new();
     for dev in &wgpu_devices {
         if let DeviceKind::Wgpu { adapter: identity } = &dev.kind {
-            let pos = available.iter().position(|a| identity.matches(&a.get_info()));
+            let pos = available
+                .iter()
+                .position(|a| identity.matches(&a.get_info()));
             if let Some(idx) = pos {
                 let adapter = available.swap_remove(idx);
                 if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
@@ -466,7 +474,11 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
         }
     }
 
-    eprintln!("GPU: {}/{} device(s) initialized", miners.len(), wgpu_devices.len());
+    eprintln!(
+        "GPU: {}/{} device(s) initialized",
+        miners.len(),
+        wgpu_devices.len()
+    );
     miners
 }
 

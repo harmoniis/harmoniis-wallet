@@ -194,7 +194,8 @@ pub async fn start(
         ssh_port,
         "mkdir -p /root/.harmoniis/wallet",
     );
-    let cmd = format!("{REMOTE_HRMW} webminer run --accept-terms --webcash-wallet {REMOTE_WALLET}");
+    let cmd =
+        format!("{REMOTE_HRMW} webminer start -f --accept-terms --webcash-wallet {REMOTE_WALLET}");
     ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
 
     // Verify miner started
@@ -265,7 +266,7 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "kill -INT $(pgrep -f 'webminer run') 2>/dev/null || true",
+        "kill -INT $(pgrep -f 'webminer start') 2>/dev/null || true",
     );
 
     // Step 3: Wait for miner to exit (up to 15s, then force kill).
@@ -275,7 +276,7 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
             ssh_key,
             &state.ssh_host,
             state.ssh_port,
-            "pgrep -f 'webminer run' > /dev/null 2>&1 && echo R || echo S",
+            "pgrep -f 'webminer start' > /dev/null 2>&1 && echo R || echo S",
         )
         .unwrap_or_default()
         .contains('S')
@@ -287,7 +288,7 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
                 ssh_key,
                 &state.ssh_host,
                 state.ssh_port,
-                "kill -9 $(pgrep -f 'webminer run') 2>/dev/null || true",
+                "kill -9 $(pgrep -f 'webminer start') 2>/dev/null || true",
             );
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
