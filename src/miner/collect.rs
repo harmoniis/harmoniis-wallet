@@ -3,6 +3,8 @@
 //! Reads `miner_pending_solutions.log`, submits unsubmitted solutions
 //! to the webcash server in parallel, and reports results.
 
+use std::collections::HashSet;
+
 use super::daemon;
 
 /// Result of a collect operation.
@@ -15,8 +17,12 @@ pub struct CollectResult {
 
 /// Collect and submit pending mining solutions to the server.
 ///
-/// When `verbose` is true, prints per-solution feedback to stdout.
+/// Merges both `miner_pending_solutions.log` and `miner_overflow_solutions.log`
+/// before submitting.  When `verbose` is true, prints per-solution feedback.
 pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
+    // Merge overflow into pending (dedup by line).
+    merge_overflow_into_pending();
+
     let solutions_path = daemon::pending_solutions_path();
     let keeps_path = daemon::pending_keep_log_path();
 
@@ -61,4 +67,44 @@ pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
         submitted,
         failed,
     })
+}
+
+/// Merge overflow solutions into the main pending file (dedup by line).
+fn merge_overflow_into_pending() {
+    let overflow = daemon::overflow_solutions_path();
+    if !overflow.exists() {
+        return;
+    }
+    let overflow_text = match std::fs::read_to_string(&overflow) {
+        Ok(t) if !t.trim().is_empty() => t,
+        _ => return,
+    };
+
+    let pending = daemon::pending_solutions_path();
+    let existing: HashSet<String> = std::fs::read_to_string(&pending)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    let mut new_count = 0usize;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&pending)
+    {
+        use std::io::Write;
+        for line in overflow_text.lines() {
+            if !line.trim().is_empty() && !existing.contains(line) {
+                let _ = writeln!(f, "{}", line);
+                new_count += 1;
+            }
+        }
+    }
+
+    // Clear overflow file after successful merge.
+    if new_count > 0 {
+        let _ = std::fs::write(&overflow, "");
+    }
 }

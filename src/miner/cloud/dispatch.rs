@@ -18,7 +18,7 @@ use ed25519_dalek::SigningKey;
 
 use super::config::{self, InstanceState};
 use super::provision;
-use crate::miner::daemon;
+use crate::miner::collect;
 
 /// Summary returned when the dispatch loop exits.
 pub struct DispatchSummary {
@@ -79,12 +79,11 @@ pub fn run(
         }
         summary.total_synced += cycle_synced;
 
-        // Phase 2: Submit locally (4 threads, checks keeps for dedup).
-        let (s, a, f) = if verbose {
-            daemon::retry_pending_solutions_verbose(server_url)?
-        } else {
-            daemon::retry_pending_solutions(server_url)?
-        };
+        // Phase 2: Merge overflow + submit locally (4 threads × dedup).
+        let cr = collect::run(server_url, verbose)?;
+        let s = cr.submitted;
+        let a = cr.already_accepted;
+        let f = cr.failed;
         summary.total_submitted += s;
         summary.total_already += a;
         summary.total_failed += f;

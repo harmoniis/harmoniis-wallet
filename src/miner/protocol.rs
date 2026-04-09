@@ -164,17 +164,18 @@ impl MiningProtocol {
         let status_code = resp.status();
         let body_text = resp.text().await?;
 
+        let parsed: MiningReportResponse = serde_json::from_str(&body_text)
+            .unwrap_or(MiningReportResponse { status: None, difficulty_target: None, error: Some(body_text.clone()) });
+
+        if let Some(ref err) = parsed.error {
+            if err.contains("Didn't use a new secret") {
+                anyhow::bail!("Didn't use a new secret value.");
+            }
+        }
+
         if status_code.is_success() {
-            let parsed: MiningReportResponse = serde_json::from_str(&body_text)?;
             Ok(parsed)
         } else {
-            // Try to parse error response
-            if let Ok(parsed) = serde_json::from_str::<MiningReportResponse>(&body_text) {
-                if parsed.error.as_deref() == Some("Didn't use a new secret value.") {
-                    // This is a known benign error (duplicate secret)
-                    return Ok(parsed);
-                }
-            }
             anyhow::bail!(
                 "mining report rejected (HTTP {}): {}",
                 status_code,

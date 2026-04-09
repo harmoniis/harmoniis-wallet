@@ -303,9 +303,10 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
 
 // ── Shared: append remote log files to local with deduplication ────────────
 
-const REMOTE_LOG_FILES: [&str; 2] = [
+const REMOTE_LOG_FILES: [&str; 3] = [
     "/root/.harmoniis/wallet/miner_pending_solutions.log",
     "/root/.harmoniis/wallet/miner_pending_keeps.log",
+    "/root/.harmoniis/wallet/miner_overflow_solutions.log",
 ];
 
 /// Append remote solution/keep files to local copies.
