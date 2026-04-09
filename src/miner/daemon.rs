@@ -67,6 +67,15 @@ pub fn pending_solutions_path() -> PathBuf {
 /// Uses 4 parallel threads for faster submission (~28 solutions/min vs 7/min).
 /// Returns (submitted, already_accepted, failed).
 pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize, usize)> {
+    retry_pending_solutions_inner(server_url, false)
+}
+
+/// Like `retry_pending_solutions` but prints per-solution feedback to stdout.
+pub fn retry_pending_solutions_verbose(server_url: &str) -> anyhow::Result<(usize, usize, usize)> {
+    retry_pending_solutions_inner(server_url, true)
+}
+
+fn retry_pending_solutions_inner(server_url: &str, verbose: bool) -> anyhow::Result<(usize, usize, usize)> {
     use super::protocol::MiningProtocol;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -138,17 +147,20 @@ pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize
         return Ok((0, pre_already, 0));
     }
 
-    // Submit in parallel with 4 threads.
+    let total = entries.len();
+
+    // Both modes use 4 parallel threads.
+    // Verbose mode additionally prints per-solution progress.
     const RETRY_THREADS: usize = 4;
     let submitted = Arc::new(AtomicUsize::new(0));
     let already = Arc::new(AtomicUsize::new(pre_already));
     let failed = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(AtomicUsize::new(0));
     let entries = Arc::new(entries);
     let keeps_path = Arc::new(keeps_path);
     let server_url = server_url.to_string();
 
     let mut handles = Vec::new();
-    let total = entries.len();
     let chunk_size = (total + RETRY_THREADS - 1) / RETRY_THREADS;
 
     for t in 0..RETRY_THREADS {
@@ -161,6 +173,7 @@ pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize
         let submitted = submitted.clone();
         let already = already.clone();
         let failed = failed.clone();
+        let progress = progress.clone();
         let keeps_path = keeps_path.clone();
         let server_url = server_url.clone();
 
@@ -171,6 +184,7 @@ pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize
             };
             for i in start..end {
                 let entry = &entries[i];
+                let n = progress.fetch_add(1, Ordering::Relaxed) + 1;
                 match proto.submit_report_blocking(&entry.preimage, &entry.hash) {
                     Ok(_) => {
                         submitted.fetch_add(1, Ordering::Relaxed);
@@ -182,12 +196,23 @@ pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize
                                 use std::io::Write;
                                 writeln!(f, "{}", entry.keep_secret)
                             });
+                        if verbose {
+                            let preview = &entry.keep_secret[..entry.keep_secret.len().min(24)];
+                            println!("  [{n}/{total}] Submitted  {preview}...");
+                        }
                     }
                     Err(e) => {
-                        if e.to_string().contains("Didn't use a new secret") {
+                        let msg = e.to_string();
+                        if msg.contains("Didn't use a new secret") {
                             already.fetch_add(1, Ordering::Relaxed);
+                            if verbose {
+                                println!("  [{n}/{total}] Already accepted");
+                            }
                         } else {
                             failed.fetch_add(1, Ordering::Relaxed);
+                            if verbose {
+                                println!("  [{n}/{total}] Failed: {msg}");
+                            }
                         }
                     }
                 }

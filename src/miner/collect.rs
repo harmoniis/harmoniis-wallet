@@ -15,8 +15,8 @@ pub struct CollectResult {
 
 /// Collect and submit pending mining solutions to the server.
 ///
-/// Returns the result with counts of submitted, already accepted, and failed.
-pub fn run(server_url: &str) -> anyhow::Result<CollectResult> {
+/// When `verbose` is true, prints per-solution feedback to stdout.
+pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
     let solutions_path = daemon::pending_solutions_path();
     let keeps_path = daemon::pending_keep_log_path();
 
@@ -49,7 +49,11 @@ pub fn run(server_url: &str) -> anyhow::Result<CollectResult> {
         });
     }
 
-    let (submitted, already, failed) = daemon::retry_pending_solutions(server_url)?;
+    let (submitted, already, failed) = if verbose {
+        daemon::retry_pending_solutions_verbose(server_url)?
+    } else {
+        daemon::retry_pending_solutions(server_url)?
+    };
 
     Ok(CollectResult {
         pending,

@@ -1128,7 +1128,11 @@ enum WebminerCmd {
         strict: bool,
     },
     /// Submit pending mined solutions that weren't reported to the server
-    Collect,
+    Collect {
+        /// Run in background (daemon mode — used automatically after cloud stop)
+        #[arg(short = 'd', long)]
+        daemon: bool,
+    },
     /// Cloud mining on Vast.ai GPU instances
     Cloud {
         #[command(subcommand)]
@@ -3936,8 +3940,24 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
         }
-        Cmd::Webminer(WebminerCmd::Collect) => {
-            let r = harmoniis_wallet::miner::collect::run("https://webcash.org")?;
+        Cmd::Webminer(WebminerCmd::Collect { daemon }) => {
+            if daemon {
+                // Daemon mode: fork to background, write PID, run silently.
+                let exe = std::env::current_exe().context("cannot find own executable")?;
+                let child = std::process::Command::new(exe)
+                    .args(["webminer", "collect"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .context("failed to spawn collect daemon")?;
+                println!("Collect daemon started (PID {}).", child.id());
+                return Ok(());
+            }
+            // Foreground: verbose per-solution feedback.
+            println!("Collecting pending mining solutions...");
+            let r = harmoniis_wallet::miner::collect::run("https://webcash.org", true)?;
+            println!();
             println!("Pending solutions: {}", r.pending);
             println!("Already accepted:  {}", r.already_accepted);
             println!("Submitted:         {}", r.submitted);
@@ -4116,6 +4136,31 @@ async fn main() -> anyhow::Result<()> {
                         println!("Total transferred: {total_transferred} webcash");
                     }
                     println!("Main wallet balance: {main_balance}");
+
+                    // Auto-collect uncollected solutions in daemon mode.
+                    let solutions_path = harmoniis_wallet::miner::daemon::pending_solutions_path();
+                    if solutions_path.exists() {
+                        let pending = std::fs::read_to_string(&solutions_path)
+                            .unwrap_or_default()
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .count();
+                        if pending > 0 {
+                            println!();
+                            println!("{pending} uncollected solutions found — starting collect daemon...");
+                            let exe = std::env::current_exe().context("cannot find own executable")?;
+                            match std::process::Command::new(exe)
+                                .args(["webminer", "collect"])
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                            {
+                                Ok(child) => println!("Collect daemon started (PID {}).", child.id()),
+                                Err(e) => eprintln!("Warning: failed to start collect daemon: {e}"),
+                            }
+                        }
+                    }
                 }
                 CloudCmd::Destroy { instance } => {
                     let instances = cloud_config::load_instances()?;
