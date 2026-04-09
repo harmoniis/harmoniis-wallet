@@ -310,12 +310,14 @@ const REMOTE_LOG_FILES: [&str; 2] = [
 
 /// Append remote solution/keep files to local copies.
 /// Deduplicates by line — safe to call repeatedly from any number of instances.
-fn append_remote_logs(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) {
+/// Returns the number of new solution lines synced.
+pub fn append_remote_logs(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> usize {
     let local_dir = dirs_next::home_dir()
         .unwrap_or_default()
         .join(".harmoniis")
         .join("wallet");
     let _ = std::fs::create_dir_all(&local_dir);
+    let mut total_new = 0usize;
 
     for remote_file in REMOTE_LOG_FILES {
         let filename = std::path::Path::new(remote_file)
@@ -357,9 +359,10 @@ fn append_remote_logs(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16
             }
         }
         if new_count > 0 {
-            println!("    {filename}: +{new_count}");
+            total_new += new_count;
         }
     }
+    total_new
 }
 
 /// Backup pending files from a running instance (called by `cloud status`).

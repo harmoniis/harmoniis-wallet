@@ -5,6 +5,7 @@
 //! the master wallet or any private key material.
 
 pub mod config;
+pub mod dispatch;
 pub mod provision;
 pub mod recovery;
 pub mod slots;

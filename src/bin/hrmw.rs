@@ -1178,6 +1178,12 @@ enum CloudCmd {
         #[arg(long, default_value = "cloudminer")]
         label: String,
     },
+    /// Continuously sync + submit solutions from remote instances
+    Watch {
+        /// Seconds between sync cycles
+        #[arg(long, default_value = "30")]
+        interval: u64,
+    },
     /// Set Vast.ai API key
     #[command(name = "set-api-key")]
     SetApiKey {
@@ -4056,6 +4062,23 @@ async fn main() -> anyhow::Result<()> {
                             eprintln!("Instance {}/{} failed: {e}", i + 1, slots.len());
                         }
                     }
+
+                    // Auto-start solution dispatch daemon.
+                    let exe = std::env::current_exe().context("cannot find own executable")?;
+                    match std::process::Command::new(exe)
+                        .args(["webminer", "cloud", "watch", "--interval", "30"])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        Ok(child) => println!(
+                            "\nSolution dispatcher started in background (PID {}).\n\
+                             Run `hrmw webminer cloud watch` for live output.",
+                            child.id()
+                        ),
+                        Err(e) => eprintln!("Warning: could not start dispatcher: {e}"),
+                    }
                 }
                 CloudCmd::Stop { instance } => {
                     let instances = cloud_config::load_instances()?;
@@ -4265,6 +4288,10 @@ async fn main() -> anyhow::Result<()> {
                             provision::info(&state.label, &ssh_key, Some(state));
                         }
                     }
+                }
+                CloudCmd::Watch { interval } => {
+                    use harmoniis_wallet::miner::cloud::dispatch;
+                    dispatch::run(&ssh_key, "https://webcash.org", interval, true)?;
                 }
                 CloudCmd::SetApiKey { key } => {
                     let mut cfg = cloud_config::load_config()?;
