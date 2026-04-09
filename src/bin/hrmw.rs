@@ -86,7 +86,7 @@ fn prompt_accept_terms_if_needed(flag: bool) -> anyhow::Result<bool> {
     }
     use std::io::{self, Write};
     eprint!(
-        "By running the webcash miner you agree to the terms of service at https://webcash.tech.\n\
+        "By running the webcash miner you agree to the terms of service at https://webcash.org.\n\
          Accept? [y/N] "
     );
     io::stderr().flush()?;
@@ -1078,7 +1078,7 @@ enum WebminerCmd {
     /// Start mining (background by default, --foreground for live logs)
     Start {
         /// Webcash server URL
-        #[arg(long, default_value = "https://webcash.tech")]
+        #[arg(long, default_value = "https://webcash.org")]
         server: String,
         /// Maximum difficulty to mine at
         #[arg(long, default_value_t = 80)]
@@ -3937,7 +3937,7 @@ async fn main() -> anyhow::Result<()> {
             run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
         }
         Cmd::Webminer(WebminerCmd::Collect) => {
-            let r = harmoniis_wallet::miner::collect::run("https://webcash.tech")?;
+            let r = harmoniis_wallet::miner::collect::run("https://webcash.org")?;
             println!("Pending solutions: {}", r.pending);
             println!("Already accepted:  {}", r.already_accepted);
             println!("Submitted:         {}", r.submitted);
