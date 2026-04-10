@@ -524,13 +524,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Any tokio runtime in submitter threads (even Handle::block_on) causes
     // massive mining speed regression (75 → 25 GH/s).  See commit 012fb09.
     //
-    // 32 threads × 1 blocking HTTP each.  Threads sleep on I/O — zero CPU
-    // load, zero GPU contention.  Server takes 6-14s per response, so 32
-    // threads handle ~180 reports/min (same throughput as async, no risk).
-    //
-    // Wallet insert deferred to collect/recover — keeps submitters 100%
-    // tokio-free.  Keep log is the crash-safety record.
-    const SUBMITTER_THREADS: usize = 64;
+    // 3 threads — the proven 75 GH/s pattern from v0.1.50.
+    // 64 threads caused mutex contention that killed mining speed (31 GH/s).
+    // Server takes 6-14s per response → 3 threads = ~18 reports/min.
+    // Local dispatch daemon handles overflow via SSH.
+    const SUBMITTER_THREADS: usize = 3;
 
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
