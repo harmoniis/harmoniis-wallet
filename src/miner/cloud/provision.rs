@@ -242,6 +242,118 @@ pub async fn start(
     Ok(state)
 }
 
+/// Restart an exited/stopped instance — re-provision from the Vast.ai side,
+/// wait for SSH, re-install hrmw, re-upload wallet, start miner.
+pub async fn restart(
+    state: &InstanceState,
+    wallet_db_path: &Path,
+    ssh_key: &ed25519_dalek::SigningKey,
+) -> Result<()> {
+    let cfg = config::load_config()?;
+    let api_key = config::resolve_api_key(&cfg)?;
+    let client = VastClient::new(&api_key);
+
+    // 1. Restart via API
+    println!("[1/4] Restarting instance {}...", state.instance_id);
+    client.restart_instance(state.instance_id).await?;
+
+    // 2. Wait for running + SSH
+    println!("[2/4] Waiting for instance to come back...");
+    let instance = wait_for_running(&client, state.instance_id).await?;
+    let (ssh_host, ssh_port) = instance
+        .ssh_connection()
+        .ok_or_else(|| anyhow::anyhow!("No SSH connection info after restart"))?;
+    println!("  SSH: root@{ssh_host}:{ssh_port}");
+    wait_for_ssh(ssh_key, &ssh_host, ssh_port).await?;
+
+    // 3. Re-install hrmw (fresh boot = clean filesystem)
+    println!("[3/4] Installing hrmw...");
+    install_hrmw_remote(ssh_key, &ssh_host, ssh_port).await?;
+
+    // Re-upload wallet
+    println!("  Uploading mining wallet...");
+    upload_file(ssh_key, &ssh_host, ssh_port, wallet_db_path, REMOTE_WALLET)?;
+
+    // 4. Start miner
+    println!("[4/4] Starting miner...");
+    let _ = ssh::exec(
+        ssh_key,
+        &ssh_host,
+        ssh_port,
+        "mkdir -p /root/.harmoniis/wallet",
+    );
+    let cmd =
+        format!("{REMOTE_HRMW} webminer start -f --accept-terms --webcash-wallet {REMOTE_WALLET}");
+    ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
+
+    // Verify
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    let check = ssh::exec(ssh_key, &ssh_host, ssh_port, "pgrep -a hrmw")?;
+    if check.trim().is_empty() {
+        let log =
+            ssh::exec(ssh_key, &ssh_host, ssh_port, "cat /root/miner.log").unwrap_or_default();
+        anyhow::bail!("Miner failed to start after restart.\n{log}");
+    }
+
+    // Update state with new SSH info (IP/port may change after restart)
+    config::remove_instance(state.instance_id)?;
+    let new_state = InstanceState {
+        instance_id: state.instance_id,
+        offer_id: state.offer_id,
+        label: state.label.clone(),
+        ssh_host,
+        ssh_port,
+        gpu_name: instance.gpu_name.unwrap_or_else(|| state.gpu_name.clone()),
+        num_gpus: instance.num_gpus.unwrap_or(state.num_gpus),
+        cost_per_hour: instance.dph_total.unwrap_or(state.cost_per_hour),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    };
+    config::add_instance(&new_state)?;
+
+    println!("  Instance {} restarted and mining.", state.instance_id);
+    Ok(())
+}
+
+/// Check live status of instances against Vast.ai API.
+/// Returns (running, exited/stopped) split.
+pub async fn check_live_status(
+    instances: &[InstanceState],
+) -> Result<(Vec<InstanceState>, Vec<InstanceState>)> {
+    let cfg = config::load_config()?;
+    let api_key = config::resolve_api_key(&cfg)?;
+    let client = VastClient::new(&api_key);
+
+    let mut running = Vec::new();
+    let mut dead = Vec::new();
+
+    for inst in instances {
+        match client.get_instance(inst.instance_id).await {
+            Ok(live) => {
+                if live.is_running() {
+                    running.push(inst.clone());
+                } else {
+                    let status = live.actual_status.as_deref().unwrap_or("unknown");
+                    eprintln!(
+                        "  Instance {} ({}) — status: {}",
+                        inst.instance_id, inst.label, status
+                    );
+                    dead.push(inst.clone());
+                }
+            }
+            Err(_) => {
+                // API error (destroyed, expired, etc.) — treat as dead.
+                eprintln!(
+                    "  Instance {} ({}) — not found on Vast.ai",
+                    inst.instance_id, inst.label
+                );
+                dead.push(inst.clone());
+            }
+        }
+    }
+
+    Ok((running, dead))
+}
+
 /// Stop a cloud mining instance and collect its solution files.
 ///
 /// 1. Download solution files while miner is still running (safety snapshot)
@@ -596,28 +708,48 @@ fn upload_file(
 }
 
 async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super::vast::Instance> {
-    // 36 × 5s = 3 minutes max. If not running in 3 min, bad machine — move on.
-    for i in 0..36 {
+    // No hard timeout — only fail on error/exited status.
+    // Docker image pulls on uncached machines can take 10+ minutes.
+    let mut api_errors = 0u32;
+    let mut prev_msg = String::new();
+    loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         match client.get_instance(instance_id).await {
             Ok(inst) if inst.is_running() => return Ok(inst),
             Ok(inst) => {
+                api_errors = 0;
                 let s = inst.actual_status.as_deref().unwrap_or("unknown");
-                if i % 3 == 0 {
-                    println!("  Status: {s}...");
+                let msg = inst.status_msg.as_deref().unwrap_or("");
+
+                // Fail on terminal states.
+                if s == "exited" || s == "error" || s == "offline" {
+                    let _ = client.destroy_instance(instance_id).await;
+                    config::remove_instance(instance_id).ok();
+                    anyhow::bail!("Instance entered '{s}' state. Destroyed.\n  {msg}");
+                }
+
+                // Print status when it changes (avoid flooding identical lines).
+                let current = format!("{s} — {msg}");
+                if current != prev_msg {
+                    if msg.is_empty() {
+                        println!("  Status: {s}...");
+                    } else {
+                        println!("  Status: {s} — {msg}");
+                    }
+                    prev_msg = current;
                 }
             }
-            Err(e) if i > 5 => {
-                let _ = client.destroy_instance(instance_id).await;
-                return Err(e);
+            Err(_) => {
+                api_errors += 1;
+                // 10 consecutive API failures (50s) = give up.
+                if api_errors >= 10 {
+                    let _ = client.destroy_instance(instance_id).await;
+                    config::remove_instance(instance_id).ok();
+                    anyhow::bail!("Lost contact with Vast.ai API. Instance destroyed.");
+                }
             }
-            Err(_) => {}
         }
     }
-    println!("  Instance did not start in 3 minutes — destroying...");
-    let _ = client.destroy_instance(instance_id).await;
-    config::remove_instance(instance_id).ok();
-    anyhow::bail!("Instance did not start. Destroyed to stop charges. Try a different offer.")
 }
 
 async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
@@ -646,13 +778,22 @@ async fn install_hrmw_remote(
         ssh::exec(ssh_key, host, port, "ldd --version 2>&1 | head -1").unwrap_or_default();
     if glibc_check.contains("2.31") || glibc_check.contains("2.35") {
         println!("  Upgrading GLIBC + libssl...");
-        ssh::exec(
+        match ssh::exec(
             ssh_key,
             host,
             port,
-            "echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq libc6 libssl3t64",
-        )
-        .context("GLIBC/libssl upgrade failed")?;
+            "echo 'deb http://archive.ubuntu.com/ubuntu noble main' >> /etc/apt/sources.list && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq libc6 libssl3t64 2>&1",
+        ) {
+            Ok(_out) => {
+                let glibc_after = ssh::exec(ssh_key, host, port, "ldd --version 2>&1 | head -1")
+                    .unwrap_or_default();
+                println!("  GLIBC after upgrade: {}", glibc_after.trim());
+            }
+            Err(e) => {
+                eprintln!("  GLIBC upgrade failed: {e}");
+                anyhow::bail!("GLIBC/libssl upgrade failed: {e}");
+            }
+        }
     }
 
     // Ensure NVRTC is available (needed for CUDA kernel compilation at runtime).
@@ -680,13 +821,22 @@ async fn install_hrmw_remote(
 
     // Step 2: Install hrmw
     println!("  Installing hrmw...");
-    ssh::exec(
+    match ssh::exec(
         ssh_key,
         host,
         port,
-        "mkdir -p /root/.harmoniis/wallet /root/.local/bin && curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install | sh",
-    )
-    .context("hrmw install failed")?;
+        "mkdir -p /root/.harmoniis/wallet /root/.local/bin && curl --proto '=https' --tlsv1.2 -sSf https://harmoniis.com/wallet/install 2>&1 | sh 2>&1",
+    ) {
+        Ok(out) => {
+            for line in out.trim().lines().rev().take(5).collect::<Vec<_>>().into_iter().rev() {
+                println!("  {line}");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Install script output: {e}");
+            anyhow::bail!("hrmw install failed: {e}");
+        }
+    }
 
     // Step 3: Verify — if it fails, show the actual error for debugging.
     match ssh::exec(

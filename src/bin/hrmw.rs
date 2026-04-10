@@ -4005,8 +4005,111 @@ async fn main() -> anyhow::Result<()> {
                     let _lock = cloud_config::acquire_start_lock()
                         .context("Another cloud start is in progress")?;
 
-                    // Check for existing instances.
-                    let active = cloud_config::load_instances()?;
+                    // Check for existing instances and verify live status.
+                    let saved = cloud_config::load_instances()?;
+                    let mut active = saved.clone();
+                    if !saved.is_empty() {
+                        println!("Checking instance status on Vast.ai...");
+                        let (running, dead) = provision::check_live_status(&saved).await?;
+
+                        if !dead.is_empty() {
+                            println!();
+                            println!("{} instance(s) are no longer running:", dead.len());
+                            for d in &dead {
+                                println!(
+                                    "  #{} {} — {}x {} (${:.2}/hr)",
+                                    d.instance_id, d.label, d.num_gpus, d.gpu_name, d.cost_per_hour
+                                );
+                            }
+                            println!();
+                            println!("Options:");
+                            println!("  [r] Restart them (resume mining on same instances)");
+                            println!("  [d] Destroy them and start fresh instances");
+                            println!("  [n] Cancel");
+                            print!("Choice [r/d/n]: ");
+                            use std::io::Write;
+                            std::io::stdout().flush()?;
+                            let mut input = String::new();
+                            std::io::stdin().read_line(&mut input)?;
+                            let choice = input.trim().to_ascii_lowercase();
+
+                            match choice.as_str() {
+                                "r" => {
+                                    // Restart dead instances.
+                                    for d in &dead {
+                                        println!();
+                                        let db_path = labeled_wallet_display_path(
+                                            &wallet_path,
+                                            "webcash",
+                                            Some(&d.label),
+                                        );
+                                        let _wc = resolve_webcash_wallet(
+                                            &wallet_path,
+                                            &wallet,
+                                            Some(&d.label),
+                                        )
+                                        .await?;
+                                        if let Err(e) =
+                                            provision::restart(d, &db_path, &ssh_key).await
+                                        {
+                                            eprintln!(
+                                                "Failed to restart instance {}: {e}",
+                                                d.instance_id
+                                            );
+                                            // Clean up failed restart from state.
+                                            cloud_config::remove_instance(d.instance_id).ok();
+                                        }
+                                    }
+                                    // All restarted — done (no new instances).
+                                    if !running.is_empty() {
+                                        println!();
+                                        println!(
+                                            "{} instance(s) were already running.",
+                                            running.len()
+                                        );
+                                    }
+                                    // Start dispatch daemon.
+                                    let exe = std::env::current_exe()
+                                        .context("cannot find own executable")?;
+                                    match std::process::Command::new(&exe)
+                                        .args(["webminer", "cloud", "watch", "--interval", "30"])
+                                        .stdin(std::process::Stdio::null())
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .spawn()
+                                    {
+                                        Ok(child) => println!(
+                                            "\nSolution dispatcher started (PID {}).",
+                                            child.id()
+                                        ),
+                                        Err(e) => {
+                                            eprintln!("Warning: could not start dispatcher: {e}")
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+                                "d" => {
+                                    // Destroy dead instances and clean state.
+                                    for d in &dead {
+                                        println!("Destroying instance {}...", d.instance_id);
+                                        if let Err(e) = provision::destroy(d).await {
+                                            eprintln!("  Warning: {e}");
+                                        }
+                                    }
+                                    // Reload active — only running ones remain.
+                                    active = running;
+                                    println!("Dead instances destroyed.");
+                                }
+                                _ => {
+                                    println!("Cancelled.");
+                                    return Ok(());
+                                }
+                            }
+                        } else {
+                            active = running;
+                        }
+                    }
+
                     if !active.is_empty() {
                         provision::print_active_summary(&active);
                         print!("{} instance(s) running. Start more? [y/N] ", active.len());
@@ -4171,7 +4274,8 @@ async fn main() -> anyhow::Result<()> {
                         if pending > 0 {
                             println!();
                             println!("{pending} uncollected solutions found — starting collect daemon...");
-                            let exe = std::env::current_exe().context("cannot find own executable")?;
+                            let exe =
+                                std::env::current_exe().context("cannot find own executable")?;
                             match std::process::Command::new(exe)
                                 .args(["webminer", "collect"])
                                 .stdin(std::process::Stdio::null())
@@ -4179,7 +4283,9 @@ async fn main() -> anyhow::Result<()> {
                                 .stderr(std::process::Stdio::null())
                                 .spawn()
                             {
-                                Ok(child) => println!("Collect daemon started (PID {}).", child.id()),
+                                Ok(child) => {
+                                    println!("Collect daemon started (PID {}).", child.id())
+                                }
                                 Err(e) => eprintln!("Warning: failed to start collect daemon: {e}"),
                             }
                         }

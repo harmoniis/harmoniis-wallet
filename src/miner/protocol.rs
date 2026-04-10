@@ -109,8 +109,12 @@ impl MiningProtocol {
         let status_code = resp.status();
         let body_text = resp.text()?;
 
-        let parsed: MiningReportResponse = serde_json::from_str(&body_text)
-            .unwrap_or(MiningReportResponse { status: None, difficulty_target: None, error: Some(body_text.clone()) });
+        let parsed: MiningReportResponse =
+            serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
+                status: None,
+                difficulty_target: None,
+                error: Some(body_text.clone()),
+            });
 
         // Propagate "already used" as an error so callers can distinguish it.
         if let Some(ref err) = parsed.error {
@@ -164,8 +168,12 @@ impl MiningProtocol {
         let status_code = resp.status();
         let body_text = resp.text().await?;
 
-        let parsed: MiningReportResponse = serde_json::from_str(&body_text)
-            .unwrap_or(MiningReportResponse { status: None, difficulty_target: None, error: Some(body_text.clone()) });
+        let parsed: MiningReportResponse =
+            serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
+                status: None,
+                difficulty_target: None,
+                error: Some(body_text.clone()),
+            });
 
         if let Some(ref err) = parsed.error {
             if err.contains("Didn't use a new secret") {

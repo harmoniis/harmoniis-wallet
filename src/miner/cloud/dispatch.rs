@@ -99,7 +99,9 @@ pub fn run(
         } else {
             print!(
                 "\r[cycle {}] {} instance(s) | no new solutions | {:.1}s   ",
-                summary.cycles, inst_count, elapsed.as_secs_f64()
+                summary.cycles,
+                inst_count,
+                elapsed.as_secs_f64()
             );
             use std::io::Write;
             let _ = std::io::stdout().flush();

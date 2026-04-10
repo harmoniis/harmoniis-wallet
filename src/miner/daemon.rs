@@ -81,7 +81,10 @@ pub fn retry_pending_solutions_verbose(server_url: &str) -> anyhow::Result<(usiz
     retry_pending_solutions_inner(server_url, true)
 }
 
-fn retry_pending_solutions_inner(server_url: &str, verbose: bool) -> anyhow::Result<(usize, usize, usize)> {
+fn retry_pending_solutions_inner(
+    server_url: &str,
+    verbose: bool,
+) -> anyhow::Result<(usize, usize, usize)> {
     use super::protocol::MiningProtocol;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -583,9 +586,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         }
 
                         let batch_len = batch.len();
-                        eprintln!(
-                            "[reporter-{thread_id}] submitting batch of {batch_len}"
-                        );
+                        eprintln!("[reporter-{thread_id}] submitting batch of {batch_len}");
 
                         // Phase 2: Submit all concurrently using JoinSet.
                         let mut set = tokio::task::JoinSet::new();
@@ -593,9 +594,8 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             let proto = sub_proto.clone();
                             set.spawn(async move {
                                 let t0 = std::time::Instant::now();
-                                let result = proto
-                                    .submit_report(&report.preimage, &report.hash)
-                                    .await;
+                                let result =
+                                    proto.submit_report(&report.preimage, &report.hash).await;
                                 (report, result, t0.elapsed())
                             });
                         }
@@ -614,13 +614,8 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             match result {
                                 Ok(resp) => {
                                     sub_tracker.record_accepted();
-                                    eprintln!(
-                                        "[reporter-{thread_id}] accepted in {http_ms}ms"
-                                    );
-                                    println!(
-                                        "Mining report accepted! keep={}",
-                                        report.keep_secret
-                                    );
+                                    eprintln!("[reporter-{thread_id}] accepted in {http_ms}ms");
+                                    println!("Mining report accepted! keep={}", report.keep_secret);
 
                                     // Difficulty adjustment.
                                     if let Some(new_diff) = resp.difficulty_target {
@@ -646,9 +641,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                             writeln!(f, "{}", keep_str)
                                         })
                                     {
-                                        eprintln!(
-                                            "[reporter-{thread_id}] keep write failed: {e}"
-                                        );
+                                        eprintln!("[reporter-{thread_id}] keep write failed: {e}");
                                     }
 
                                     // Insert into webcash wallet.

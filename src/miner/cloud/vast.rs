@@ -59,6 +59,7 @@ pub struct Instance {
     #[serde(default)]
     pub id: u64,
     pub actual_status: Option<String>,
+    pub status_msg: Option<String>,
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
     pub public_ipaddr: Option<String>,
@@ -209,7 +210,7 @@ impl VastClient {
         Ok(candidates)
     }
 
-    /// Create an instance from an offer ID using the popular CUDA template.
+    /// Create an instance from an offer ID using the CUDA 12 Docker image.
     pub async fn create_instance(&self, offer_id: u64, onstart_script: &str) -> Result<u64> {
         let body = json!({
             "client_id": "me",
@@ -306,6 +307,25 @@ impl VastClient {
         if !status.is_success() {
             let text = resp.text().await?;
             anyhow::bail!("Vast.ai destroy failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// Restart a stopped/exited instance.
+    pub async fn restart_instance(&self, instance_id: u64) -> Result<()> {
+        let resp = self
+            .http
+            .put(format!("{API_BASE}/instances/{instance_id}/"))
+            .header("Authorization", self.auth_header())
+            .json(&json!({"state": "running"}))
+            .send()
+            .await
+            .context("Vast.ai restart instance failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("Vast.ai restart failed (HTTP {status}): {text}");
         }
         Ok(())
     }
