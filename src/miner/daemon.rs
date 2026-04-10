@@ -519,22 +519,24 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
     // ── Solution submitter (pure blocking — proven 75 GH/s pattern) ─────
     //
-    // OS threads + reqwest::blocking::Client.  ZERO tokio involvement.
-    // rt_handle.block_on() and tokio runtimes in submitter threads both
-    // cause massive mining speed regression (75 → 25 GH/s) due to runtime
-    // contention with the GPU mining loop.  See commit 012fb09.
+    // Pure OS threads + reqwest::blocking::Client.  ZERO tokio involvement.
+    // Any tokio runtime in submitter threads (even Handle::block_on) causes
+    // massive mining speed regression (75 → 25 GH/s).  See commit 012fb09.
     //
-    // Bounded channel (256) with overflow to file for local dispatch daemon.
-    // 3 threads × 1 blocking HTTP = ~18 reports/min remote.
-    // Local dispatch daemon adds ~180 reports/min via 4-thread parallel.
-    const SUBMITTER_THREADS: usize = 3;
+    // 32 threads × 1 blocking HTTP each.  Threads sleep on I/O — zero CPU
+    // load, zero GPU contention.  Server takes 6-14s per response, so 32
+    // threads handle ~180 reports/min (same throughput as async, no risk).
+    //
+    // Wallet insert deferred to collect/recover — keeps submitters 100%
+    // tokio-free.  Keep log is the crash-safety record.
+    const SUBMITTER_THREADS: usize = 64;
     const CHANNEL_CAPACITY: usize = 256;
 
     let (solution_tx, solution_rx) =
         std::sync::mpsc::sync_channel::<SolutionReport>(CHANNEL_CAPACITY);
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
     let mut submitter_handles = Vec::with_capacity(SUBMITTER_THREADS);
-    let webcash_wallet_path = Arc::new(config.webcash_wallet_path.clone());
+    // Wallet insert deferred to collect/recover — submitters are 100% tokio-free.
 
     for thread_id in 0..SUBMITTER_THREADS {
         let rx = shared_rx.clone();
@@ -542,7 +544,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
-        let sub_wallet_path = webcash_wallet_path.clone();
         let handle = std::thread::Builder::new()
             .name(format!("submitter-{thread_id}"))
             .spawn(move || {
@@ -597,33 +598,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                 eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
                             }
 
-                            // Insert into webcash wallet (blocking — no tokio).
-                            let t1 = std::time::Instant::now();
-                            let rt = tokio::runtime::Runtime::new().ok();
-                            if let Some(rt) = rt {
-                                let wallet_result = rt.block_on(async {
-                                    let wallet = webylib::Wallet::open(&*sub_wallet_path).await?;
-                                    wallet.insert(report.keep_secret.clone()).await
-                                });
-                                match wallet_result {
-                                    Ok(()) => println!(
-                                        "Claimed mined webcash in wallet: {}",
-                                        sub_wallet_path.display()
-                                    ),
-                                    Err(e) => {
-                                        let msg = e.to_string().to_ascii_lowercase();
-                                        if !msg.contains("unique constraint")
-                                            && !msg.contains("constraint failed")
-                                        {
-                                            eprintln!("[submitter-{thread_id}] wallet insert: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                            eprintln!(
-                                "[submitter-{thread_id}] wallet claim in {}ms",
-                                t1.elapsed().as_millis()
-                            );
+                            // Wallet insert deferred to collect/recover —
+                            // keeps submitter threads 100% tokio-free.
+                            // The keep log is the crash-safety record.
                         }
                         Err(e) => {
                             let http_ms = t0.elapsed().as_millis();
