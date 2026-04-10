@@ -83,6 +83,11 @@ __global__ __launch_bounds__(256) void mine_sha256(
     const unsigned int nonce_count,
     unsigned long long* out_best
 ) {
+    // First thread zeroes the output — eliminates host-side memset_zeros.
+    if (blockIdx.x == 0u && threadIdx.x == 0u) {
+        *out_best = 0ull;
+    }
+
     // Cooperatively load nonce table (4KB) into shared memory.
     __shared__ unsigned int s_nonce[1000];
     for (unsigned int i = threadIdx.x; i < 1000u; i += blockDim.x) {

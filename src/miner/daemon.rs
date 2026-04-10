@@ -461,7 +461,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         select_backend(config.backend, config.cpu_threads).await?
     };
     let chunk_size = backend.max_batch_hint();
-    let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 128);
+    let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 1024);
     println!("Mining setup:");
     println!("  backend_mode={}", config.backend.as_cli_str());
     println!("  backend_name={}", backend.name());

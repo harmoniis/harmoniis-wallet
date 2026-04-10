@@ -17,7 +17,7 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 const CUDA_BLOCK_SIZE: u32 = 256;
 
 /// Maximum number of work units batched per GPU in a single sync cycle.
-const MAX_BATCH: usize = 16;
+const MAX_BATCH: usize = 64;
 
 pub struct CudaMiner {
     stream: Arc<CudaStream>,
@@ -170,7 +170,7 @@ impl CudaMiner {
         nonce_offset: u32,
         nonce_count: u32,
     ) -> anyhow::Result<()> {
-        self.stream.memset_zeros(&mut slots[slot])?;
+        // Kernel zeroes out_best itself (block 0, thread 0) — no host memset needed.
 
         let s = midstate.state_words();
         let cfg = LaunchConfig {
