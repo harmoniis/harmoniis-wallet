@@ -721,11 +721,15 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
                 let s = inst.actual_status.as_deref().unwrap_or("unknown");
                 let msg = inst.status_msg.as_deref().unwrap_or("");
 
-                // Fail on terminal states.
-                if s == "exited" || s == "error" || s == "offline" {
+                // Fail on terminal states or error messages.
+                let is_error_state = s == "exited" || s == "error" || s == "offline";
+                let has_error_msg = msg.contains("Error response")
+                    || msg.contains("OCI runtime")
+                    || msg.contains("failed to create");
+                if is_error_state || has_error_msg {
                     let _ = client.destroy_instance(instance_id).await;
                     config::remove_instance(instance_id).ok();
-                    anyhow::bail!("Instance entered '{s}' state. Destroyed.\n  {msg}");
+                    anyhow::bail!("Instance failed (status: {s}). Destroyed.\n  {msg}");
                 }
 
                 // Print status when it changes (avoid flooding identical lines).
