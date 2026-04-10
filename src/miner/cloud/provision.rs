@@ -199,7 +199,7 @@ pub async fn start(
     ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
 
     // Verify miner started
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let check = ssh::exec(ssh_key, &ssh_host, ssh_port, "pgrep -a hrmw")?;
     if check.trim().is_empty() {
         let log =
@@ -287,7 +287,7 @@ pub async fn restart(
     ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
 
     // Verify
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let check = ssh::exec(ssh_key, &ssh_host, ssh_port, "pgrep -a hrmw")?;
     if check.trim().is_empty() {
         let log =
@@ -713,7 +713,7 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
     let mut api_errors = 0u32;
     let mut prev_msg = String::new();
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         match client.get_instance(instance_id).await {
             Ok(inst) if inst.is_running() => return Ok(inst),
             Ok(inst) => {
@@ -757,14 +757,14 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
 }
 
 async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
-    // 24 × 5s = 2 minutes max. Instance is running — SSH should be fast.
-    for _ in 0..24 {
+    // Poll every 2s — instance is running, SSH should come up fast.
+    for _ in 0..60 {
         if let Ok(out) = ssh::exec(ssh_key, host, port, "echo ok") {
             if out.contains("ok") {
                 return Ok(());
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     anyhow::bail!("SSH not ready after 2 minutes")
 }

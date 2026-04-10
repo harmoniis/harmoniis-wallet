@@ -37,25 +37,37 @@ pub struct MiningReportResponse {
 }
 
 /// Mining protocol client.
+#[derive(Clone)]
 pub struct MiningProtocol {
     server_url: String,
     http: Client,
-    /// Blocking HTTP client for the dedicated submission OS thread.
-    http_blocking: reqwest::blocking::Client,
+    /// Blocking HTTP client — created lazily in submitter OS threads
+    /// (not in async context, where reqwest::blocking panics).
+    http_blocking: Option<reqwest::blocking::Client>,
 }
 
 impl MiningProtocol {
     pub fn new(server_url: &str) -> anyhow::Result<Self> {
         let timeout = std::time::Duration::from_secs(60);
         let http = Client::builder().timeout(timeout).build()?;
-        let http_blocking = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()?;
+        // Blocking client created lazily in submitter threads (not here)
+        // because reqwest::blocking::Client::new() panics inside async context.
         Ok(MiningProtocol {
             server_url: server_url.trim_end_matches('/').to_string(),
             http,
-            http_blocking,
+            http_blocking: None,
         })
+    }
+
+    /// Create blocking client — must be called from a non-async OS thread.
+    pub fn ensure_blocking_client(&mut self) {
+        if self.http_blocking.is_none() {
+            let timeout = std::time::Duration::from_secs(60);
+            self.http_blocking = reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .build()
+                .ok();
+        }
     }
 
     /// Fetch current mining target from the server.
@@ -87,11 +99,16 @@ impl MiningProtocol {
 
     /// Blocking variant of `submit_report` for the dedicated OS submission thread.
     /// Pure blocking I/O — no tokio runtime involvement.
+    /// Call `ensure_blocking_client()` first from a non-async thread.
     pub fn submit_report_blocking(
         &self,
         preimage: &str,
         hash: &[u8; 32],
     ) -> anyhow::Result<MiningReportResponse> {
+        let client = self
+            .http_blocking
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("blocking client not initialized"))?;
         let url = format!("{}/api/v1/mining_report", self.server_url);
         let hash_decimal = BigUint::from_bytes_be(hash).to_string();
         let body_str = format!(
@@ -99,8 +116,7 @@ impl MiningProtocol {
             preimage, hash_decimal
         );
 
-        let resp = self
-            .http_blocking
+        let resp = client
             .post(&url)
             .header("Content-Type", "application/json")
             .body(body_str)

@@ -187,10 +187,11 @@ fn retry_pending_solutions_inner(
         let server_url = server_url.clone();
 
         handles.push(std::thread::spawn(move || {
-            let proto = match MiningProtocol::new(&server_url) {
+            let mut proto = match MiningProtocol::new(&server_url) {
                 Ok(p) => p,
                 Err(_) => return,
             };
+            proto.ensure_blocking_client();
             for i in start..end {
                 let entry = &entries[i];
                 let n = progress.fetch_add(1, Ordering::Relaxed) + 1;
@@ -548,6 +549,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             .name(format!("submitter-{thread_id}"))
             .spawn(move || {
                 eprintln!("[submitter-{thread_id}] started");
+                // Create blocking HTTP client here (OS thread, not async context).
+                let mut proto = (*sub_proto).clone();
+                proto.ensure_blocking_client();
                 loop {
                     let report = {
                         let rx = rx.lock().unwrap();
@@ -565,7 +569,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     );
 
                     // Pure blocking HTTP — no tokio runtime involvement.
-                    match sub_proto.submit_report_blocking(&report.preimage, &report.hash) {
+                    match proto.submit_report_blocking(&report.preimage, &report.hash) {
                         Ok(resp) => {
                             let http_ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
