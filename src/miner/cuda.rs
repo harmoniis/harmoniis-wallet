@@ -239,7 +239,7 @@ impl CudaMiner {
         Ok(results)
     }
 
-    fn dispatch_range(
+    pub fn dispatch_range(
         &self,
         midstate: &Sha256Midstate,
         difficulty: u32,
