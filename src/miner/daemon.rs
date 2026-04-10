@@ -507,16 +507,46 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
     let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
 
-    // ── No in-process submitter threads ─────────────────────────────────
+    // ── Subprocess reporter (64 threads, separate address space) ────────
     //
-    // Solutions are written to miner_pending_solutions.log ONLY.
-    // A separate reporter process (`hrmw webminer collect` or `cloud watch`)
-    // handles submission with massive parallelism — completely separate OS
-    // process, ZERO impact on GPU mining.
+    // Spawns `hrmw webminer report-worker` as a child process. Solutions
+    // are piped to its stdin (sub-microsecond, no file polling). The child
+    // runs 64 blocking HTTP threads in its own address space — ZERO TLB
+    // shootdown interference with CUDA dispatch.
     //
-    // Any in-process threads (even pure blocking OS threads) interfere with
-    // CUDA scheduling: 3 threads = 72 GH/s, 64 threads = 31 GH/s,
-    // tokio runtimes = 25 GH/s.  Zero threads = maximum GPU throughput.
+    // In-process threads are forbidden: even idle reqwest::blocking threads
+    // cause TLB shootdowns from malloc/free that stall CUDA API calls on
+    // GPU dispatch cores (72 GH/s → 22 GH/s with 64 in-process threads).
+    //
+    // Solutions are ALSO written to file for crash safety / collect fallback.
+    let mut reporter_stdin = {
+        let exe = std::env::current_exe().unwrap_or_else(|_| "hrmw".into());
+        match std::process::Command::new(&exe)
+            .args([
+                "webminer",
+                "report-worker",
+                "--server",
+                &config.server_url,
+                "--threads",
+                "64",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let stdin = child.stdin.take();
+                println!("Reporter subprocess started (PID {})", child.id());
+                stdin
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to spawn report-worker: {e}");
+                eprintln!("Solutions will only be written to file (use collect --watch).");
+                None
+            }
+        }
+    };
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
@@ -684,7 +714,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                // Solution persisted to file above — reporter process picks it up.
+                // Pipe to subprocess reporter (instant, no file polling).
+                if let Some(ref mut stdin) = reporter_stdin {
+                    use std::io::Write;
+                    let _ = stdin.write_all(pending_line.as_bytes());
+                    let _ = stdin.flush();
+                }
             }
         }
     }

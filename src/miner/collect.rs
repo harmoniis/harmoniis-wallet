@@ -252,6 +252,124 @@ pub fn watch(server_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Pipe-fed reporter worker — runs as a SEPARATE PROCESS spawned by the miner.
+///
+/// Reads solution lines from stdin (pipe from parent miner process), distributes
+/// to `threads` worker threads for parallel HTTP submission. Each thread has its
+/// own `reqwest::blocking::Client` — safe because this runs in a separate address
+/// space with zero GPU/TLB interference.
+///
+/// Line format: `preimage\t0xhash\tkeep_secret\tdifficulty=N`
+pub fn report_worker(server_url: &str, threads: usize) -> anyhow::Result<()> {
+    use std::io::BufRead;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone());
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone());
+
+    let keeps_path = daemon::pending_keep_log_path();
+    let submitted = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+
+    // Per-worker mpsc channels — round-robin dispatch, zero contention.
+    let mut txs = Vec::with_capacity(threads);
+    for t in 0..threads {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, [u8; 32], String)>();
+        txs.push(tx);
+        let server = server_url.to_string();
+        let kp = keeps_path.clone();
+        let sub = submitted.clone();
+        let fail = failed.clone();
+        std::thread::Builder::new()
+            .name(format!("rw-{t}"))
+            .spawn(move || {
+                let mut proto = match super::protocol::MiningProtocol::new(&server) {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                proto.ensure_blocking_client();
+                while let Ok((preimage, hash, keep)) = rx.recv() {
+                    match proto.submit_report_blocking(&preimage, &hash) {
+                        Ok(_) => {
+                            sub.fetch_add(1, Ordering::Relaxed);
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&kp)
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "{}", keep)
+                                });
+                            eprintln!("  Reported: {}...", &keep[..keep.len().min(24)]);
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("Didn't use a new secret") {
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&kp)
+                                    .and_then(|mut f| {
+                                        use std::io::Write;
+                                        writeln!(f, "{}", keep)
+                                    });
+                            } else {
+                                fail.fetch_add(1, Ordering::Relaxed);
+                                eprintln!("  Submit failed: {msg}");
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    eprintln!("report-worker: {threads} threads, reading stdin, server={server_url}");
+
+    let stdin = std::io::stdin().lock();
+    let mut rr = 0usize;
+    for line in stdin.lines() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break, // parent closed pipe
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let preimage = parts[0].to_string();
+        let keep = parts[2].to_string();
+        let hash_hex = parts[1].trim_start_matches("0x");
+        if let Ok(b) = hex::decode(hash_hex) {
+            if b.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                let _ = txs[rr % threads].send((preimage, arr, keep));
+                rr = rr.wrapping_add(1);
+            }
+        }
+    }
+
+    // Drop senders to signal workers to exit.
+    drop(txs);
+    // Brief wait for in-flight submissions.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let s = submitted.load(Ordering::Relaxed);
+    let f = failed.load(Ordering::Relaxed);
+    eprintln!("report-worker exiting: submitted={s} failed={f}");
+    Ok(())
+}
+
 /// Merge overflow solutions into the main pending file (dedup by line).
 fn merge_overflow_into_pending() {
     let overflow = daemon::overflow_solutions_path();

@@ -1141,6 +1141,14 @@ enum WebminerCmd {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
+    /// Pipe-fed solution reporter (spawned by miner, reads stdin)
+    #[command(hide = true)]
+    ReportWorker {
+        #[arg(long, default_value = "https://webcash.org")]
+        server: String,
+        #[arg(long, default_value_t = 64)]
+        threads: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3982,6 +3990,10 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Run `hrmw webcash recover` to pick up newly accepted webcash.");
             }
+        }
+        Cmd::Webminer(WebminerCmd::ReportWorker { server, threads }) => {
+            harmoniis_wallet::miner::collect::report_worker(&server, threads)?;
+            return Ok(());
         }
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
             use harmoniis_wallet::miner::cloud::{
