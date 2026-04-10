@@ -531,10 +531,8 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Wallet insert deferred to collect/recover — keeps submitters 100%
     // tokio-free.  Keep log is the crash-safety record.
     const SUBMITTER_THREADS: usize = 64;
-    const CHANNEL_CAPACITY: usize = 256;
 
-    let (solution_tx, solution_rx) =
-        std::sync::mpsc::sync_channel::<SolutionReport>(CHANNEL_CAPACITY);
+    let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
     let mut submitter_handles = Vec::with_capacity(SUBMITTER_THREADS);
     // Wallet insert deferred to collect/recover — submitters are 100% tokio-free.
@@ -804,39 +802,13 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                match solution_tx.try_send(SolutionReport {
-                    preimage: preimage.clone(),
+                if let Err(e) = solution_tx.send(SolutionReport {
+                    preimage,
                     hash: solution.hash,
                     difficulty_achieved: solution.difficulty_achieved,
                     keep_secret: wu.keep_secret,
                 }) {
-                    Ok(()) => {} // queued for async reporting
-                    Err(std::sync::mpsc::TrySendError::Full(report)) => {
-                        // Channel full — mining outpaces reporting.
-                        // Write to overflow file for local dispatch daemon.
-                        eprintln!(
-                            "[miner] channel full — overflow to file (difficulty={})",
-                            report.difficulty_achieved,
-                        );
-                        let overflow_line = format!(
-                            "{}\t0x{}\t{}\tdifficulty={}\n",
-                            report.preimage,
-                            hex::encode(&report.hash),
-                            report.keep_secret,
-                            report.difficulty_achieved,
-                        );
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(overflow_solutions_path())
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                f.write_all(overflow_line.as_bytes())
-                            });
-                    }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                        eprintln!("[miner] reporter channel disconnected");
-                    }
+                    eprintln!("[miner] failed to queue solution: {e}");
                 }
             }
         }
