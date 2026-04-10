@@ -10,6 +10,14 @@ use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
+/// Solution payload dispatched to in-process submitter threads.
+struct SolutionMessage {
+    preimage: String,
+    hash: [u8; 32],
+    keep_secret: String,
+    difficulty_achieved: u32,
+}
+
 fn default_wallet_root() -> PathBuf {
     if let Ok(path) = std::env::var("HARMONIIS_WALLET_ROOT") {
         let trimmed = path.trim();
@@ -461,7 +469,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         select_backend(config.backend, config.cpu_threads).await?
     };
     let chunk_size = backend.max_batch_hint();
-    let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 64);
+    let pipeline_depth = backend.recommended_pipeline_depth().clamp(1, 128);
     println!("Mining setup:");
     println!("  backend_mode={}", config.backend.as_cli_str());
     println!("  backend_name={}", backend.name());
@@ -507,16 +515,64 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
     let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
 
-    // ── No in-process submitter threads ─────────────────────────────────
+    // ── 64 pure-blocking submitter threads ─────────────────────────────
     //
-    // Solutions are written to miner_pending_solutions.log ONLY.
-    // A separate reporter process (`hrmw webminer collect` or `cloud watch`)
-    // handles submission with massive parallelism — completely separate OS
-    // process, ZERO impact on GPU mining.
+    // Solutions dispatched via crossbeam MPMC channel to 64 OS threads.
+    // Each uses reqwest::blocking::Client (zero tokio involvement).
+    // MPMC channel is lock-free — no Mutex contention (the old
+    // Arc<Mutex<Receiver>> pattern caused 31 GH/s with 64 threads).
     //
-    // Any in-process threads (even pure blocking OS threads) interfere with
-    // CUDA scheduling: 3 threads = 72 GH/s, 64 threads = 31 GH/s,
-    // tokio runtimes = 25 GH/s.  Zero threads = maximum GPU throughput.
+    // GPU scheduling is independent of CPU threads doing blocking HTTP
+    // I/O. The old regression was Mutex contention, not GPU interference.
+    //
+    // Solutions are ALSO written to file for crash safety and as fallback
+    // for the collect --watch reporter process.
+
+    const SUBMITTER_THREADS: usize = 64;
+    let (solution_tx, solution_rx) = crossbeam_channel::unbounded::<SolutionMessage>();
+
+    for t in 0..SUBMITTER_THREADS {
+        let rx = solution_rx.clone();
+        let server = config.server_url.clone();
+        let keep_path = pending_keep_path.clone();
+        let tracker = tracker.clone();
+        std::thread::Builder::new()
+            .name(format!("submitter-{t}"))
+            .spawn(move || {
+                let mut proto = match MiningProtocol::new(&server) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("submitter-{t}: init failed: {e}");
+                        return;
+                    }
+                };
+                proto.ensure_blocking_client();
+
+                while let Ok(sol) = rx.recv() {
+                    match proto.submit_report_blocking(&sol.preimage, &sol.hash) {
+                        Ok(_) => {
+                            tracker.record_accepted();
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&keep_path)
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "{}", sol.keep_secret)
+                                });
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if !msg.contains("Didn't use a new secret") {
+                                eprintln!("submitter-{t}: d={} {msg}", sol.difficulty_achieved);
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+    drop(solution_rx); // Only submitter threads hold receivers.
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
@@ -684,7 +740,13 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                // Solution persisted to file above — reporter process picks it up.
+                // Dispatch to in-process submitter threads (non-blocking send).
+                let _ = solution_tx.send(SolutionMessage {
+                    preimage,
+                    hash: solution.hash,
+                    keep_secret: wu.keep_secret.to_string(),
+                    difficulty_achieved: solution.difficulty_achieved,
+                });
             }
         }
     }

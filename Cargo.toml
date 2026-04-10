@@ -105,6 +105,7 @@ rayon       = "1.10"
 base64      = "0.22"
 num-bigint  = "0.4"
 signal-hook = "0.3"
+crossbeam-channel = "0.5"
 async-trait = "0.1"
 bytemuck    = { version = "1", features = ["derive"] }
 libc        = "0.2"

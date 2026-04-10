@@ -17,7 +17,9 @@ __device__ __forceinline__ unsigned int ch(
     const unsigned int y,
     const unsigned int z
 ) {
-    return (x & y) ^ (~x & z);
+    unsigned int r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
 }
 
 __device__ __forceinline__ unsigned int maj(
@@ -25,7 +27,9 @@ __device__ __forceinline__ unsigned int maj(
     const unsigned int y,
     const unsigned int z
 ) {
-    return (x & y) ^ (x & z) ^ (y & z);
+    unsigned int r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(r) : "r"(x), "r"(y), "r"(z));
+    return r;
 }
 
 __device__ __forceinline__ unsigned int ep0(const unsigned int x) {
@@ -63,7 +67,7 @@ __constant__ unsigned int K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-__global__ __launch_bounds__(256) void mine_sha256(
+__global__ __launch_bounds__(256, 5) void mine_sha256(
     const unsigned int* nonce_table,
     const unsigned int s0,
     const unsigned int s1,
@@ -96,8 +100,8 @@ __global__ __launch_bounds__(256) void mine_sha256(
         return;
     }
 
-    const unsigned int nonce1_idx = thread_id / 1000u;
-    const unsigned int nonce2_idx = thread_id % 1000u;
+    const unsigned int nonce1_idx = __umulhi(thread_id, 0x10624DD3u) >> 6u;
+    const unsigned int nonce2_idx = thread_id - nonce1_idx * 1000u;
 
     // 16-word rolling message schedule.
     unsigned int w[16];

@@ -160,7 +160,7 @@ impl MinerBackend for MultiCudaMiner {
         // the CPU loop overhead (work unit creation, task spawning) dominates and
         // throughput doesn't scale with more GPUs. Multiply by 4 so each GPU
         // processes multiple work units per cycle, keeping it busy longer.
-        (self.miners.len() * 4).max(1)
+        (self.miners.len() * 8).max(1)
     }
 
     async fn mine_work_units(

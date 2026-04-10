@@ -17,7 +17,7 @@ use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPA
 const CUDA_BLOCK_SIZE: u32 = 256;
 
 /// Maximum number of work units batched per GPU in a single sync cycle.
-const MAX_BATCH: usize = 8;
+const MAX_BATCH: usize = 16;
 
 pub struct CudaMiner {
     stream: Arc<CudaStream>,

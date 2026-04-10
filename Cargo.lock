@@ -1731,6 +1731,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "crossbeam-channel",
  "cudarc",
  "curve25519-dalek",
  "dirs-next",
