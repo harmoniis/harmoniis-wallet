@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use cudarc::driver::CudaContext;
+use tokio::task::JoinSet;
 
 use super::cuda::CudaMiner;
 use super::sha256::Sha256Midstate;
@@ -174,42 +175,33 @@ impl MinerBackend for MultiCudaMiner {
         }
 
         let gpu_count = self.miners.len();
-        let miners = &self.miners;
 
-        // Pure OS threads per GPU — no tokio scheduling overhead.
-        // Each GPU's mine_batch blocks on CUDA sync. OS threads handle this
-        // natively without starving any runtime. Scales linearly with GPU count.
+        // Batch dispatch per GPU: fire all kernels into separate result buffers,
+        // sync ONCE, read all results. Eliminates N-1 redundant sync calls per
+        // GPU (the main source of dispatch overhead at sub-ms kernel times).
+        let mut tasks = JoinSet::new();
+        for gpu_idx in 0..gpu_count {
+            let miner = self.miners[gpu_idx].clone();
+            let gpu_indices: Vec<usize> = (gpu_idx..midstates.len()).step_by(gpu_count).collect();
+            let gpu_midstates: Vec<Sha256Midstate> =
+                gpu_indices.iter().map(|&i| midstates[i].clone()).collect();
+            tasks.spawn(async move {
+                let chunks = miner.mine_batch(&gpu_midstates, difficulty)?;
+                let results: Vec<(usize, MiningChunkResult)> =
+                    gpu_indices.into_iter().zip(chunks).collect();
+                Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
+            });
+        }
+
         let mut ordered: Vec<Option<MiningChunkResult>> =
             (0..midstates.len()).map(|_| None).collect();
-
-        std::thread::scope(|s| {
-            let mut handles = Vec::with_capacity(gpu_count);
-            for gpu_idx in 0..gpu_count {
-                let miner = miners[gpu_idx].clone();
-                let gpu_indices: Vec<usize> =
-                    (gpu_idx..midstates.len()).step_by(gpu_count).collect();
-                let gpu_midstates: Vec<Sha256Midstate> =
-                    gpu_indices.iter().map(|&i| midstates[i].clone()).collect();
-                handles.push(s.spawn(move || {
-                    let chunks = miner.mine_batch(&gpu_midstates, difficulty)?;
-                    let results: Vec<(usize, MiningChunkResult)> =
-                        gpu_indices.into_iter().zip(chunks).collect();
-                    Ok::<Vec<(usize, MiningChunkResult)>, anyhow::Error>(results)
-                }));
+        while let Some(joined) = tasks.join_next().await {
+            let gpu_results =
+                joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
+            for (idx, chunk) in gpu_results {
+                ordered[idx] = Some(chunk);
             }
-
-            for handle in handles {
-                match handle.join() {
-                    Ok(Ok(gpu_results)) => {
-                        for (idx, chunk) in gpu_results {
-                            ordered[idx] = Some(chunk);
-                        }
-                    }
-                    Ok(Err(e)) => eprintln!("CUDA mining error: {e}"),
-                    Err(_) => eprintln!("CUDA thread panicked"),
-                }
-            }
-        });
+        }
 
         let mut out = Vec::with_capacity(midstates.len());
         for item in ordered {
@@ -239,50 +231,22 @@ impl MinerBackend for MultiCudaMiner {
         }
 
         let started = std::time::Instant::now();
-        let miners = &self.miners;
-
-        // Collect results from threads, then merge outside scope.
-        let chunks: Vec<MiningChunkResult> = std::thread::scope(|s| {
-            let handles: Vec<_> = assignments
-                .into_iter()
-                .map(|(idx, range_start, range_count)| {
-                    let miner = miners[idx].clone();
-                    let midstate = midstate.clone();
-                    let cancel = cancel.clone();
-                    s.spawn(move || {
-                        if let Some(flag) = cancel.as_ref() {
-                            if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                return Ok(MiningChunkResult::empty());
-                            }
-                        }
-                        let range_end = range_start
-                            .saturating_add(range_count)
-                            .min(NONCE_SPACE_SIZE);
-                        let t = std::time::Instant::now();
-                        let result = miner.dispatch_range(
-                            &midstate,
-                            difficulty,
-                            range_start,
-                            range_end - range_start,
-                        )?;
-                        Ok::<MiningChunkResult, anyhow::Error>(MiningChunkResult {
-                            result,
-                            attempted: range_count as u64,
-                            elapsed: t.elapsed(),
-                        })
-                    })
-                })
-                .collect();
-
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok().and_then(|r| r.ok()))
-                .collect()
-        });
+        let mut tasks = JoinSet::new();
+        for (idx, range_start, range_count) in assignments {
+            let miner = self.miners[idx].clone();
+            let midstate = midstate.clone();
+            let cancel = cancel.clone();
+            tasks.spawn(async move {
+                miner
+                    .mine_range_direct(&midstate, difficulty, range_start, range_count, cancel)
+                    .await
+            });
+        }
 
         let mut attempted = 0u64;
         let mut best: Option<MiningResult> = None;
-        for chunk in chunks {
+        while let Some(joined) = tasks.join_next().await {
+            let chunk = joined.map_err(|e| anyhow::anyhow!("CUDA task join error: {}", e))??;
             attempted = attempted.saturating_add(chunk.attempted);
             best = choose_best_result(best, chunk.result);
         }
