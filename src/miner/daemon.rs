@@ -4,21 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use webylib::SecretWebcash;
-
 use super::protocol::MiningProtocol;
 use super::sha256::Sha256Midstate;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-
-/// Solution queued for submission on the dedicated OS thread.
-struct SolutionReport {
-    preimage: String,
-    hash: [u8; 32],
-    difficulty_achieved: u32,
-    keep_secret: SecretWebcash,
-}
-
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
 fn default_wallet_root() -> PathBuf {
@@ -518,121 +507,16 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
     let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
 
-    // ── Solution submitter (pure blocking — proven 75 GH/s pattern) ─────
+    // ── No in-process submitter threads ─────────────────────────────────
     //
-    // Pure OS threads + reqwest::blocking::Client.  ZERO tokio involvement.
-    // Any tokio runtime in submitter threads (even Handle::block_on) causes
-    // massive mining speed regression (75 → 25 GH/s).  See commit 012fb09.
+    // Solutions are written to miner_pending_solutions.log ONLY.
+    // A separate reporter process (`hrmw webminer collect` or `cloud watch`)
+    // handles submission with massive parallelism — completely separate OS
+    // process, ZERO impact on GPU mining.
     //
-    // 3 threads — the proven 75 GH/s pattern from v0.1.50.
-    // 64 threads caused mutex contention that killed mining speed (31 GH/s).
-    // Server takes 6-14s per response → 3 threads = ~18 reports/min.
-    // Local dispatch daemon handles overflow via SSH.
-    const SUBMITTER_THREADS: usize = 3;
-
-    let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
-    let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
-    let mut submitter_handles = Vec::with_capacity(SUBMITTER_THREADS);
-    // Wallet insert deferred to collect/recover — submitters are 100% tokio-free.
-
-    for thread_id in 0..SUBMITTER_THREADS {
-        let rx = shared_rx.clone();
-        let sub_proto = protocol.clone();
-        let sub_tracker = tracker.clone();
-        let sub_pending_keep = pending_keep_path.clone();
-        let sub_shared_target = shared_target.clone();
-        let handle = std::thread::Builder::new()
-            .name(format!("submitter-{thread_id}"))
-            .spawn(move || {
-                eprintln!("[submitter-{thread_id}] started");
-                // Create blocking HTTP client here (OS thread, not async context).
-                let mut proto = (*sub_proto).clone();
-                proto.ensure_blocking_client();
-                loop {
-                    let report = {
-                        let rx = rx.lock().unwrap();
-                        rx.recv()
-                    };
-                    let report = match report {
-                        Ok(r) => r,
-                        Err(_) => break, // channel closed
-                    };
-                    let t0 = std::time::Instant::now();
-                    eprintln!(
-                        "[submitter-{thread_id}] submitting difficulty={} hash=0x{}...",
-                        report.difficulty_achieved,
-                        hex::encode(&report.hash[..4]),
-                    );
-
-                    // Pure blocking HTTP — no tokio runtime involvement.
-                    match proto.submit_report_blocking(&report.preimage, &report.hash) {
-                        Ok(resp) => {
-                            let http_ms = t0.elapsed().as_millis();
-                            sub_tracker.record_accepted();
-                            eprintln!("[submitter-{thread_id}] accepted in {http_ms}ms");
-                            println!("Mining report accepted! keep={}", report.keep_secret);
-
-                            if let Some(new_diff) = resp.difficulty_target {
-                                let mut t = sub_shared_target.write().unwrap();
-                                if new_diff != t.difficulty {
-                                    println!(
-                                        "Difficulty adjustment: {} → {}",
-                                        t.difficulty, new_diff
-                                    );
-                                    t.difficulty = new_diff;
-                                    sub_tracker.set_difficulty(new_diff);
-                                }
-                            }
-
-                            // Write keep to pending log (crash safety backup).
-                            let keep_str = report.keep_secret.to_string();
-                            if let Err(e) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&sub_pending_keep)
-                                .and_then(|mut f| {
-                                    use std::io::Write;
-                                    writeln!(f, "{}", keep_str)
-                                })
-                            {
-                                eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
-                            }
-
-                            // Wallet insert deferred to collect/recover —
-                            // keeps submitter threads 100% tokio-free.
-                            // The keep log is the crash-safety record.
-                        }
-                        Err(e) => {
-                            let http_ms = t0.elapsed().as_millis();
-                            let msg = e.to_string();
-                            if msg.contains("Didn't use a new secret") {
-                                eprintln!("[submitter-{thread_id}] already accepted ({http_ms}ms)");
-                            } else {
-                                eprintln!("[submitter-{thread_id}] FAILED in {http_ms}ms: {msg}");
-                                let orphan_line = format!(
-                                    "{} 0x{} {} difficulty={}\n",
-                                    report.preimage,
-                                    hex::encode(&report.hash),
-                                    report.keep_secret,
-                                    report.difficulty_achieved,
-                                );
-                                let _ = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(orphan_log_path())
-                                    .and_then(|mut f| {
-                                        use std::io::Write;
-                                        f.write_all(orphan_line.as_bytes())
-                                    });
-                            }
-                        }
-                    }
-                }
-                eprintln!("[submitter-{thread_id}] exiting (channel closed)");
-            })
-            .expect("failed to spawn solution submitter thread");
-        submitter_handles.push(handle);
-    }
+    // Any in-process threads (even pure blocking OS threads) interfere with
+    // CUDA scheduling: 3 threads = 72 GH/s, 64 threads = 31 GH/s,
+    // tokio runtimes = 25 GH/s.  Zero threads = maximum GPU throughput.
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
@@ -800,31 +684,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                if let Err(e) = solution_tx.send(SolutionReport {
-                    preimage,
-                    hash: solution.hash,
-                    difficulty_achieved: solution.difficulty_achieved,
-                    keep_secret: wu.keep_secret,
-                }) {
-                    eprintln!("[miner] failed to queue solution: {e}");
-                }
+                // Solution persisted to file above — reporter process picks it up.
             }
         }
     }
 
-    // Graceful shutdown: drop the sender so submitter threads see channel
-    // closed and drain remaining solutions before exiting.
-    println!("Miner shutting down — draining pending submissions...");
-    drop(solution_tx);
-    drop(shared_rx);
-    let drain_start = std::time::Instant::now();
-    for handle in submitter_handles {
-        let _ = handle.join();
-    }
-    let drain_secs = drain_start.elapsed().as_secs();
-    if drain_secs > 0 {
-        println!("  Drained pending submissions in {drain_secs}s");
-    }
+    println!("Miner shutting down...");
 
     let _ = std::fs::remove_file(pid_file_path());
     let _ = tracker.write_to_file(&status_path);
