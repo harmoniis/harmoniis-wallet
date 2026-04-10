@@ -1132,6 +1132,9 @@ enum WebminerCmd {
         /// Run in background (daemon mode — used automatically after cloud stop)
         #[arg(short = 'd', long)]
         daemon: bool,
+        /// Watch mode — continuously report new solutions as they're mined
+        #[arg(short = 'w', long)]
+        watch: bool,
     },
     /// Cloud mining on Vast.ai GPU instances
     Cloud {
@@ -3946,18 +3949,23 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             run_webminer_benchmarks(cpu_threads, cpu_target_mhs, gpu_target_mhs, strict).await?;
         }
-        Cmd::Webminer(WebminerCmd::Collect { daemon }) => {
+        Cmd::Webminer(WebminerCmd::Collect { daemon, watch }) => {
+            if watch {
+                // Watch mode: tail solutions file, report immediately.
+                harmoniis_wallet::miner::collect::watch("https://webcash.org")?;
+                return Ok(());
+            }
             if daemon {
-                // Daemon mode: fork to background, write PID, run silently.
+                // Daemon mode: fork to background with --watch.
                 let exe = std::env::current_exe().context("cannot find own executable")?;
                 let child = std::process::Command::new(exe)
-                    .args(["webminer", "collect"])
+                    .args(["webminer", "collect", "--watch"])
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
                     .context("failed to spawn collect daemon")?;
-                println!("Collect daemon started (PID {}).", child.id());
+                println!("Solution reporter started (PID {}).", child.id());
                 return Ok(());
             }
             // Foreground: verbose per-solution feedback.

@@ -69,6 +69,189 @@ pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
     })
 }
 
+/// Watch mode — continuously tail the solutions file and report immediately.
+/// Runs as a separate OS process alongside the miner. 32 parallel threads.
+/// Polls every 200ms for near-instant submission.
+pub fn watch(server_url: &str) -> anyhow::Result<()> {
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, stop2);
+    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone());
+
+    let solutions_path = daemon::pending_solutions_path();
+    let keeps_path = daemon::pending_keep_log_path();
+
+    // Pre-create blocking protocol clients for submitter threads.
+    let mut protocol = super::protocol::MiningProtocol::new(server_url)?;
+    protocol.ensure_blocking_client();
+    let protocol = Arc::new(protocol);
+
+    // Track file position to only process new lines.
+    let mut file_pos: u64 = if solutions_path.exists() {
+        std::fs::metadata(&solutions_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Load existing keeps to skip already-submitted.
+    let mut known_keeps: HashSet<String> = if keeps_path.exists() {
+        std::fs::read_to_string(&keeps_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    println!("Solution reporter started (watching for new solutions)");
+    println!("  File: {}", solutions_path.display());
+    println!("  Server: {server_url}");
+    let mut total_submitted = 0usize;
+    let mut total_failed = 0usize;
+
+    while !stop.load(Ordering::Relaxed) {
+        // Check for new data in the solutions file.
+        let current_len = std::fs::metadata(&solutions_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        if current_len > file_pos {
+            // Read only the new bytes.
+            let mut file = match std::fs::File::open(&solutions_path) {
+                Ok(f) => f,
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+            };
+            use std::io::Seek;
+            let _ = file.seek(std::io::SeekFrom::Start(file_pos));
+            let mut new_data = String::new();
+            let _ = file.read_to_string(&mut new_data);
+            file_pos = current_len;
+
+            // Parse new entries and filter already-submitted.
+            let mut entries = Vec::new();
+            for line in new_data.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() < 3 {
+                    continue;
+                }
+                let keep_secret = parts[2].to_string();
+                if known_keeps.contains(&keep_secret) {
+                    continue;
+                }
+                let hash_hex = parts[1].trim_start_matches("0x");
+                if let Ok(b) = hex::decode(hash_hex) {
+                    if b.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        entries.push((parts[0].to_string(), arr, keep_secret));
+                    }
+                }
+            }
+
+            if !entries.is_empty() {
+                let count = entries.len();
+                // Submit all in parallel (up to 32 threads).
+                let threads = count.min(32);
+                let entries = Arc::new(entries);
+                let keeps_path = keeps_path.clone();
+                let mut handles = Vec::new();
+                let chunk = (count + threads - 1) / threads;
+
+                for t in 0..threads {
+                    let start = t * chunk;
+                    let end = (start + chunk).min(count);
+                    if start >= count {
+                        break;
+                    }
+                    let entries = entries.clone();
+                    let proto = protocol.clone();
+                    let kp = keeps_path.clone();
+
+                    handles.push(std::thread::spawn(move || {
+                        let mut sub = 0usize;
+                        let mut fail = 0usize;
+                        for i in start..end {
+                            let (ref preimage, ref hash, ref keep) = entries[i];
+                            match proto.submit_report_blocking(preimage, hash) {
+                                Ok(_) => {
+                                    sub += 1;
+                                    let _ = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&kp)
+                                        .and_then(|mut f| {
+                                            use std::io::Write;
+                                            writeln!(f, "{}", keep)
+                                        });
+                                    println!("  Reported: {}", &keep[..keep.len().min(30)]);
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    if msg.contains("Didn't use a new secret") {
+                                        // Already accepted — write keep to avoid retry.
+                                        let _ = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(&kp)
+                                            .and_then(|mut f| {
+                                                use std::io::Write;
+                                                writeln!(f, "{}", keep)
+                                            });
+                                    } else {
+                                        fail += 1;
+                                        eprintln!("  Failed: {msg}");
+                                    }
+                                }
+                            }
+                        }
+                        (sub, fail)
+                    }));
+                }
+
+                for h in handles {
+                    if let Ok((s, f)) = h.join() {
+                        total_submitted += s;
+                        total_failed += f;
+                    }
+                }
+
+                // Update known keeps.
+                if let Ok(text) = std::fs::read_to_string(&keeps_path) {
+                    known_keeps = text
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.to_string())
+                        .collect();
+                }
+
+                println!(
+                    "[reporter] batch={count} submitted={total_submitted} failed={total_failed}"
+                );
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    println!("Reporter stopped. Total: submitted={total_submitted} failed={total_failed}");
+    Ok(())
+}
+
 /// Merge overflow solutions into the main pending file (dedup by line).
 fn merge_overflow_into_pending() {
     let overflow = daemon::overflow_solutions_path();

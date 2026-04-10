@@ -198,6 +198,10 @@ pub async fn start(
         format!("{REMOTE_HRMW} webminer start -f --accept-terms --webcash-wallet {REMOTE_WALLET}");
     ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
 
+    // Start solution reporter as a SEPARATE process — zero GPU interference.
+    let reporter_cmd = format!("{REMOTE_HRMW} webminer collect --watch");
+    ssh::exec_background(ssh_key, &ssh_host, ssh_port, &reporter_cmd)?;
+
     // Verify miner started
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let check = ssh::exec(ssh_key, &ssh_host, ssh_port, "pgrep -a hrmw")?;
@@ -285,6 +289,10 @@ pub async fn restart(
     let cmd =
         format!("{REMOTE_HRMW} webminer start -f --accept-terms --webcash-wallet {REMOTE_WALLET}");
     ssh::exec_background(ssh_key, &ssh_host, ssh_port, &cmd)?;
+
+    // Start solution reporter as a SEPARATE process.
+    let reporter_cmd = format!("{REMOTE_HRMW} webminer collect --watch");
+    ssh::exec_background(ssh_key, &ssh_host, ssh_port, &reporter_cmd)?;
 
     // Verify
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
