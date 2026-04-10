@@ -67,7 +67,7 @@ __constant__ unsigned int K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-__global__ __launch_bounds__(256, 5) void mine_sha256(
+__global__ __launch_bounds__(256) void mine_sha256(
     const unsigned int* nonce_table,
     const unsigned int s0,
     const unsigned int s1,
