@@ -517,22 +517,25 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
     // ── 64 pure-blocking submitter threads ─────────────────────────────
     //
-    // Solutions dispatched via crossbeam MPMC channel to 64 OS threads.
-    // Each uses reqwest::blocking::Client (zero tokio involvement).
-    // MPMC channel is lock-free — no Mutex contention (the old
-    // Arc<Mutex<Receiver>> pattern caused 31 GH/s with 64 threads).
+    // Each thread has its own mpsc::Receiver — zero contention, zero
+    // extra dependencies. The mining loop round-robins solutions across
+    // the 64 per-worker channels. Each thread uses reqwest::blocking::Client
+    // (zero tokio involvement).
     //
-    // GPU scheduling is independent of CPU threads doing blocking HTTP
-    // I/O. The old regression was Mutex contention, not GPU interference.
+    // The old Arc<Mutex<Receiver>> pattern caused 31 GH/s with 64 threads
+    // due to Mutex contention, NOT GPU interference. Per-worker channels
+    // eliminate that entirely.
     //
     // Solutions are ALSO written to file for crash safety and as fallback
     // for the collect --watch reporter process.
 
     const SUBMITTER_THREADS: usize = 64;
-    let (solution_tx, solution_rx) = crossbeam_channel::unbounded::<SolutionMessage>();
+    let mut solution_txs: Vec<std::sync::mpsc::Sender<SolutionMessage>> =
+        Vec::with_capacity(SUBMITTER_THREADS);
 
     for t in 0..SUBMITTER_THREADS {
-        let rx = solution_rx.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<SolutionMessage>();
+        solution_txs.push(tx);
         let server = config.server_url.clone();
         let keep_path = pending_keep_path.clone();
         let tracker = tracker.clone();
@@ -572,7 +575,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             })
             .ok();
     }
-    drop(solution_rx); // Only submitter threads hold receivers.
+    let mut submit_rr = 0usize; // round-robin counter for solution dispatch
 
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
@@ -740,13 +743,14 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                // Dispatch to in-process submitter threads (non-blocking send).
-                let _ = solution_tx.send(SolutionMessage {
+                // Dispatch to in-process submitter threads (round-robin, non-blocking).
+                let _ = solution_txs[submit_rr % SUBMITTER_THREADS].send(SolutionMessage {
                     preimage,
                     hash: solution.hash,
                     keep_secret: wu.keep_secret.to_string(),
                     difficulty_achieved: solution.difficulty_achieved,
                 });
+                submit_rr = submit_rr.wrapping_add(1);
             }
         }
     }
