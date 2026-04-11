@@ -121,22 +121,97 @@ Submit failed: error sending request for url (https://webcash.org/api/v1/mining_
 
 ### 4. Solution Reporting Time Constraint (UNSOLVED — PRIMARY CHALLENGE)
 
-**User requirement**: "we truly need multiple parallel reporting at least 64 reportings parallel if not more but with absolute no downside for CPU." The user also requires: "max 10-20 sec after stopping mining should collect the remaining ones."
+**User requirement**: "we truly need multiple parallel reporting at least 64 reportings parallel if not more but with absolute no downside for CPU. Each report takes 7 sec and we mine much faster than reporting. It should be max additional 10-20 sec after stopping mining to collect the remaining ones."
 
-**The problem**: Each solution submission to webcash.org takes ~7 seconds (server-side proof-of-work verification, measured: `accepted in 7138ms`). At 100 GH/s and difficulty 36, the miner finds ~1.5 solutions/second. With 3 submitter threads, throughput is 3/7 = 0.43 solutions/second — **the reporter can't keep up**.
+**User's core insight**: "reporting is a simple HTTP req that waits 7 sec for server to respond back. This is not hard CPU, it's a problem of understanding the architecture, processes, Rust, UNIX, and kernel very well."
 
-**The math**:
+#### Server-Side Timing Constraints (from webcash server source code)
+
+| Constraint | Limit | Impact |
+|------------|-------|--------|
+| **Timestamp window** | ±2 hours from server receipt | Solutions are valid for 2 hours. NOT the real bottleneck. |
+| **Difficulty validation** | Hash leading zeros must be >= server's CURRENT difficulty | **THE REAL BOTTLENECK** — if difficulty increases, ALL queued solutions are instantly invalid |
+| **Committed difficulty** | Preimage `difficulty` field must be >= current server difficulty | Same — difficulty increase kills pending solutions |
+| **Difficulty adjustment** | Every 128 mining reports, ±1 bit | At target rate (10s/report), adjustment every ~21 minutes |
+| **Mining amount** | Must exactly match server's current `mining_amount` | Epoch change (every 525,000 reports) invalidates all pending solutions |
+| **Unique preimage** | Duplicate preimages rejected (server stores hash) | Can't resubmit; each solution is one-shot |
+
+**Why fast reporting matters**: The 2-hour timestamp window is generous. The REAL danger is **difficulty adjustment**. If difficulty increases by 1 bit (from 36 to 37) while solutions are queued, every queued solution mined at difficulty 36 is REJECTED — the hash doesn't have enough leading zeros for difficulty 37. At 100 GH/s mining ~1.5 solutions/sec, a 5-minute reporting backlog means ~450 solutions lost if difficulty bumps.
+
+**The math (updated with difficulty risk)**:
 - Mining: ~1.5 solutions/sec at 100 GH/s, difficulty 36
 - 3 threads × (1 report / 7 seconds) = 0.43 reports/sec
-- Deficit: 1.5 - 0.43 = 1.07 solutions/sec accumulating in buffer
-- After 1 minute of mining: ~90 solutions found, ~26 reported, ~64 pending
-- Time to drain 64 pending after stopping: 64/0.43 = ~149 seconds (2.5 minutes!)
+- **Deficit: 1.07 solutions/sec accumulating in buffer**
+- After 1 minute: ~90 found, ~26 reported, ~64 pending
+- After 5 minutes: ~450 found, ~129 reported, ~321 pending
+- If difficulty bumps at 5 minutes: **321 solutions LOST**
+- Time to drain 321 pending with 3 threads: 321/0.43 = **12.5 minutes** (unacceptable)
+- Time to drain with 64 threads: 321/(64/7) = **35 seconds** (close to target)
 
-**The requirement**: After stopping the miner, ALL remaining buffered solutions must be reported within 10-20 seconds. This requires ~64 / 15 seconds = 4.3 solutions/sec = 30 concurrent threads.
+#### How maaku's C++ Webminer Handles This
 
-**The tension**: 30+ threads in-process kill GPU speed, but we need them for the drain phase AFTER mining stops. Possible solution: the 3 threads run during mining, then on shutdown the miner spawns additional threads for rapid drain (GPU is already stopped, so TLB shootdowns don't matter).
+The C++ webminer (`maaku/webminer`) uses a simpler pattern:
+- **1 background thread** for ALL network I/O (submission + settings refresh)
+- Mining threads push solutions to a shared deque (`g_solutions`) under mutex
+- Background thread pops solutions FIFO, submits synchronously (7s each)
+- **On network error**: solution pushed back to FRONT of deque, thread sleeps and retries
+- **On difficulty change**: background thread checks if queued solution still meets current difficulty; if not, logged to orphan file and skipped
+- **No pre-building**: each mining thread builds its own work unit inline
 
-**Alternative**: The `collect --watch` mode (separate process) handles overflow. But it uses 200ms file polling which adds latency. It should be upgraded to more threads and faster polling during drain.
+This works for the C++ miner because it runs at ~500 MH/s (CPU-only), finding ~0.007 solutions/sec at difficulty 36. One thread at 1/7s = 0.14 reports/sec — 20x headroom. At 100 GH/s, we need 200x more reporting throughput.
+
+#### Proposed Architecture: Non-Blocking Pre-Emptive Reporter
+
+The user's vision: "make it work like a perfect loop machine without ever blocking the miner and make it wait for anything." Key principles:
+
+1. **The mining loop must NEVER wait on I/O** — zero blocking, zero allocation in the hot path
+2. **Pre-emptively prepare everything in background** — DNS resolution, TLS handshake, connection keep-alive, JSON serialization
+3. **During mining: N threads submit continuously** (N chosen to not hurt GPU)
+4. **On shutdown: spawn burst threads for rapid drain** (GPU is off, TLB shootdowns irrelevant)
+
+**Design (to be implemented):**
+
+```
+MINING PHASE (GPU active):
+  Mining loop → mpsc::channel (non-blocking send) → 3 submitter threads
+  │                                                   │
+  │  reqwest::blocking::Client (shared, keep-alive)   │
+  │  TLS session cached, DNS pre-resolved             │
+  │  HTTP/1.1 persistent connections                  │
+  └───────────────────────────────────────────────────┘
+  
+  Submitter threads during mining:
+  - 3 threads (proven safe for GPU speed)
+  - Shared client with connection pool (reuse TLS sessions)
+  - On success: record_accepted, write keep, wallet insert
+  - On error: push to retry deque (front, like maaku)
+  - On difficulty mismatch: log to orphan, skip (don't waste 7s)
+
+SHUTDOWN PHASE (GPU stopped, SIGINT received):
+  1. Stop mining loop (set shutdown flag)
+  2. Drain channel into Vec<SolutionReport>
+  3. Check each against current difficulty (skip stale ones)
+  4. Spawn 30-60 additional submitter threads
+  5. Distribute remaining solutions round-robin to all threads
+  6. Each thread uses clone of the SAME reqwest::blocking::Client
+     (connection pool shared, TLS sessions reused)
+  7. Wait for all threads to complete (max 20s timeout)
+  8. Any remaining unsent: write to overflow file for collect --watch
+
+PRE-EMPTIVE OPTIMIZATIONS (background, zero GPU impact):
+  - DNS: resolve once at startup, cache IP
+  - TLS: first request establishes session; subsequent requests reuse
+  - Connection: HTTP keep-alive (reqwest default)
+  - Serialization: preimage is already base64; work decimal computed once
+  - No allocation in send path: channel send is a pointer move
+```
+
+**Why this solves the problem:**
+- During mining: 3 threads = 0.43 reports/sec. Buffer grows but solutions are <2 hours old.
+- Difficulty check before submission: skip stale solutions instantly (don't waste 7s on guaranteed rejection)
+- On shutdown: 60 threads = 8.6 reports/sec. Drain 100 solutions in 12s.
+- Connection reuse: subsequent requests skip DNS + TLS = faster than 7s each.
+- Zero GPU impact: mining loop does one non-blocking `channel.send()` per solution.
 
 ### 5. The Webcash Server Is NOT Broken (AGENT ERROR — USER CORRECTED)
 
@@ -287,36 +362,76 @@ hrmw webminer start -f --accept-terms --server https://webcash.org
 
 ## Challenges To Investigate
 
-### Challenge 1: Optimal Submitter Thread Count
-On 4x RTX 4090, 3 threads may not be enough. With ~0.6 solutions/sec and 7s per report, 3 threads handle 0.43/sec — deficit of 0.17/sec. After 5 minutes: ~51 unreported solutions.
+### Challenge 1: Optimal Submitter Thread Count During Mining
+On 4x RTX 4090, 3 threads may not be enough. With ~0.6 solutions/sec and 7s per report, 3 threads handle 0.43/sec — deficit of 0.17/sec. After 5 minutes: ~51 unreported.
 
-**Test**: Try 3, 6, 8 threads. Measure GPU speed impact for each. Find the sweet spot where reporting keeps up without killing mining speed.
+**Test**: Try 3, 6, 8, 12 threads. For each, measure:
+- GPU speed (must stay at ~40 GH/s)
+- Submission success rate
+- Buffer growth rate (solutions found - solutions reported)
 
-### Challenge 2: Fast Shutdown Drain
-When the miner stops, buffered solutions must be drained in 10-20 seconds. With N threads and 7s per report:
-- 3 threads: can drain ~4 solutions in 10s
-- 10 threads: can drain ~14 solutions in 10s
-- 30 threads: can drain ~43 solutions in 10s
+The goal is to find the maximum thread count where GPU speed is unaffected. On the 10x RTX 4090 system, 3 threads cost ~3 GH/s. With the 32x pipeline (longer cycles), thread interference is proportionally smaller.
 
-**Solution**: On SIGINT/SIGTERM, BEFORE draining:
-1. Stop mining (GPU freed)
-2. Spawn additional submitter threads (30-60) for rapid drain
-3. GPU is stopped so TLB shootdowns don't matter
-4. Drain all pending solutions with maximum parallelism
+### Challenge 2: Pre-Emptive Stale Difficulty Check
+The maaku C++ miner checks difficulty BEFORE submitting. If a queued solution's hash doesn't meet current difficulty, it's logged to orphan file and skipped — saving 7 seconds of wasted HTTP wait.
 
-### Challenge 3: Remove Local Collection Workaround
-Currently, `hrmw webminer cloud watch` runs locally and syncs solutions from the remote via SSH every 30 seconds. This is a workaround for unreliable remote reporting. If remote reporting works reliably, this can be removed.
+**Implement**: Before each submission, compare `solution.difficulty_achieved` against the shared `target.difficulty`. If `achieved < current`, skip and log. This is critical because difficulty adjustments invalidate ALL queued solutions at once.
+
+### Challenge 3: Burst Drain on Shutdown (10-20 Second Target)
+When SIGINT fires:
+1. Set shutdown flag (stops mining loop)
+2. GPU work completes (last cycle, ~3ms)
+3. **Now GPU is idle — spawn 60 additional threads**
+4. All threads share the SAME `Arc<MiningProtocol>` (same connection pool)
+5. Each thread clones the `Arc`, pulls from the channel
+6. With 63 threads × 7s per report: 9 reports/sec → drain 100 solutions in 11s
+7. Timeout at 20s; any remaining → overflow file for `collect`
+
+The key insight: spawning threads AFTER GPU stops is safe. TLB shootdowns only matter during CUDA dispatch. Once mining is done, the CPU can do whatever it wants.
+
+### Challenge 4: Remove Local Collection Workaround
+Currently, `hrmw webminer cloud watch` runs locally and syncs solutions from remote via SSH every 30 seconds. This was a workaround for unreliable remote reporting.
 
 **Goal**: All solution reporting happens on the remote machine. The local machine only monitors status. On `cloud stop`:
 1. Send SIGINT to remote miner
-2. Miner drains all buffered solutions (10-20s)
-3. Only after all solutions reported: destroy instance
+2. Miner stops mining, enters burst drain (60 threads, 20s max)
+3. All solutions reported on the remote
+4. Only after drain completes: destroy instance
+5. **No SSH solution download, no local collection**
 
-### Challenge 4: Connection Pooling for Multiple Reporters
-The webcash.org server may rate-limit connections per IP. With 30+ threads hitting the same endpoint:
-- Use a shared `reqwest::blocking::Client` (internal connection pool)
-- NOT separate clients per thread (64 separate clients caused timeouts)
-- The v0.1.52 pattern already does this correctly (one client, shared via Arc)
+### Challenge 5: Connection Reuse for Maximum Throughput
+`reqwest::blocking::Client` maintains an internal connection pool with HTTP keep-alive. First request does DNS + TLS (~200ms). Subsequent requests reuse the connection (~0ms overhead).
+
+**Design rules:**
+- ONE shared `reqwest::blocking::Client` for ALL threads (created eagerly in `MiningProtocol::new()`)
+- Shared via `Arc<MiningProtocol>` — Arc clone is a pointer increment
+- NOT separate clients per thread (64 clients = 64 DNS lookups = 64 TLS handshakes = failure)
+- `reqwest` handles connection pool internally — no manual pooling needed
+- HTTP/1.1 keep-alive is default — connections persist between requests
+
+### Challenge 6: Zero-Blocking Mining Loop Architecture
+The mining loop must NEVER wait on I/O. Current architecture already achieves this:
+```
+Mining loop:
+  1. GPU mines (2.5ms)
+  2. Check solutions (μs)
+  3. For each solution: channel.send() — NON-BLOCKING (mpsc unbounded)
+  4. Repeat
+```
+`mpsc::channel::send()` is a pointer swap — nanoseconds, no allocation, no I/O. The submitter threads on the other end of the channel do all the heavy lifting (HTTP, file I/O, wallet insert) independently.
+
+**What must NOT be in the mining loop:**
+- HTTP calls (7s blocking)
+- DNS resolution
+- TLS handshake
+- File open/write (solutions are written with `let _ =` to ignore errors — never blocks)
+- Mutex contention with submitters (channel send doesn't lock; submitters lock the receiver)
+
+**Pre-emptive preparation (already done by reqwest internally):**
+- DNS resolved on first request, cached for connection pool lifetime
+- TLS session established once, resumed for all subsequent connections
+- TCP connection kept alive (no SYN/SYN-ACK per request)
+- HTTP pipelining handled by the keep-alive connection
 
 ---
 
