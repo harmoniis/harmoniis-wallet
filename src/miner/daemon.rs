@@ -518,15 +518,15 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Why N clients: At 100 GH/s, 1.46 solutions/sec × 7s/report = 10.2
     // concurrent connections minimum. 12 clients = 1.71 reports/sec headroom.
     // Each client has its own TCP connection — server sees 12 independent miners.
-    // Auto-scale reporter clients based on GPU count and expected solution rate.
-    // Each GPU does ~10 GH/s. At difficulty 36: solutions/sec ≈ GH/s / 68.7.
-    // Each client handles 1 report/7s. Need: solutions_per_sec × 7 clients.
-    // With safety margin: solutions_per_sec × 10 clients.
-    // Formula: gpu_count × 10 GH/s / 68.7 × 10 ≈ gpu_count × 1.5 × 10 ≈ gpu_count × 15
-    // Clamped to 4..80 range. Override with HRMW_REPORTER_CLIENTS env var.
-    let gpu_count = backend.recommended_pipeline_depth() / 32; // pipeline_depth = gpu_count * 32
+    // Auto-scale reporter clients based on GPU count.
+    // Constraint: webcash.org nginx has 60s gateway timeout. Server processes
+    // ~1 report/7s. Max concurrent before 504: 60/7 ≈ 8.
+    // With N GPUs: need ~N concurrent connections (each GPU ≈ 1 solution/10s).
+    // Add small buffer for bursts. Clamped to 3..20 range.
+    // Override with HRMW_REPORTER_CLIENTS env var.
+    let gpu_count = backend.recommended_pipeline_depth() / 32;
     let gpu_count = gpu_count.max(1);
-    let auto_clients = (gpu_count * 15).clamp(4, 80);
+    let auto_clients = (gpu_count + 2).clamp(3, 20);
     let reporter_clients: usize = std::env::var("HRMW_REPORTER_CLIENTS")
         .ok()
         .and_then(|s| s.parse().ok())
