@@ -1,244 +1,138 @@
 # Session Handler: Webcash GPU Mining Development & Deployment
 
-## Target Instance
+## ABSOLUTE RULES — READ BEFORE TOUCHING ANYTHING
 
-**Vast.ai Type #33453597** — Sichuan, CN
-- **GPUs**: 4x RTX 4090 (24GB VRAM each)
-- **Compute**: 325.6 TFLOPS
-- **Host**: #124072, verified
-- **CPU**: AMD EPYC 7542 32-Core (64 threads)
-- **RAM**: 387 GB
-- **Storage**: 2593 GB NVMe
-- **Network**: 61 Mbps down / 308 Mbps up
-- **PCIe**: 4.0 x16, 19.6 GB/s
-- **CUDA**: Max 12.4
-- **Template**: `cuda:12.0.1-devel-ubuntu20.04` (ID: `fd2e982e4facaf7b2918006939d1e06e`)
-- **Expected mining speed**: ~40 GH/s (4 GPUs, scaling from 100 GH/s on 10x RTX 4090)
-- **Cost**: ~$0.55/hr
+### Rule 1: reqwest::blocking::Client MUST Be Created EAGERLY in the Main Process
+
+**This is the #1 cause of failure in this project. It has happened THREE TIMES.**
+
+`reqwest::blocking::Client` created in a subprocess, lazy `Option<>`, or any context other than the main process's `MiningProtocol::new()` call **DOES NOT WORK**. The server receives the request but never responds (0 bytes returned, looks like server is down — but it isn't).
+
+**What works (v0.1.52 pattern, proven on every test):**
+```rust
+// In MiningProtocol::new() — called once at startup in the main process:
+let http_blocking = reqwest::blocking::Client::builder()
+    .timeout(Duration::from_secs(60))
+    .build()?;
+```
+
+**What breaks (EVERY TIME, tested 3 times):**
+```rust
+// In a subprocess (fork+exec): BROKEN
+let client = reqwest::blocking::Client::builder().build()?;  // looks OK, compiles, runs — but server never responds
+
+// Lazy creation in Option<>: BROKEN
+http_blocking: Option<reqwest::blocking::Client>  // commit a9ade36 introduced this, caused cascade failure
+
+// In report-worker subprocess with pre-resolved IP: STILL BROKEN
+reqwest::blocking::Client::builder().resolve("webcash.org", addr).build()?;  // DNS is NOT the issue
+```
+
+**The symptom**: curl to `mining_report` from the same machine ALSO times out. It looks exactly like the server is down. But `/api/v1/target` works fine. When you restore v0.1.52 code, the server responds in 7 seconds immediately.
+
+**Why it happens**: Unknown at the low level. The blocking client internally spawns a tokio runtime. Something about the runtime initialization or connection establishment in a non-main-process context produces a client that establishes TCP + TLS but sends malformed or incomplete HTTP requests that the server's Python/Tornado backend hangs on indefinitely. The many hanging connections then block the server's `/mining_report` handler for ALL clients (including curl), while `/target` uses a different handler and works fine.
+
+**The git history that proves this:**
+- `a9ade36`: Changed from eager to lazy `Option<>` — broke everything
+- `72c2a06`, `1926201`: Various attempts with different client patterns — all broken
+- `ab55786`: Subprocess reporter with pipe — clients created in subprocess — broken
+- `a9958c1`: Reverted to v0.1.52 eager pattern — immediately worked
+- `01a00d1`, `de3bfba`: New subprocess attempt with pre-resolved DNS — still broken
+- `a414ebd`: **Current fix**: N clients created EAGERLY in main process — to be tested
+
+### Rule 2: NEVER Open More Than 8 Concurrent Connections to mining_report
+
+The webcash.org server uses nginx as reverse proxy with a ~60s gateway timeout. The backend processes mining reports at ~7s each. Opening more than ~8 concurrent connections causes:
+1. Connections 9+ get 504 Gateway Timeout (nginx kills them at 60s)
+2. The hanging connections poison the backend — ALL subsequent requests to `/mining_report` hang
+3. Even curl from the same machine stops working
+4. `/api/v1/target` continues working (different handler)
+5. The server may need operator restart to recover
+
+**Measured on 2026-04-11:** 60 concurrent connections caused total `/mining_report` endpoint failure. Even single curl requests returned 0 bytes. Server was dead for hours.
+
+### Rule 3: NEVER Blame the webcash.org Server
+
+Every time submissions fail, the bug is in OUR code. The server works. This has been proven three times:
+1. Agent blamed server → user corrected → v0.1.52 restored → server responded instantly
+2. Agent blamed server overload → user corrected → it was broken client creation
+3. Agent blamed nginx gateway timeout → user corrected → it was broken client creation flooding
+
+**Test protocol**: If submissions fail, FIRST restore v0.1.52 binary and test. If v0.1.52 submits successfully, the bug is in your new code. Bisect from there.
+
+### Rule 4: The Preimage Format Is Correct
+
+The preimage construction in `work_unit.rs` is verified by unit tests and matches the C++ reference webminer (maaku/webminer) exactly. The hash-to-decimal conversion in `protocol.rs` is correct. The JSON submission format is correct. If reports fail, the issue is the HTTP client, not the data.
 
 ---
 
-## What Needs To Be Implemented
+## Target Instances
 
-### `hrmw webminer cloud start --machine <id> --env dev`
+### Dev Testing: 4x RTX 4090
+**Vast.ai Type #33453597** — Sichuan, CN (or France equivalent)
+- **GPUs**: 4x RTX 4090, PCIe 4.0 x16
+- **Expected speed**: ~42-50 GH/s
+- **Cost**: ~$1.07/hr
+- **Use**: `hrmw webminer cloud start --env dev --offer <id>`
 
-A new `--env dev` flag on the cloud start command. When set:
-
-1. **Provision**: Create vast.ai instance on the specified machine using the CUDA 12.0.1 template
-2. **Install dependencies over SSH** (instead of uploading a pre-built binary):
-   ```bash
-   # Essential build tools
-   apt update && apt install -y build-essential pkg-config libssl-dev git gcc-10 g++-10
-   
-   # Rust toolchain
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-   source ~/.cargo/env
-   
-   # Clone repo
-   git clone https://github.com/harmoniis/harmoniis-wallet.git /root/hw
-   cd /root/hw
-   
-   # Build release (use gcc-10 for aws-lc-sys compatibility on Ubuntu 20.04)
-   CC=gcc-10 CXX=g++-10 cargo build --release
-   
-   # Install
-   cp target/release/hrmw /root/.local/bin/hrmw
-   ```
-3. **Do NOT start mining automatically** — dev mode is for manual testing
-4. **Print SSH command** so the developer can log in and run manually:
-   ```
-   ssh -i ~/.harmoniis/cloud/id_ed25519 -p <port> root@<host>
-   cd /root/hw && /root/.local/bin/hrmw webminer start -f --accept-terms --server https://webcash.org
-   ```
-
-**Why dev mode exists**: The production `cloud start` uploads a pre-built binary and starts mining immediately. Dev mode clones the repo so the developer can edit code directly on the GPU server, rebuild in ~1.5 minutes, and test changes without the local→push→pull→rebuild round-trip that wastes GPU rental money.
-
-**Key difference from production mode**: In dev mode, all code changes happen on the remote machine. `cargo build --release` runs remotely. The developer SSHs in, edits, rebuilds, and tests interactively.
-
-### Build Requirements on Ubuntu 20.04
-
-- **gcc-10/g++-10**: Required because `aws-lc-sys` (dependency of `rustls`) has a bug detection check that rejects gcc-9. Ubuntu 20.04 ships gcc-9 by default.
-  ```bash
-  apt install -y gcc-10 g++-10
-  CC=gcc-10 CXX=g++-10 cargo build --release
-  ```
-- **Rust 1.86+**: The crate requires `rust-version = "1.86"`.
-- **CUDA toolkit**: Provided by the container image. NVRTC compiles the SHA256 kernel at runtime via `cudarc`.
+### Production: 10x RTX 4090
+- **Expected speed**: ~100 GH/s
+- **Solution rate at difficulty 36**: ~1.46 solutions/sec (100e9 / 2^36)
+- **Required reporting throughput**: 1.46 × 7 = 10.2 concurrent connections minimum
 
 ---
 
-## Historic Challenges & Failures
+## Current State (as of 2026-04-12, commit `a414ebd` on `main`)
 
-### 1. Mining Speed: 72 GH/s → 100 GH/s (SOLVED)
+### What Is Implemented and Working
+- **Mining at 42-50 GH/s on 4x RTX 4090** — verified on vast.ai France instance
+- **`--env dev` cloud provisioning** — clones repo, builds from source, prints SSH command
+- **vast.ai `cur_state` API fix** — instance status detection works
+- **Stale difficulty check** — skips solutions below current difficulty before submission
+- **Overflow file** — unsent solutions saved to `miner_overflow_solutions.log`
+- **`hrmw webminer collect`** — retries pending + overflow solutions offline
 
-**Baseline**: 72 GH/s on 10x RTX 4090 (vast.ai), measured live: `speed=72.29 Gh/s`. Benchmark showed 133 GH/s raw GPU capability (`cuda_total_estimate=132939.99 Mh/s`) — 45% wasted on CPU dispatch overhead.
+### What Is Implemented BUT UNTESTED
+- **N eagerly-created clients** (commit `a414ebd`) — N separate `reqwest::blocking::Client` instances created in the main process, each with its own TCP connection, distributed to N in-process submitter threads via per-client mpsc channels
+- Auto-scaling: N = gpu_count + 2, clamped 3..8
+- This is the v0.1.52 pattern scaled from 1 client to N clients
+- **NEEDS TESTING** — the webcash.org server was killed by our 60-connection flood and needs to recover before we can test
 
-**Root cause**: Each mining cycle has ~150μs of CPU overhead (JoinSet task spawning, work unit creation, stats). With pipeline_depth=40 (4x per GPU), the GPU computed for only 420μs per cycle. Overhead fraction: 150/570 = 26%.
-
-**Fix (committed on `main`)**:
-- Pipeline depth 4x → 32x (320 midstates for 10 GPUs, 32 per GPU)
-- GPU computes ~2.5ms per cycle, overhead stays ~150μs → 6% overhead
-- MAX_BATCH: 8 → 64 (supports deeper pipeline)
-- Pipeline clamp: 64 → 1024
-- CUDA kernel: `lop3.b32` for ch/maj (1 instruction vs 3-5), `__umulhi` fast division
-- Kernel self-init: block 0 thread 0 zeroes out_best (eliminates host memset_zeros per kernel)
-
-**Result**: 100 GH/s measured live on 10x RTX 4090: `speed=101.77 Gh/s` (mine=2316μs cycle=2779μs). Pipeline depth confirmed at 320. Expected ~40 GH/s on 4x RTX 4090 (linear scaling, untested).
-
-### 2. In-Process Reporter Threads Kill GPU Speed (CRITICAL LESSON)
-
-**Every attempt to add HTTP reporting threads inside the mining process destroyed GPU performance:**
-
-| Attempt | Threads | Speed | Root Cause |
-|---------|---------|-------|------------|
-| 3 threads, Arc\<Mutex\<Receiver\>\> (v0.1.52) | 3 | ~72-75 GH/s | **WORKS** — only proven pattern. Cost ~3 GH/s vs 0 threads |
-| 64 threads, Arc\<Mutex\<Receiver\>\> | 64 | →31 GH/s | Mutex contention on receiver |
-| 64 threads, tokio runtimes | 64 | →25 GH/s | Tokio runtime contention with main runtime |
-| 64 threads, per-worker mpsc | 64 | →22 GH/s | TLB shootdowns from reqwest malloc/free |
-| std::thread::scope GPU dispatch | N/A | →25 GH/s | Thread create/destroy overhead per cycle |
-| \_\_launch\_bounds\_\_(256, 5) | N/A | →44 GH/s | Register spilling on some GPUs |
-
-**Why**: `reqwest::blocking::Client` internally spawns a tokio runtime per client. Memory allocation/deallocation in those threads causes TLB shootdowns (Inter-Processor Interrupts) that stall CUDA API calls on the GPU dispatch cores. Even idle threads cause this.
-
-**The 3-thread pattern from v0.1.52 is the only one that works acceptably.** It uses ONE shared `reqwest::blocking::Client` created eagerly in the constructor, shared via `Arc<MiningProtocol>`. The 3 threads pull from `Arc<Mutex<mpsc::Receiver>>`. Cost: ~3 GH/s on the old 4x pipeline. With 32x pipeline, the cost should be even lower because cycles are longer.
-
-### 3. Subprocess Reporter (FAILED — DNS Error)
-
-**Attempt**: Spawn `hrmw webminer report-worker` as a child process. Solutions piped via stdin. 64 threads in separate address space.
-
-**What worked**: Mining speed was unaffected (100 GH/s maintained). The pipe communication worked. The child process spawned and ran.
-
-**What failed**: Zero solutions were submitted. The subprocess's HTTP client could not resolve DNS:
-```
-Submit failed: error sending request for url (https://webcash.org/api/v1/mining_report): error trying to connect: dns error: failed to lookup address information: nodename nor servname provided, or not known
-```
-
-**Details**: The subprocess created 8 `MiningProtocol` instances (each with `reqwest::blocking::Client`). These clients internally spawn tokio runtimes. In the subprocess context, DNS resolution failed for all of them. On the vast.ai Linux instance, errors showed "operation timed out" instead of DNS errors, making it look like the server was down (it wasn't).
-
-**Why v0.1.52 works**: The blocking client is created EAGERLY in `MiningProtocol::new()` (called in the main process's async context). The client is shared to threads via `Arc<MiningProtocol>`. DNS resolution happens through the main process's networking stack, which works.
-
-**The subprocess approach may still be viable** if the DNS issue is resolved (e.g., pre-resolve the IP, or create the client differently). But it is NOT working as implemented and was fully reverted.
-
-### 4. Solution Reporting Time Constraint (UNSOLVED — PRIMARY CHALLENGE)
-
-**User requirement**: "we truly need multiple parallel reporting at least 64 reportings parallel if not more but with absolute no downside for CPU. Each report takes 7 sec and we mine much faster than reporting. It should be max additional 10-20 sec after stopping mining to collect the remaining ones."
-
-**User's core insight**: "reporting is a simple HTTP req that waits 7 sec for server to respond back. This is not hard CPU, it's a problem of understanding the architecture, processes, Rust, UNIX, and kernel very well."
-
-#### Server-Side Timing Constraints (from webcash server source code)
-
-| Constraint | Limit | Impact |
-|------------|-------|--------|
-| **Timestamp window** | ±2 hours from server receipt | Solutions are valid for 2 hours. NOT the real bottleneck. |
-| **Difficulty validation** | Hash leading zeros must be >= server's CURRENT difficulty | **THE REAL BOTTLENECK** — if difficulty increases, ALL queued solutions are instantly invalid |
-| **Committed difficulty** | Preimage `difficulty` field must be >= current server difficulty | Same — difficulty increase kills pending solutions |
-| **Difficulty adjustment** | Every 128 mining reports, ±1 bit | At target rate (10s/report), adjustment every ~21 minutes |
-| **Mining amount** | Must exactly match server's current `mining_amount` | Epoch change (every 525,000 reports) invalidates all pending solutions |
-| **Unique preimage** | Duplicate preimages rejected (server stores hash) | Can't resubmit; each solution is one-shot |
-
-**Why fast reporting matters**: The 2-hour timestamp window is generous. The REAL danger is **difficulty adjustment**. If difficulty increases by 1 bit (from 36 to 37) while solutions are queued, every queued solution mined at difficulty 36 is REJECTED — the hash doesn't have enough leading zeros for difficulty 37. At 100 GH/s mining ~1.5 solutions/sec, a 5-minute reporting backlog means ~450 solutions lost if difficulty bumps.
-
-**The math (updated with difficulty risk)**:
-- Mining: ~1.5 solutions/sec at 100 GH/s, difficulty 36
-- 3 threads × (1 report / 7 seconds) = 0.43 reports/sec
-- **Deficit: 1.07 solutions/sec accumulating in buffer**
-- After 1 minute: ~90 found, ~26 reported, ~64 pending
-- After 5 minutes: ~450 found, ~129 reported, ~321 pending
-- If difficulty bumps at 5 minutes: **321 solutions LOST**
-- Time to drain 321 pending with 3 threads: 321/0.43 = **12.5 minutes** (unacceptable)
-- Time to drain with 64 threads: 321/(64/7) = **35 seconds** (close to target)
-
-#### How maaku's C++ Webminer Handles This
-
-The C++ webminer (`maaku/webminer`) uses a simpler pattern:
-- **1 background thread** for ALL network I/O (submission + settings refresh)
-- Mining threads push solutions to a shared deque (`g_solutions`) under mutex
-- Background thread pops solutions FIFO, submits synchronously (7s each)
-- **On network error**: solution pushed back to FRONT of deque, thread sleeps and retries
-- **On difficulty change**: background thread checks if queued solution still meets current difficulty; if not, logged to orphan file and skipped
-- **No pre-building**: each mining thread builds its own work unit inline
-
-This works for the C++ miner because it runs at ~500 MH/s (CPU-only), finding ~0.007 solutions/sec at difficulty 36. One thread at 1/7s = 0.14 reports/sec — 20x headroom. At 100 GH/s, we need 200x more reporting throughput.
-
-#### Proposed Architecture: Non-Blocking Pre-Emptive Reporter
-
-The user's vision: "make it work like a perfect loop machine without ever blocking the miner and make it wait for anything." Key principles:
-
-1. **The mining loop must NEVER wait on I/O** — zero blocking, zero allocation in the hot path
-2. **Pre-emptively prepare everything in background** — DNS resolution, TLS handshake, connection keep-alive, JSON serialization
-3. **During mining: N threads submit continuously** (N chosen to not hurt GPU)
-4. **On shutdown: spawn burst threads for rapid drain** (GPU is off, TLB shootdowns irrelevant)
-
-**Design (to be implemented):**
-
-```
-MINING PHASE (GPU active):
-  Mining loop → mpsc::channel (non-blocking send) → 3 submitter threads
-  │                                                   │
-  │  reqwest::blocking::Client (shared, keep-alive)   │
-  │  TLS session cached, DNS pre-resolved             │
-  │  HTTP/1.1 persistent connections                  │
-  └───────────────────────────────────────────────────┘
-  
-  Submitter threads during mining:
-  - 3 threads (proven safe for GPU speed)
-  - Shared client with connection pool (reuse TLS sessions)
-  - On success: record_accepted, write keep, wallet insert
-  - On error: push to retry deque (front, like maaku)
-  - On difficulty mismatch: log to orphan, skip (don't waste 7s)
-
-SHUTDOWN PHASE (GPU stopped, SIGINT received):
-  1. Stop mining loop (set shutdown flag)
-  2. Drain channel into Vec<SolutionReport>
-  3. Check each against current difficulty (skip stale ones)
-  4. Spawn 30-60 additional submitter threads
-  5. Distribute remaining solutions round-robin to all threads
-  6. Each thread uses clone of the SAME reqwest::blocking::Client
-     (connection pool shared, TLS sessions reused)
-  7. Wait for all threads to complete (max 20s timeout)
-  8. Any remaining unsent: write to overflow file for collect --watch
-
-PRE-EMPTIVE OPTIMIZATIONS (background, zero GPU impact):
-  - DNS: resolve once at startup, cache IP
-  - TLS: first request establishes session; subsequent requests reuse
-  - Connection: HTTP keep-alive (reqwest default)
-  - Serialization: preimage is already base64; work decimal computed once
-  - No allocation in send path: channel send is a pointer move
-```
-
-**Why this solves the problem:**
-- During mining: 3 threads = 0.43 reports/sec. Buffer grows but solutions are <2 hours old.
-- Difficulty check before submission: skip stale solutions instantly (don't waste 7s on guaranteed rejection)
-- On shutdown: 60 threads = 8.6 reports/sec. Drain 100 solutions in 12s.
-- Connection reuse: subsequent requests skip DNS + TLS = faster than 7s each.
-- Zero GPU impact: mining loop does one non-blocking `channel.send()` per solution.
-
-### 5. The Webcash Server Is NOT Broken (AGENT ERROR — USER CORRECTED)
-
-**The agent spent hours falsely blaming the webcash.org server**, claiming the POST `/mining_report` endpoint was "down globally." The agent ran curl tests from both the vast.ai server and the local Mac, all showing timeouts, and concluded the server was broken. The agent even searched GitHub issues and declared the project "unmaintained since March 2023."
-
-**The user called this out directly:**
-- "is not the webcash server that is broken"
-- "you lie, I saw in the v0.1.52 how the solutions worked"
-- "you did something wrong, the speed works good but the report mining is not working"
-
-**The user was right.** When v0.1.52 was restored, the server responded immediately:
-```
-[submitter-0] accepted in 7138ms
-Mining report accepted! keep=e185.546875:secret:c0b87732...
-📥 Response status: 200 OK
-📥 Response body: {"status": "success"}
-```
-
-**What actually happened**: The agent's code changes broke the HTTP client. The subprocess reporter couldn't resolve DNS. The `collect --watch` and curl tests may have been affected by the many failed connection attempts saturating something. Once the original v0.1.52 code was restored, everything worked.
-
-**WARNING TO NEXT AGENT**: Do NOT blame the webcash.org server. It works. If submissions fail, the bug is in YOUR code. Test with the v0.1.52 binary first to confirm the server is up, then bisect to find what you broke.
-
-**The root cause**: The lazy `Option<reqwest::blocking::Client>` pattern + subprocess process context = DNS resolution failure. The v0.1.52 eager creation in the main process context works reliably.
+### What Is NOT Working
+- **Solution reporting at full speed** — 3 threads (v0.1.52) can't keep up at 100 GH/s. The N-client architecture should fix this but is untested.
+- **Subprocess reporter** — BROKEN. Creating reqwest clients in subprocess context produces dead clients. This approach is DEAD. Do not attempt again.
 
 ---
 
-## Current Architecture (v0.1.53 on `main`)
+## Measured Results (from live logs on 2026-04-11)
+
+### 4x RTX 4090 (vast.ai France, instance 34644238)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Mining speed (0 submitter threads) | ~50 GH/s | Subprocess reporter was running but broken |
+| Mining speed (3 in-process threads) | 42 GH/s | v0.1.52 pattern, proven |
+| Mining speed (6 in-process threads) | 43-48 GH/s | No GPU regression vs 3 threads |
+| Submission time (3 threads, shared client) | 7-16s | Server queuing on 1 TCP connection |
+| Submission time (6 threads, shared client) | 34-37s | Worse queuing on 1 connection |
+| Submission time (6 threads, per-thread client) | 43-54s | Even worse (6 tokio runtimes overhead) |
+| Throughput (3 threads, shared client) | 0.37 reports/sec | Best measured |
+| Throughput (6 threads, shared client) | 0.29 reports/sec | Worse than 3 threads |
+| Solutions found in 2.5 min | 189 | ~1.26 solutions/sec at 42 GH/s |
+| Solutions accepted in 2.5 min | 43 | 0.29 reports/sec — buffer growing |
+| 60 concurrent connections | 10 accepted, 11 timeout, server killed | NEVER DO THIS |
+
+### Key Insight from Testing
+
+**One shared client (v0.1.52) serializes all requests on one TCP connection.** With 3 threads: thread 0 takes 7s, thread 1 waits → 13s, thread 2 waits → 16s. All requests queue on the SAME connection.
+
+**Multiple separate clients each get their own TCP connection.** Server can process multiple connections in parallel (nginx dispatches to backend). BUT: clients MUST be created eagerly in the main process.
+
+**Server capacity**: ~8 concurrent connections before nginx 504s. Beyond that, the `/mining_report` endpoint dies.
+
+---
+
+## Architecture (Current on main)
 
 ### Mining Pipeline
 ```
@@ -246,392 +140,150 @@ tokio async runtime
   ├── Target refresher (background, every 15s)
   ├── Work unit creator (rayon, overlapped with GPU mining)
   └── Main loop:
-       1. Create 320 WorkUnits (rayon parallel, overlapped)
+       1. Create pipeline_depth WorkUnits (rayon parallel, overlapped)
        2. mine_work_units() → JoinSet spawns 1 task per GPU
-          Each GPU: mine_batch(32 midstates, difficulty)
-            → fire 32 kernels back-to-back on CUDA stream
-            → single stream.synchronize()
-            → read 32 results
        3. Collect results, record stats
-       4. For each solution: persist to file + send to submitter channel
+       4. For each solution: persist to file + dispatch to client channel
 ```
 
-### Solution Submission (v0.1.52 pattern, restored)
+### Solution Submission (N-client pattern, commit a414ebd)
 ```
-Mining loop → mpsc::channel → Arc<Mutex<Receiver>>
-  ├── submitter-0 ─┐
-  ├── submitter-1 ──┤── reqwest::blocking::Client (shared via Arc<MiningProtocol>)
-  └── submitter-2 ─┘   POST /api/v1/mining_report (~7s per report)
-                        On success: record_accepted() + write keep to file + wallet insert
+Main process startup (BEFORE mining):
+  Create N reqwest::blocking::Client instances EAGERLY
+  Each: own connection pool = own TCP connection
+
+Mining loop:
+  Solution found → round-robin dispatch to client[i % N]
+
+N submitter threads (1 per client):
+  client-0: rx.recv() → submit with client[0] → ~7s → next
+  client-1: rx.recv() → submit with client[1] → ~7s → next
+  ...
+  client-N: rx.recv() → submit with client[N] → ~7s → next
+
+Server sees N independent miners, processes in parallel.
+Throughput: N/7 reports/sec (with N ≤ 8 to avoid nginx 504s)
 ```
 
 ### Key Files
 | File | Purpose |
 |------|---------|
-| `src/miner/daemon.rs` | Main mining loop, submitter threads, shutdown drain |
-| `src/miner/multi_cuda.rs` | Multi-GPU dispatch (JoinSet, round-robin) |
-| `src/miner/cuda.rs` | Single GPU: mine_batch (fire N kernels, sync once) |
-| `src/miner/shader/sha256_mine.cu` | CUDA kernel (lop3.b32, umulhi fast div) |
-| `src/miner/protocol.rs` | HTTP client (async + blocking), mining_report submission |
-| `src/miner/collect.rs` | Batch collect + watch mode (separate process reporter) |
-| `src/miner/cloud/provision.rs` | Vast.ai provisioning, SSH deployment |
-| `src/miner/cloud/config.rs` | API keys, instance state, config persistence |
+| `src/miner/daemon.rs` | Mining loop, N eagerly-created clients, submitter threads |
+| `src/miner/protocol.rs` | HTTP client, `submit_report_with_client()` static method |
+| `src/miner/work_unit.rs` | Preimage construction (verified correct) |
+| `src/miner/collect.rs` | Offline retry, `report_worker()` (BROKEN — do not use) |
+| `src/miner/cloud/provision.rs` | Vast.ai provisioning, `start_dev()` for dev mode |
 
-### GPU Optimization Constants
+### Constants
 | Constant | Value | Location | Purpose |
 |----------|-------|----------|---------|
 | `MAX_BATCH` | 64 | cuda.rs | Result buffer slots per GPU |
 | `pipeline_depth` | `gpu_count * 32` | multi_cuda.rs | Work units per mining cycle |
-| `pipeline_clamp` | 1024 | daemon.rs | Upper bound on pipeline depth |
-| `CUDA_BLOCK_SIZE` | 256 | cuda.rs | Threads per CUDA block |
+| `num_clients` | `gpu_count + 2` (3..8) | daemon.rs | Reporter client connections |
 | `NONCE_SPACE_SIZE` | 1,000,000 | mod.rs | Nonces per work unit |
-| `SUBMITTER_THREADS` | 3 | daemon.rs | In-process HTTP reporter threads |
 
 ---
 
-## Measured Results (from live logs, not estimates)
+## What the Next Session Must Do
 
-### 10x RTX 4090 (vast.ai, 2026-04-10/11)
+### Step 1: Wait for webcash.org mining_report to Recover
 
-| Metric | Value | Source |
-|--------|-------|--------|
-| Baseline speed (v0.1.52 code, 4x pipeline) | 72.29 GH/s | `speed=72.29 Gh/s ... (mine=431μs cycle=540μs)` |
-| Optimized speed (32x pipeline, lop3 kernel) | 101.77 GH/s | `speed=101.77 Gh/s ... (mine=2511μs cycle=2798μs)` |
-| Benchmark raw GPU | 132.94 GH/s | `cuda_total_estimate=132939.99 Mh/s` |
-| Pipeline depth (optimized) | 320 | `workunit_pipeline_depth=320` |
-| Solution submission time | 7138ms | `[submitter-0] accepted in 7138ms` (v0.1.52 pattern) |
-| Server response | 200 OK | `📥 Response body: {"status": "success"}` |
-| With 64 in-process threads | 22 GH/s | `speed=22.03 Gh/s ... (mine=4126μs cycle=4134μs)` |
-| With 3 duplicate miners | 27 GH/s | `speed=27.17 Gh/s` (3 processes fighting for GPU) |
-| With launch_bounds(256,5) | 44 GH/s | `speed=44.38 Gh/s` (GPU1/2 at 2.5% share) |
-
-### Local Mac (AMD RX 580, 2026-04-11)
-
-| Metric | Value | Source |
-|--------|-------|--------|
-| v0.1.52 mining speed | ~500 MH/s | `speed=500.74 Mh/s` |
-| v0.1.52 submission | 7512ms | `[submitter-0] accepted in 7512ms` |
-| Latest (main) mining speed | ~500 MH/s | `speed=501.48 Mh/s` (unchanged) |
-| Latest (main) submission | DNS error | `dns error: failed to lookup address information` (subprocess reporter) |
-| Latest (main, v0.1.52 submitters restored) | 7512ms | `[submitter-0] accepted in 7512ms` ✓ |
-
-### Speed measurements NOT from live logs (from commit messages only)
-- 75 GH/s: claimed in commit `2f3f28b` message ("fixes 75→25 GH/s regression") — no raw log evidence
-- 31 GH/s with 64 Mutex threads: claimed in commit `4e23c57` — no raw log
-- 30 GH/s with sync_channel: claimed in commit `a07e19c` — no raw log
-
----
-
-## What To Test on 4x RTX 4090
-
-### 1. Mining Speed (~40 GH/s target)
+Test with curl:
 ```bash
-# Start miner in foreground
+curl -s --max-time 15 -X POST https://webcash.org/api/v1/mining_report \
+  -H "Content-Type: application/json" \
+  -d '{"preimage": "test", "work": 0, "legalese": {"terms": true}}'
+```
+Expected: 500 Internal Server Error (bad data, but server responds). If it times out with 0 bytes, the server is still hung from the 60-connection flood on 2026-04-11.
+
+### Step 2: Provision 4x RTX 4090 with --env dev
+
+```bash
+hrmw webminer cloud start --env dev --offer <offer_id>
+# SSH in, verify 4 GPUs detected
+```
+
+### Step 3: Test N-Client Architecture (commit a414ebd)
+
+```bash
+# Start miner (auto-creates 6 clients for 4 GPUs)
 hrmw webminer start -f --accept-terms --server https://webcash.org
-# Expected: speed=~40 Gh/s (4/10 of 100 GH/s)
-# Watch: mine=Xμs cycle=Yμs — cycle should be <2x mine
-```
 
-### 2. Solution Reporting (must work at full speed)
-```bash
 # Watch for:
-# [submitter-N] accepted in ~7000ms — confirms server responds
-# solutions=X/Y where Y > 0 — confirms solutions accepted
-# Mining speed stays at ~40 GH/s while reporting
+# 1. "reporter_clients=6 (created eagerly in main process)"
+# 2. [client-0] accepted in ~7000ms  (NOT 34000ms — that means shared connection)
+# 3. [client-1] accepted in ~7000ms  (each client should be ~7s independently)
+# 4. speed=42+ Gh/s (must not regress)
+# 5. solutions=X/Y where X tracks Y closely (not falling behind)
 ```
 
-### 3. Shutdown Drain (max 10-20 seconds)
+**Critical check**: Each `[client-N]` must show ~7s accept time. If they show 30-50s, the clients are sharing a connection (wrong). If they show 0 bytes / timeout, the client creation is broken (see Rule 1).
+
+### Step 4: Test Shutdown Drain
+
 ```bash
 # Mine for 2 minutes, then Ctrl+C
-# Watch: "Drained pending submissions in Xs"
-# X must be < 20 seconds
-# All buffered solutions must be reported before exit
+# Watch: "Drained in Xs" — should be fast (N clients drain in parallel)
+# Check: solutions_found ≈ solutions_accepted (nothing lost)
 ```
 
-### 4. Solution Rate vs Report Rate
+### Step 5: Scale to 10x RTX 4090
+
+Only after 4x works perfectly:
 ```bash
-# At 40 GH/s, difficulty 36: ~0.6 solutions/sec
-# 3 threads × (1/7s) = 0.43 reports/sec
-# Marginal — may need to increase to 6 submitter threads
-# If solutions accumulate faster than reported:
-#   Increase SUBMITTER_THREADS from 3 to 6-8
-#   Test that GPU speed stays at ~40 GH/s
+hrmw webminer cloud start --offer <10x_offer>
+# Expected: ~100 GH/s, 8 clients (clamped), ~1.14 reports/sec
+# May need HRMW_REPORTER_CLIENTS=8 override if auto-calc is too low
 ```
+
+**If 8 clients isn't enough** (solutions accumulate), increase carefully: 8→10→12. NEVER above 8 without first verifying the previous count works. Each increase risks 504 cascade.
 
 ---
 
-## Challenges To Investigate
+## The Root Cause Explained — For the Next Agent
 
-### Challenge 1: Optimal Submitter Thread Count During Mining
-On 4x RTX 4090, 3 threads may not be enough. With ~0.6 solutions/sec and 7s per report, 3 threads handle 0.43/sec — deficit of 0.17/sec. After 5 minutes: ~51 unreported.
+The central mystery of this project: why does `reqwest::blocking::Client` work in the main process but fail in subprocesses?
 
-**Test**: Try 3, 6, 8, 12 threads. For each, measure:
-- GPU speed (must stay at ~40 GH/s)
-- Submission success rate
-- Buffer growth rate (solutions found - solutions reported)
+**What happens when you create a blocking client:**
+1. `reqwest::blocking::Client::builder().build()` internally creates a `reqwest::Client` (async)
+2. The async client creates a tokio runtime
+3. The tokio runtime spawns worker threads for DNS resolution, connection pooling, etc.
+4. The blocking wrapper parks the calling thread and runs requests on the async runtime
 
-The goal is to find the maximum thread count where GPU speed is unaffected. On the 10x RTX 4090 system, 3 threads cost ~3 GH/s. With the 32x pipeline (longer cycles), thread interference is proportionally smaller.
+**In the main process**, this tokio runtime initializes correctly — it inherits the process's networking stack, DNS configuration, and event loop. Requests work.
 
-### Challenge 2: Pre-Emptive Stale Difficulty Check
-The maaku C++ miner checks difficulty BEFORE submitting. If a queued solution's hash doesn't meet current difficulty, it's logged to orphan file and skipped — saving 7 seconds of wasted HTTP wait.
+**In a subprocess (fork+exec)**, the new process gets a fresh address space. The tokio runtime initializes in this fresh context. Something about this initialization (likely the interaction between the internal tokio runtime and the parent's networking state, or the way reqwest establishes TLS sessions) produces a client that can establish TCP connections but sends HTTP requests that the Python/Tornado server hangs on instead of processing.
 
-**Implement**: Before each submission, compare `solution.difficulty_achieved` against the shared `target.difficulty`. If `achieved < current`, skip and log. This is critical because difficulty adjustments invalidate ALL queued solutions at once.
+The **symptom** is indistinguishable from "server is down" — zero bytes received, curl also hangs. The **fix** is always the same: create the client in the main process.
 
-### Challenge 3: Burst Drain on Shutdown (10-20 Second Target)
-When SIGINT fires:
-1. Set shutdown flag (stops mining loop)
-2. GPU work completes (last cycle, ~3ms)
-3. **Now GPU is idle — spawn 60 additional threads**
-4. All threads share the SAME `Arc<MiningProtocol>` (same connection pool)
-5. Each thread clones the `Arc`, pulls from the channel
-6. With 63 threads × 7s per report: 9 reports/sec → drain 100 solutions in 11s
-7. Timeout at 20s; any remaining → overflow file for `collect`
+**To scale N clients**, create all N in the main process BEFORE mining starts, then distribute to N in-process threads. The TLB cost of N threads (maybe 3-5 GH/s) is acceptable — it's far better than losing solutions.
 
-The key insight: spawning threads AFTER GPU stops is safe. TLB shootdowns only matter during CUDA dispatch. Once mining is done, the CPU can do whatever it wants.
+**DO NOT** attempt to work around this with:
+- Pre-resolved DNS (`.resolve()`) — the issue is NOT DNS
+- `ureq` or other HTTP libraries — untested, may have same issue
+- Raw `TcpStream` + manual HTTP — fragile, untested
+- `fork()` without `exec()` — unsafe in multi-threaded process
 
-### Challenge 4: Remove Local Collection Workaround
-Currently, `hrmw webminer cloud watch` runs locally and syncs solutions from remote via SSH every 30 seconds. This was a workaround for unreliable remote reporting.
-
-**Goal**: All solution reporting happens on the remote machine. The local machine only monitors status. On `cloud stop`:
-1. Send SIGINT to remote miner
-2. Miner stops mining, enters burst drain (60 threads, 20s max)
-3. All solutions reported on the remote
-4. Only after drain completes: destroy instance
-5. **No SSH solution download, no local collection**
-
-### Challenge 5: Connection Reuse for Maximum Throughput
-`reqwest::blocking::Client` maintains an internal connection pool with HTTP keep-alive. First request does DNS + TLS (~200ms). Subsequent requests reuse the connection (~0ms overhead).
-
-**Design rules:**
-- ONE shared `reqwest::blocking::Client` for ALL threads (created eagerly in `MiningProtocol::new()`)
-- Shared via `Arc<MiningProtocol>` — Arc clone is a pointer increment
-- NOT separate clients per thread (64 clients = 64 DNS lookups = 64 TLS handshakes = failure)
-- `reqwest` handles connection pool internally — no manual pooling needed
-- HTTP/1.1 keep-alive is default — connections persist between requests
-
-### Challenge 6: Zero-Blocking Mining Loop Architecture
-The mining loop must NEVER wait on I/O. Current architecture already achieves this:
-```
-Mining loop:
-  1. GPU mines (2.5ms)
-  2. Check solutions (μs)
-  3. For each solution: channel.send() — NON-BLOCKING (mpsc unbounded)
-  4. Repeat
-```
-`mpsc::channel::send()` is a pointer swap — nanoseconds, no allocation, no I/O. The submitter threads on the other end of the channel do all the heavy lifting (HTTP, file I/O, wallet insert) independently.
-
-**What must NOT be in the mining loop:**
-- HTTP calls (7s blocking)
-- DNS resolution
-- TLS handshake
-- File open/write (solutions are written with `let _ =` to ignore errors — never blocks)
-- Mutex contention with submitters (channel send doesn't lock; submitters lock the receiver)
-
-**Pre-emptive preparation (already done by reqwest internally):**
-- DNS resolved on first request, cached for connection pool lifetime
-- TLS session established once, resumed for all subsequent connections
-- TCP connection kept alive (no SYN/SYN-ACK per request)
-- HTTP pipelining handled by the keep-alive connection
-
-### Challenge 7: Thread Count Math — 3 Threads Is Provably Insufficient
-
-**The math is unambiguous:**
-- At 100 GH/s, difficulty 36: 100×10⁹ / 2³⁶ ≈ **1.46 solutions/sec**
-- Each report takes **7 seconds** (measured: 7138ms, 7512ms)
-- Required concurrent connections: 1.46 × 7 = **10.2 minimum**
-- With safety margin (burst, jitter): **70+ threads** needed
-- Current: 3 threads = 0.43 reports/sec = **3.4× slower than mining**
-
-3 threads was acceptable at v0.1.50 speeds (~500 MH/s CPU mining, ~0.007 solutions/sec). At 100 GH/s, the reporting throughput must scale 200×.
-
-**The server queuing problem**: If all threads share ONE `reqwest::blocking::Client` with HTTP/1.1 keep-alive, ALL requests go through the same TCP connection. The server (Python/Tornado single-threaded) processes them sequentially — each request waits behind the previous 7-second processing. Effective throughput: 1/7 = 0.14 reports/sec regardless of thread count.
-
-**Why multiple HTTP clients are needed**: Each client creates its own TCP connection. The server handles multiple connections concurrently (OS-level accept). N clients = N parallel processing slots on the server. From the server's perspective, each connection looks like a different miner.
-
-**The solution (to be tested)**:
-- Create N `reqwest::blocking::Client` instances (not 64 — maybe 12-16)
-- Each client: `Client::builder().http1_only().timeout(60s).build()`
-- Distribute threads across clients: 70 threads / 12 clients = ~6 threads per client
-- Each client maintains its own TCP connection with keep-alive
-- Server sees 12 independent connections, processes 12 reports in parallel
-- Throughput: 12/7 = 1.71 reports/sec (matches mining rate)
-
-**CRITICAL**: Client creation must be EAGER, in the main process context (v0.1.52 pattern). NOT lazy, NOT in subprocess. The DNS failure came from creating clients in subprocess context.
-
-**How to test safely:**
-1. Start with 3 threads / 1 client (baseline, proven)
-2. Try 12 threads / 4 clients — measure GPU speed
-3. Try 24 threads / 8 clients — measure GPU speed  
-4. Find the cliff where GPU speed drops
-5. If ANY thread count >3 hurts GPU: use 3 during mining + burst on shutdown
+The ONLY proven pattern: `reqwest::blocking::Client::builder().build()` in the main process.
 
 ---
 
-## Historic Cloud Mining Architecture & Its Problems
+## Git History Reference
 
-### How Cloud Mining Currently Works (provision.rs)
+| Commit | What | Outcome |
+|--------|------|---------|
+| `a414ebd` | N eagerly-created clients in main process | **CURRENT — untested** |
+| `ea137a3` | Auto-scale clients to nginx limit | Part of current |
+| `de3bfba` | Subprocess reporter with N clients | BROKEN (subprocess client creation) |
+| `c76113d` | Burst drain tuning | Superseded by N-client approach |
+| `4703e42` | Vast.ai cur_state fix | Working |
+| `01a00d1` | Burst drain + stale check + --env dev | Partially working |
+| `a9958c1` | Restore v0.1.52 pattern | THE WORKING BASELINE |
+| `cd0b6d8` | 32x pipeline + kernel opts | Working (GPU optimizations) |
+| `ab55786` | Subprocess reporter (pipe-based) | BROKEN (subprocess client) |
+| `334e162` | collect --watch (file-tailing reporter) | BROKEN (same root cause) |
+| `c410809` | Remove all submitters (file-only) | Mining works, no reporting |
+| `72c2a06` | 64 blocking submitter threads | BROKEN (TLB shootdowns → 22 GH/s) |
+| `a9ade36` | Lazy Option\<Client\> | **THE COMMIT THAT BROKE EVERYTHING** |
 
-**Start sequence** (`hrmw webminer cloud start`):
-```
-1. Upload SSH key to Vast.ai
-2. Create instance (GPU container with CUDA image)
-3. Wait for SSH access
-4. Upload pre-built hrmw binary via SCP
-5. Upload labeled webcash wallet
-6. Start miner: hrmw webminer start -f --accept-terms
-7. Start reporter: hrmw webminer collect --watch  (SEPARATE PROCESS)
-8. Auto-start local dispatcher: hrmw webminer cloud watch --interval 30
-```
-
-**Stop sequence** (`hrmw webminer cloud stop`):
-```
-1. Download solution files from remote via SSH (WORKAROUND)
-2. Send SIGINT to remote miner
-3. Wait up to 15s for graceful shutdown, then force kill
-4. Download solution files AGAIN (may have new ones from drain)
-5. Instance stopped but NOT destroyed (to allow manual recovery)
-```
-
-**Local dispatcher daemon** (`hrmw webminer cloud watch`):
-```
-Loop every 30 seconds:
-  1. SSH into each running instance
-  2. Download miner_pending_solutions.log, miner_pending_keeps.log
-  3. Deduplicate against local copies
-  4. Run hrmw webminer collect (submit unsubmitted solutions locally)
-  5. Uses 4 parallel threads for local submission
-```
-
-### The Workaround: SSH File Transfer (BAD — Must Be Eliminated)
-
-**What happens**: The local dispatcher SSH-cats solution files from the remote every 30 seconds. Solutions are submitted from the LOCAL machine, not the remote. The remote's 3 in-process submitter threads AND the separate `collect --watch` process also try to submit. Three separate systems try to submit the same solutions:
-
-1. **Remote in-process submitters** (3 threads) — direct from mining loop, fastest
-2. **Remote collect --watch** (32 threads) — tails solution file, 200ms poll
-3. **Local dispatcher** (4 threads) — SSH download every 30s, submits locally
-
-This triple-redundancy exists because NONE of them was reliable enough alone.
-
-**Why it's bad:**
-- SSH file transfer adds 30-second latency per cycle
-- Solutions are stale by the time they reach the local machine
-- If difficulty changes during the 30s window, solutions are LOST
-- Three systems submitting the same solutions waste server resources
-- "Already accepted" errors flood the logs
-- The local dispatcher can't keep up at high mining speeds
-- SSH connection failures (transient) cause entire cycles to be skipped
-
-### What Must Replace It
-
-**Goal**: The remote machine handles ALL solution reporting autonomously. Zero SSH file transfers. Zero local submission. The local machine only:
-- Monitors status (hashrate, accepted count)  
-- Triggers start/stop
-- Never touches solution data
-
-**On cloud stop**:
-1. Send SIGINT to remote miner
-2. Remote miner stops mining, enters burst drain
-3. Remote miner spawns 60+ threads, drains ALL buffered solutions (max 20s)
-4. Remote miner exits cleanly with all solutions reported
-5. Local machine confirms drain complete (check `solutions_found == solutions_accepted + orphaned`)
-6. Destroy instance
-
-**No file download, no local collection, no dispatcher daemon.**
-
-### Evolution Path
-
-| Phase | Architecture | Reporter | Throughput | Status |
-|-------|-------------|----------|------------|--------|
-| v0.1.42 | Inline submission | Mining loop blocks on HTTP | 0.14/sec | Abandoned |
-| v0.1.50 | 3 in-process threads | Arc\<Mutex\<Receiver\>\> + shared client | 0.43/sec | **Current** |
-| v0.1.52 | + dispatch daemon | Local SSH sync every 30s | 0.43 + 0.57 local | Workaround |
-| v0.1.53-dev | + collect --watch | Separate process, 32 threads | +4.57/sec (theoretical) | Never worked (DNS) |
-| **Target** | N clients, M threads | Eager clients, burst drain | **1.71/sec steady, 8.6/sec drain** | To implement |
-
----
-
-## Release Process
-
-### Building on Remote (Dev Mode)
-```bash
-ssh -i ~/.harmoniis/cloud/id_ed25519 -p <port> root@<host>
-cd /root/hw
-git pull origin main
-CC=gcc-10 CXX=g++-10 cargo build --release  # ~1.5 minutes
-cp target/release/hrmw /root/.local/bin/hrmw
-```
-
-### Building Locally (Production)
-```bash
-cd ~/workspace/harmoniis/marketplace/harmoniis-wallet
-cargo build --release  # ~3 minutes on Mac
-cargo install --path . --force  # installs to ~/.cargo/bin/hrmw
-```
-
-### Deploying to Remote (Production Mode)
-```bash
-hrmw webminer cloud start --offer <machine_id>
-# Automatically: uploads binary, starts miner, starts reporter
-```
-
-### Version Bump
-```bash
-# Edit Cargo.toml version
-# Commit with: bump vX.Y.Z
-# Tag: git tag vX.Y.Z && git push --tags
-```
-
-### Testing Checklist Before Release
-- [ ] `cargo check` — compiles clean
-- [ ] `cargo test` — all tests pass
-- [ ] Local miner test (30s) — mines and reports solutions
-- [ ] Remote 4x GPU test — ~40 GH/s, solutions reported at speed
-- [ ] Shutdown drain test — all solutions reported within 20s of stopping
-- [ ] No in-process thread regressions — speed doesn't drop with submitters active
-
----
-
-## Vast.ai API Reference
-
-### Authentication
-```
-Authorization: Bearer <api_key>
-```
-API key stored in `~/.harmoniis/cloud/config.toml`.
-
-### Key Endpoints
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v0/bundles/` | POST | Search GPU offers (JSON filter body) |
-| `/api/v0/asks/{offer_id}/` | PUT | Create instance |
-| `/api/v0/instances/{id}/` | GET | Instance status |
-| `/api/v0/instances/{id}/` | DELETE | Destroy instance |
-| `/api/v0/ssh/` | POST | Upload SSH public key |
-
-### Instance Creation Payload
-```json
-{
-  "client_id": "me",
-  "image": "cuda:12.0.1-devel-ubuntu20.04",
-  "disk": 40,
-  "label": "harmoniis-dev-4gpu",
-  "runtype": "ssh ssh_proxy"
-}
-```
-
-### SSH Key
-Stored at `~/.harmoniis/cloud/id_ed25519` (Ed25519). Must be uploaded to vast.ai account before creating instances.
-
----
-
-## Key Invariants (NEVER VIOLATE)
-
-1. **Never add 64 in-process HTTP threads to the mining process** — kills GPU from 100 to 22 GH/s. Tested 4 times, failed every time.
-2. **3 in-process submitter threads is the ONLY proven pattern** — v0.1.52 pattern with eagerly-created shared blocking client. Do not change this without measuring GPU speed impact.
-3. **Never use lazy blocking client (Option\<reqwest::blocking::Client\>)** — the `ensure_blocking_client()` pattern caused DNS failures when used in subprocess context. Use eager creation in MiningProtocol::new().
-4. **Do NOT blame the webcash.org server** — it works (7s response). If submissions fail, the bug is in your code. Always test with v0.1.52 binary first.
-5. **Always use gcc-10+ on Ubuntu 20.04** — gcc-9 has memcmp bug that breaks aws-lc-sys
-6. **Always kill ALL hrmw processes before deploying** — multiple miners split GPU time (observed: 7 processes → 19 GH/s instead of 72 GH/s)
-7. **Pipeline depth must match MAX_BATCH** — gpu_count * multiplier per GPU, MAX_BATCH >= multiplier
-8. **More submitter threads can be spawned ONLY after mining stops** — for the shutdown drain phase when GPU is idle, TLB shootdowns don't matter
-9. **The user requires 32-64 parallel reporters without speed loss + 10-20s drain** — this is unsolved. Do not claim it's done until measured on real GPUs.
+The pattern: `a9ade36` introduced lazy client creation. Every subsequent attempt inherited this broken pattern. `a9958c1` restored eager creation and everything worked. `a414ebd` (current) uses eager creation with N separate clients — the correct approach, just untested.
