@@ -943,8 +943,8 @@ fn burst_drain_solutions(
 ) {
     use std::sync::atomic::AtomicUsize;
 
-    const MAX_BURST_THREADS: usize = 64;
-    const BURST_TIMEOUT_SECS: u64 = 30;
+    const MAX_BURST_THREADS: usize = 8;
+    const BURST_TIMEOUT_SECS: u64 = 300;
 
     let n_threads = solutions.len().min(MAX_BURST_THREADS);
     if n_threads == 0 {
@@ -974,7 +974,7 @@ fn burst_drain_solutions(
                 .spawn(move || {
                     // Each thread creates its own client = own TCP connection.
                     let client = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(60))
+                        .timeout(std::time::Duration::from_secs(120))
                         .build()
                     {
                         Ok(c) => c,
