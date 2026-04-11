@@ -454,7 +454,7 @@ pub async fn check_live_status(
                 if live.is_running() {
                     running.push(inst.clone());
                 } else {
-                    let status = live.actual_status.as_deref().unwrap_or("unknown");
+                    let status = live.status().unwrap_or_else(|| "unknown".to_string());
                     eprintln!(
                         "  Instance {} ({}) — status: {}",
                         inst.instance_id, inst.label, status
@@ -658,7 +658,7 @@ pub async fn status(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) 
     println!("  Instance: {}", state.instance_id);
     println!(
         "  Status:   {}",
-        instance.actual_status.as_deref().unwrap_or("unknown")
+        instance.status().unwrap_or_else(|| "unknown".to_string())
     );
     println!("  GPU:      {}x {}", state.num_gpus, state.gpu_name);
     println!("  Cost:     ${:.2}/hr", state.cost_per_hour);
@@ -843,7 +843,8 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
             Ok(inst) if inst.is_running() => return Ok(inst),
             Ok(inst) => {
                 api_errors = 0;
-                let s = inst.actual_status.as_deref().unwrap_or("unknown");
+                let status_str = inst.status().unwrap_or_else(|| "unknown".to_string());
+                let s = status_str.as_str();
                 let msg = inst.status_msg.as_deref().unwrap_or("");
 
                 // Fail on terminal states or error messages.

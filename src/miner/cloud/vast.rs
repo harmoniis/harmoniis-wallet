@@ -58,7 +58,11 @@ impl Offer {
 pub struct Instance {
     #[serde(default)]
     pub id: u64,
+    /// Vast.ai API returns status in different fields depending on context.
+    /// `actual_status` is the documented field, `cur_state` is the actual one.
     pub actual_status: Option<String>,
+    /// The real status field in the Vast.ai API response.
+    pub cur_state: Option<String>,
     pub status_msg: Option<String>,
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
@@ -98,7 +102,12 @@ impl Instance {
     }
 
     pub fn is_running(&self) -> bool {
-        self.actual_status.as_deref() == Some("running")
+        self.status().as_deref() == Some("running")
+    }
+
+    /// Effective status: prefers `cur_state` (actual API field), falls back to `actual_status`.
+    pub fn status(&self) -> Option<String> {
+        self.cur_state.clone().or_else(|| self.actual_status.clone())
     }
 }
 
