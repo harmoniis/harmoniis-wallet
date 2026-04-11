@@ -37,37 +37,25 @@ pub struct MiningReportResponse {
 }
 
 /// Mining protocol client.
-#[derive(Clone)]
 pub struct MiningProtocol {
     server_url: String,
     http: Client,
-    /// Blocking HTTP client — created lazily in submitter OS threads
-    /// (not in async context, where reqwest::blocking panics).
-    http_blocking: Option<reqwest::blocking::Client>,
+    /// Blocking HTTP client for the dedicated submission OS thread.
+    http_blocking: reqwest::blocking::Client,
 }
 
 impl MiningProtocol {
     pub fn new(server_url: &str) -> anyhow::Result<Self> {
         let timeout = std::time::Duration::from_secs(60);
         let http = Client::builder().timeout(timeout).build()?;
-        // Blocking client created lazily in submitter threads (not here)
-        // because reqwest::blocking::Client::new() panics inside async context.
+        let http_blocking = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()?;
         Ok(MiningProtocol {
             server_url: server_url.trim_end_matches('/').to_string(),
             http,
-            http_blocking: None,
+            http_blocking,
         })
-    }
-
-    /// Create blocking client — must be called from a non-async OS thread.
-    pub fn ensure_blocking_client(&mut self) {
-        if self.http_blocking.is_none() {
-            let timeout = std::time::Duration::from_secs(60);
-            self.http_blocking = reqwest::blocking::Client::builder()
-                .timeout(timeout)
-                .build()
-                .ok();
-        }
     }
 
     /// Fetch current mining target from the server.
@@ -99,16 +87,11 @@ impl MiningProtocol {
 
     /// Blocking variant of `submit_report` for the dedicated OS submission thread.
     /// Pure blocking I/O — no tokio runtime involvement.
-    /// Call `ensure_blocking_client()` first from a non-async thread.
     pub fn submit_report_blocking(
         &self,
         preimage: &str,
         hash: &[u8; 32],
     ) -> anyhow::Result<MiningReportResponse> {
-        let client = self
-            .http_blocking
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("blocking client not initialized"))?;
         let url = format!("{}/api/v1/mining_report", self.server_url);
         let hash_decimal = BigUint::from_bytes_be(hash).to_string();
         let body_str = format!(
@@ -116,7 +99,8 @@ impl MiningProtocol {
             preimage, hash_decimal
         );
 
-        let resp = client
+        let resp = self
+            .http_blocking
             .post(&url)
             .header("Content-Type", "application/json")
             .body(body_str)
@@ -125,12 +109,8 @@ impl MiningProtocol {
         let status_code = resp.status();
         let body_text = resp.text()?;
 
-        let parsed: MiningReportResponse =
-            serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
-                status: None,
-                difficulty_target: None,
-                error: Some(body_text.clone()),
-            });
+        let parsed: MiningReportResponse = serde_json::from_str(&body_text)
+            .unwrap_or(MiningReportResponse { status: None, difficulty_target: None, error: Some(body_text.clone()) });
 
         // Propagate "already used" as an error so callers can distinguish it.
         if let Some(ref err) = parsed.error {
@@ -184,22 +164,17 @@ impl MiningProtocol {
         let status_code = resp.status();
         let body_text = resp.text().await?;
 
-        let parsed: MiningReportResponse =
-            serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
-                status: None,
-                difficulty_target: None,
-                error: Some(body_text.clone()),
-            });
-
-        if let Some(ref err) = parsed.error {
-            if err.contains("Didn't use a new secret") {
-                anyhow::bail!("Didn't use a new secret value.");
-            }
-        }
-
         if status_code.is_success() {
+            let parsed: MiningReportResponse = serde_json::from_str(&body_text)?;
             Ok(parsed)
         } else {
+            // Try to parse error response
+            if let Ok(parsed) = serde_json::from_str::<MiningReportResponse>(&body_text) {
+                if parsed.error.as_deref() == Some("Didn't use a new secret value.") {
+                    // This is a known benign error (duplicate secret)
+                    return Ok(parsed);
+                }
+            }
             anyhow::bail!(
                 "mining report rejected (HTTP {}): {}",
                 status_code,
