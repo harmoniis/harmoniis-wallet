@@ -95,6 +95,120 @@ pub fn prompt_offer_selection(offers: &[super::vast::Offer]) -> Result<&super::v
         .ok_or_else(|| anyhow::anyhow!("selection out of range"))
 }
 
+/// Dev mode cloud start: provision → install build tools → clone → build.
+///
+/// Does NOT start mining. The developer SSHs in and runs manually.
+/// Called by `hrmw webminer cloud start --env dev`.
+pub async fn start_dev(
+    label: &str,
+    machine_id: Option<u64>,
+    wallet_db_path: &Path,
+    ssh_key: &ed25519_dalek::SigningKey,
+) -> Result<InstanceState> {
+    let cfg = config::load_config()?;
+    let api_key = config::resolve_api_key(&cfg)?;
+    let client = VastClient::new(&api_key);
+
+    // 1. Upload SSH key
+    println!("[1/5] Uploading SSH key to Vast.ai...");
+    let pubkey = ssh::ssh_public_key_string(ssh_key);
+    client.upload_ssh_key(&pubkey).await?;
+
+    // 2. Select offer
+    let offer_id = if let Some(id) = machine_id {
+        println!("[2/5] Using offer: {id}");
+        id
+    } else {
+        println!("[2/5] Searching for best GPU offers...");
+        let offers = client.find_best_offers().await?;
+        if offers.is_empty() {
+            anyhow::bail!("No GPU offers found.");
+        }
+        print_offers_table(&offers);
+        let selected = prompt_offer_selection(&offers)?;
+        println!(
+            "  Selected: {}x {} (${:.2}/hr)",
+            selected.num_gpus, selected.gpu_name, selected.dph_total
+        );
+        selected.id
+    };
+
+    // 3. Create instance
+    println!("[3/5] Creating instance...");
+    let instance_id = client.create_instance(offer_id, "").await?;
+    println!("  Instance: {instance_id}");
+
+    // 4. Wait for running + SSH
+    println!("[4/5] Waiting for instance to start...");
+    let instance = wait_for_running(&client, instance_id).await?;
+    let (ssh_host, ssh_port) = instance
+        .ssh_connection()
+        .ok_or_else(|| anyhow::anyhow!("No SSH connection info"))?;
+    println!("  SSH: root@{ssh_host}:{ssh_port}");
+
+    if let Err(e) = wait_for_ssh(ssh_key, &ssh_host, ssh_port).await {
+        eprintln!("  SSH failed — destroying instance...");
+        let _ = client.destroy_instance(instance_id).await;
+        config::remove_instance(instance_id).ok();
+        return Err(e);
+    }
+
+    // 5. Install dev environment: build tools, Rust, clone repo, build
+    println!("[5/5] Setting up dev environment (clone + build from source)...");
+    if let Err(e) = install_dev_remote(ssh_key, &ssh_host, ssh_port).await {
+        eprintln!("  Dev setup failed — destroying instance...");
+        let _ = client.destroy_instance(instance_id).await;
+        config::remove_instance(instance_id).ok();
+        return Err(e);
+    }
+
+    // Upload the labeled webcash wallet
+    println!("  Uploading mining wallet...");
+    upload_file(ssh_key, &ssh_host, ssh_port, wallet_db_path, REMOTE_WALLET)?;
+    let _ = ssh::exec(
+        ssh_key,
+        &ssh_host,
+        ssh_port,
+        "mkdir -p /root/.harmoniis/wallet",
+    );
+
+    // Verify GPUs
+    match ssh::exec(
+        ssh_key,
+        &ssh_host,
+        ssh_port,
+        &format!("{REMOTE_HRMW} webminer list-devices"),
+    ) {
+        Ok(output) => {
+            for line in output.trim().lines() {
+                println!("  {line}");
+            }
+        }
+        Err(_) => println!("  GPU detection unavailable"),
+    }
+
+    // Save state (same as production — allows cloud stop/destroy later)
+    let state = InstanceState {
+        instance_id,
+        offer_id,
+        label: label.to_string(),
+        ssh_host: ssh_host.clone(),
+        ssh_port,
+        gpu_name: instance.gpu_name.unwrap_or_else(|| "Unknown".to_string()),
+        num_gpus: instance.num_gpus.unwrap_or(0),
+        cost_per_hour: instance.dph_total.unwrap_or(0.0),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    };
+    config::add_instance(&state)?;
+
+    println!();
+    println!("Dev instance ready (mining NOT started).");
+    println!("  GPU: {}x {}", state.num_gpus, state.gpu_name);
+    println!("  Cost: ${:.2}/hr", state.cost_per_hour);
+
+    Ok(state)
+}
+
 /// Full cloud mining start: search → select → provision → install → mine.
 ///
 /// Called by `hrmw webminer cloud start`. Does everything in one flow.
@@ -389,8 +503,10 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         "kill -INT $(pgrep -f 'webminer start') 2>/dev/null || true",
     );
 
-    // Step 3: Wait for miner to exit (up to 15s, then force kill).
-    for i in 0..8 {
+    // Step 3: Wait for miner to exit (up to 45s for burst drain, then force kill).
+    // The miner now does burst-drain on shutdown: spawns 64 parallel threads
+    // to submit buffered solutions. This can take up to 30s.
+    for i in 0..22 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if ssh::exec(
             ssh_key,
@@ -403,7 +519,8 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         {
             break;
         }
-        if i == 7 {
+        if i == 21 {
+            eprintln!("  Burst drain exceeded 45s — force killing...");
             let _ = ssh::exec(
                 ssh_key,
                 &state.ssh_host,
@@ -881,6 +998,113 @@ async fn install_hrmw_remote(
                 },
                 glibc.trim()
             );
+        }
+        Err(e) => {
+            anyhow::bail!("hrmw verification failed: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Install dev environment: build tools, Rust, gcc-10, clone repo, build.
+///
+/// Unlike `install_hrmw_remote` which downloads a pre-built binary,
+/// this installs a full build toolchain so the developer can edit code
+/// on the remote machine, rebuild in ~1.5 minutes, and test interactively.
+async fn install_dev_remote(
+    ssh_key: &ed25519_dalek::SigningKey,
+    host: &str,
+    port: u16,
+) -> Result<()> {
+    // Step 1: Install build tools + gcc-10/g++-10.
+    // gcc-10 is required because aws-lc-sys (dep of rustls) has a bug
+    // detection check that rejects gcc-9. Ubuntu 20.04 ships gcc-9.
+    println!("  Installing build tools...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq \
+         build-essential pkg-config libssl-dev git gcc-10 g++-10 2>&1 | tail -3",
+    )
+    .map_err(|e| anyhow::anyhow!("Build tools install failed: {e}"))?;
+
+    // Ensure NVRTC is available (needed for CUDA kernel compilation).
+    let nvrtc_check =
+        ssh::exec(ssh_key, host, port, "ldconfig -p | grep libnvrtc").unwrap_or_default();
+    if nvrtc_check.is_empty() {
+        println!("  Installing CUDA NVRTC...");
+        ssh::exec(
+            ssh_key,
+            host,
+            port,
+            concat!(
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq ",
+                "cuda-nvrtc-13-0 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-6 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-4 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-0 2>/dev/null || ",
+                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq libnvrtc12 2>/dev/null || true",
+            ),
+        )
+        .ok();
+    }
+
+    // Step 2: Install Rust toolchain.
+    println!("  Installing Rust toolchain...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 | tail -3",
+    )
+    .map_err(|e| anyhow::anyhow!("Rust install failed: {e}"))?;
+
+    // Step 3: Clone the repo.
+    println!("  Cloning harmoniis-wallet...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "source ~/.cargo/env && \
+         git clone https://github.com/harmoniis/harmoniis-wallet.git /root/hw 2>&1 | tail -3",
+    )
+    .map_err(|e| anyhow::anyhow!("Git clone failed: {e}"))?;
+
+    // Step 4: Build release.
+    println!("  Building release (this takes ~2 minutes)...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "source ~/.cargo/env && cd /root/hw && \
+         CC=gcc-10 CXX=g++-10 cargo build --release 2>&1 | tail -5",
+    )
+    .map_err(|e| anyhow::anyhow!("Cargo build failed: {e}"))?;
+
+    // Step 5: Install the binary.
+    println!("  Installing hrmw...");
+    ssh::exec(
+        ssh_key,
+        host,
+        port,
+        "mkdir -p /root/.local/bin && cp /root/hw/target/release/hrmw /root/.local/bin/hrmw",
+    )
+    .map_err(|e| anyhow::anyhow!("Binary install failed: {e}"))?;
+
+    // Verify.
+    match ssh::exec(
+        ssh_key,
+        host,
+        port,
+        &format!("{REMOTE_HRMW} --version 2>&1"),
+    ) {
+        Ok(version) if version.contains("hrmw") => {
+            println!("  {}", version.trim());
+        }
+        Ok(output) => {
+            anyhow::bail!("hrmw binary cannot run: {}", output.trim());
         }
         Err(e) => {
             anyhow::bail!("hrmw verification failed: {e}");

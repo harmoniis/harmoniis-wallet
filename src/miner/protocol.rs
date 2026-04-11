@@ -45,6 +45,13 @@ pub struct MiningProtocol {
 }
 
 impl MiningProtocol {
+    /// The server URL this client is configured for.
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+}
+
+impl MiningProtocol {
     pub fn new(server_url: &str) -> anyhow::Result<Self> {
         let timeout = std::time::Duration::from_secs(60);
         let http = Client::builder().timeout(timeout).build()?;
@@ -113,6 +120,56 @@ impl MiningProtocol {
             .unwrap_or(MiningReportResponse { status: None, difficulty_target: None, error: Some(body_text.clone()) });
 
         // Propagate "already used" as an error so callers can distinguish it.
+        if let Some(ref err) = parsed.error {
+            if err.contains("Didn't use a new secret") {
+                anyhow::bail!("Didn't use a new secret value.");
+            }
+        }
+
+        if status_code.is_success() {
+            Ok(parsed)
+        } else {
+            anyhow::bail!(
+                "mining report rejected (HTTP {}): {}",
+                status_code,
+                body_text
+            )
+        }
+    }
+
+    /// Submit a mining report using an externally-provided blocking client.
+    ///
+    /// Used by burst drain threads that each own a separate client (= separate
+    /// TCP connection) for maximum parallel throughput.
+    pub fn submit_report_with_client(
+        client: &reqwest::blocking::Client,
+        server_url: &str,
+        preimage: &str,
+        hash: &[u8; 32],
+    ) -> anyhow::Result<MiningReportResponse> {
+        let url = format!("{}/api/v1/mining_report", server_url);
+        let hash_decimal = BigUint::from_bytes_be(hash).to_string();
+        let body_str = format!(
+            r#"{{"preimage": "{}", "work": {}, "legalese": {{"terms": true}}}}"#,
+            preimage, hash_decimal
+        );
+
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()?;
+
+        let status_code = resp.status();
+        let body_text = resp.text()?;
+
+        let parsed: MiningReportResponse = serde_json::from_str(&body_text)
+            .unwrap_or(MiningReportResponse {
+                status: None,
+                difficulty_target: None,
+                error: Some(body_text.clone()),
+            });
+
         if let Some(ref err) = parsed.error {
             if err.contains("Didn't use a new secret") {
                 anyhow::bail!("Didn't use a new secret value.");

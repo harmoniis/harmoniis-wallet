@@ -1153,6 +1153,9 @@ enum CloudCmd {
         /// Number of instances to provision
         #[arg(short = 'n', long, default_value = "1")]
         count: usize,
+        /// Environment: 'dev' clones + builds from source for interactive testing
+        #[arg(long)]
+        env: Option<String>,
     },
     /// Stop miner(s), recover mined webcash, transfer to main wallet
     Stop {
@@ -3998,7 +4001,62 @@ async fn main() -> anyhow::Result<()> {
                     label,
                     offer: machine,
                     count,
+                    env,
                 } => {
+                    // Dev mode: clone + build from source, no auto-start
+                    if env.as_deref() == Some("dev") {
+                        let _lock = cloud_config::acquire_start_lock()
+                            .context("Another cloud start is in progress")?;
+
+                        let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&label))
+                            .await?;
+                        let db_path =
+                            labeled_wallet_display_path(&wallet_path, "webcash", Some(&label));
+
+                        let state =
+                            provision::start_dev(&label, machine, &db_path, &ssh_key).await?;
+
+                        // Write SSH key to persistent path for dev SSH access.
+                        let key_dir = dirs_next::home_dir()
+                            .unwrap_or_default()
+                            .join(".harmoniis")
+                            .join("cloud");
+                        let _ = std::fs::create_dir_all(&key_dir);
+                        let key_path = key_dir.join("id_ed25519");
+                        let key_file = harmoniis_wallet::miner::cloud::ssh::write_temp_key_file(&ssh_key)?;
+                        let _ = std::fs::copy(&key_file, &key_path);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &key_path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+
+                        println!();
+                        println!("Dev instance ready. SSH in and test manually:");
+                        println!(
+                            "  ssh -i {} -p {} root@{}",
+                            key_path.display(),
+                            state.ssh_port,
+                            state.ssh_host
+                        );
+                        println!();
+                        println!("On the remote machine:");
+                        println!(
+                            "  cd /root/hw && /root/.local/bin/hrmw webminer start -f \
+                             --accept-terms --server https://webcash.org"
+                        );
+                        println!();
+                        println!("Or rebuild after changes:");
+                        println!(
+                            "  cd /root/hw && CC=gcc-10 CXX=g++-10 cargo build --release && \
+                             cp target/release/hrmw /root/.local/bin/hrmw"
+                        );
+                        return Ok(());
+                    }
+
                     use harmoniis_wallet::miner::cloud::slots;
 
                     // Concurrency guard — prevents two terminals from racing.
