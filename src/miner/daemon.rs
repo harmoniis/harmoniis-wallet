@@ -4,20 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use webylib::SecretWebcash;
-
 use super::protocol::MiningProtocol;
 use super::sha256::Sha256Midstate;
 use super::stats::{self, StatsTracker};
 use super::work_unit::{NonceTable, WorkUnit};
-
-/// Solution queued for submission on the dedicated OS thread.
-struct SolutionReport {
-    preimage: String,
-    hash: [u8; 32],
-    difficulty_achieved: u32,
-    keep_secret: SecretWebcash,
-}
 
 use super::{select_backend, select_backend_for_devices, BackendChoice, MinerConfig};
 
@@ -514,172 +504,80 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let mut pending_work_units: Option<Vec<WorkUnit>> = None;
     let shared_target = Arc::new(std::sync::RwLock::new(target.clone()));
 
-    // Dedicated OS thread for solution submission (maaku/webminer pattern).
-    // Uses std::thread (not tokio::spawn) to avoid async runtime scheduling
-    // issues. Mining loop pushes to channel and never blocks.
-    // Multiple submitter threads drain the queue in parallel.
-    // Server takes 6-14s per response, so 1 thread can only handle ~6/min.
-    // With N threads we handle N×6/min. Default 3 threads = ~18/min capacity.
-    // Override with HRMW_SUBMITTER_THREADS env var to test higher counts.
-    let submitter_threads: usize = std::env::var("HRMW_SUBMITTER_THREADS")
+    // ── Subprocess reporter (N independent clients, separate address space) ──
+    //
+    // Spawns `hrmw webminer report-worker` as a child process. Solutions are
+    // piped to its stdin (sub-microsecond write, zero allocation). The child
+    // runs N independent HTTP clients, each with its own TCP connection —
+    // simulating N separate miners. Server processes them in parallel.
+    //
+    // Why subprocess: ANY in-process threads (even idle reqwest::blocking)
+    // cause TLB shootdowns from malloc/free that stall CUDA dispatch.
+    // 3 threads = -3 GH/s, 64 threads = -78 GH/s. Subprocess = ZERO impact.
+    //
+    // Why N clients: At 100 GH/s, 1.46 solutions/sec × 7s/report = 10.2
+    // concurrent connections minimum. 12 clients = 1.71 reports/sec headroom.
+    // Each client has its own TCP connection — server sees 12 independent miners.
+    // Auto-scale reporter clients based on GPU count and expected solution rate.
+    // Each GPU does ~10 GH/s. At difficulty 36: solutions/sec ≈ GH/s / 68.7.
+    // Each client handles 1 report/7s. Need: solutions_per_sec × 7 clients.
+    // With safety margin: solutions_per_sec × 10 clients.
+    // Formula: gpu_count × 10 GH/s / 68.7 × 10 ≈ gpu_count × 1.5 × 10 ≈ gpu_count × 15
+    // Clamped to 4..80 range. Override with HRMW_REPORTER_CLIENTS env var.
+    let gpu_count = backend.recommended_pipeline_depth() / 32; // pipeline_depth = gpu_count * 32
+    let gpu_count = gpu_count.max(1);
+    let auto_clients = (gpu_count * 15).clamp(4, 80);
+    let reporter_clients: usize = std::env::var("HRMW_REPORTER_CLIENTS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3)
-        .max(1);
-    println!("  submitter_threads={submitter_threads}");
-    let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionReport>();
-    let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
-    let mut submitter_handles = Vec::with_capacity(submitter_threads);
-    let webcash_wallet_path = Arc::new(config.webcash_wallet_path.clone());
-    for thread_id in 0..submitter_threads {
-        let rx = shared_rx.clone();
-        let sub_proto = protocol.clone();
-        let sub_tracker = tracker.clone();
-        let sub_pending_keep = pending_keep_path.clone();
-        let sub_shared_target = shared_target.clone();
-        let sub_wallet_path = webcash_wallet_path.clone();
-        let handle = std::thread::Builder::new()
-            .name(format!("submitter-{thread_id}"))
-            .spawn(move || {
-                eprintln!("[submitter-{thread_id}] started");
-                loop {
-                    let report = {
-                        let rx = rx.lock().unwrap();
-                        rx.recv()
-                    };
-                    let report = match report {
-                        Ok(r) => r,
-                        Err(_) => break, // channel closed
-                    };
-                    // Stale difficulty check — skip solutions that no longer
-                    // meet current server difficulty (saves 7s per skip).
-                    {
-                        let current_diff = sub_shared_target.read().unwrap().difficulty;
-                        if report.difficulty_achieved < current_diff {
-                            eprintln!(
-                                "[submitter-{thread_id}] skipping stale solution \
-                                 (achieved={} < current={})",
-                                report.difficulty_achieved, current_diff
-                            );
-                            let orphan_line = format!(
-                                "{} 0x{} {} difficulty={} STALE\n",
-                                report.preimage,
-                                hex::encode(&report.hash),
-                                report.keep_secret,
-                                report.difficulty_achieved,
-                            );
-                            let _ = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(orphan_log_path())
-                                .and_then(|mut f| {
-                                    use std::io::Write;
-                                    f.write_all(orphan_line.as_bytes())
-                                });
-                            continue;
-                        }
-                    }
+        .unwrap_or(auto_clients);
 
-                    let t0 = std::time::Instant::now();
-                    eprintln!(
-                        "[submitter-{thread_id}] submitting difficulty={} hash=0x{}...",
-                        report.difficulty_achieved,
-                        hex::encode(&report.hash[..4]),
-                    );
+    // Pre-resolve server hostname (parent process where DNS works reliably).
+    let server_host = config
+        .server_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("webcash.org");
+    let resolved_addr = tokio::net::lookup_host(format!("{server_host}:443"))
+        .await?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Failed to resolve {server_host}"))?;
+    println!("  reporter_clients={reporter_clients} resolved={resolved_addr}");
 
-                    // Pure blocking HTTP — no tokio runtime involvement.
-                    match sub_proto.submit_report_blocking(&report.preimage, &report.hash) {
-                        Ok(resp) => {
-                            let http_ms = t0.elapsed().as_millis();
-                            sub_tracker.record_accepted();
-                            eprintln!("[submitter-{thread_id}] accepted in {http_ms}ms");
-                            println!("Mining report accepted! keep={}", report.keep_secret);
-
-                            if let Some(new_diff) = resp.difficulty_target {
-                                let mut t = sub_shared_target.write().unwrap();
-                                if new_diff != t.difficulty {
-                                    println!(
-                                        "Difficulty adjustment: {} → {}",
-                                        t.difficulty, new_diff
-                                    );
-                                    t.difficulty = new_diff;
-                                    sub_tracker.set_difficulty(new_diff);
-                                }
-                            }
-
-                            // Write keep to pending log (crash safety backup).
-                            let keep_str = report.keep_secret.to_string();
-                            if let Err(e) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&sub_pending_keep)
-                                .and_then(|mut f| {
-                                    use std::io::Write;
-                                    writeln!(f, "{}", keep_str)
-                                })
-                            {
-                                eprintln!("[submitter-{thread_id}] pending keep write failed: {e}");
-                            }
-
-                            // Insert into webcash wallet (blocking runtime for async wallet).
-                            let t1 = std::time::Instant::now();
-                            let rt = tokio::runtime::Runtime::new().ok();
-                            if let Some(rt) = rt {
-                                let wallet_result = rt.block_on(async {
-                                    let wallet = webylib::Wallet::open(&*sub_wallet_path).await?;
-                                    wallet.insert(report.keep_secret.clone()).await
-                                });
-                                match wallet_result {
-                                    Ok(()) => println!(
-                                        "Claimed/replaced mined webcash in wallet: {}",
-                                        sub_wallet_path.display()
-                                    ),
-                                    Err(e) => {
-                                        let msg = e.to_string().to_ascii_lowercase();
-                                        if msg.contains("unique constraint")
-                                            || msg.contains("constraint failed")
-                                        {
-                                            // Already inserted — no action needed.
-                                        } else {
-                                            eprintln!(
-                                                "[submitter-{thread_id}] wallet insert failed: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            eprintln!(
-                                "[submitter-{thread_id}] wallet claim in {}ms",
-                                t1.elapsed().as_millis()
-                            );
-                        }
-                        Err(e) => {
-                            let http_ms = t0.elapsed().as_millis();
-                            eprintln!("[submitter-{thread_id}] FAILED in {http_ms}ms: {e}");
-                            let orphan_line = format!(
-                                "{} 0x{} {} difficulty={}\n",
-                                report.preimage,
-                                hex::encode(&report.hash),
-                                report.keep_secret,
-                                report.difficulty_achieved,
-                            );
-                            let _ = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(orphan_log_path())
-                                .and_then(|mut f| {
-                                    use std::io::Write;
-                                    f.write_all(orphan_line.as_bytes())
-                                });
-                        }
-                    }
-                }
-                eprintln!("[submitter-{thread_id}] exiting (channel closed)");
-            })
-            .expect("failed to spawn solution submitter thread");
-        submitter_handles.push(handle);
-    }
-
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hrmw"));
+    let mut reporter_process = match std::process::Command::new(&exe)
+        .args([
+            "webminer",
+            "report-worker",
+            "--server",
+            &config.server_url,
+            "--resolved-addr",
+            &resolved_addr.to_string(),
+            "--clients",
+            &reporter_clients.to_string(),
+            "--webcash-wallet",
+            &config.webcash_wallet_path.to_string_lossy(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => {
+            println!("Reporter subprocess started (PID {})", child.id());
+            Some(child)
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to spawn report-worker: {e}");
+            eprintln!("Solutions will only be written to file (use `hrmw webminer collect`).");
+            None
+        }
+    };
+    let mut reporter_pipe = reporter_process
+        .as_mut()
+        .and_then(|c| c.stdin.take());
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
     {
@@ -846,80 +744,31 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                if let Err(e) = solution_tx.send(SolutionReport {
-                    preimage,
-                    hash: solution.hash,
-                    difficulty_achieved: solution.difficulty_achieved,
-                    keep_secret: wu.keep_secret,
-                }) {
-                    eprintln!("[miner] failed to queue solution: {e}");
+                // Pipe to subprocess reporter (instant write, zero allocation).
+                if let Some(ref mut pipe) = reporter_pipe {
+                    use std::io::Write;
+                    let _ = pipe.write_all(pending_line.as_bytes());
+                    let _ = pipe.flush();
                 }
             }
         }
     }
 
-    // Graceful shutdown: burst-drain all buffered solutions.
-    //
-    // 1. Close the sender → submitter threads will see channel closed
-    // 2. Drain remaining solutions from channel into a Vec
-    // 3. Wait for submitter threads to finish current HTTP calls
-    // 4. Filter stale solutions by difficulty
-    // 5. Spawn N burst threads with separate TCP connections
-    // 6. Write overflow to file
-    println!("Miner shutting down — draining pending submissions...");
+    // Graceful shutdown: close pipe → subprocess drains remaining solutions.
+    println!("Miner shutting down...");
     let drain_start = std::time::Instant::now();
 
-    // Close sender so no new solutions enqueue.
-    drop(solution_tx);
-
-    // Drain remaining buffered solutions before submitters grab them.
-    let mut buffered: Vec<SolutionReport> = Vec::new();
-    {
-        let rx = shared_rx.lock().unwrap();
-        while let Ok(report) = rx.try_recv() {
-            buffered.push(report);
+    // Close pipe → subprocess sees EOF → drains its queues → exits.
+    drop(reporter_pipe);
+    if let Some(ref mut child) = reporter_process {
+        println!("  Waiting for reporter subprocess to drain...");
+        match child.wait() {
+            Ok(status) => {
+                let drain_secs = drain_start.elapsed().as_secs();
+                println!("  Reporter exited ({status}) in {drain_secs}s");
+            }
+            Err(e) => eprintln!("  Reporter wait failed: {e}"),
         }
-    }
-    // Drop our Arc clone — submitters see closed + empty channel → exit.
-    drop(shared_rx);
-
-    // Wait for submitter threads to finish their in-flight HTTP calls.
-    for handle in submitter_handles {
-        let _ = handle.join();
-    }
-    let submitter_drain_ms = drain_start.elapsed().as_millis();
-    if submitter_drain_ms > 100 {
-        println!("  Submitter threads finished in {submitter_drain_ms}ms");
-    }
-
-    // Filter stale solutions (difficulty too low for current target).
-    let current_difficulty = shared_target.read().unwrap().difficulty;
-    let total_buffered = buffered.len();
-    buffered.retain(|r| r.difficulty_achieved >= current_difficulty);
-    let stale = total_buffered - buffered.len();
-    if stale > 0 {
-        println!("  Skipped {stale} stale solutions (difficulty < {current_difficulty})");
-        // Log stale to orphan file.
-        // (They were already removed from `buffered`, so just log the count.)
-    }
-
-    if !buffered.is_empty() {
-        println!(
-            "  Burst-submitting {} buffered solutions with parallel connections...",
-            buffered.len()
-        );
-        burst_drain_solutions(
-            buffered,
-            &config.server_url,
-            &tracker,
-            &pending_keep_path,
-            &webcash_wallet_path,
-        );
-    }
-
-    let drain_secs = drain_start.elapsed().as_secs();
-    if drain_secs > 0 {
-        println!("  Total drain time: {drain_secs}s");
     }
 
     let _ = std::fs::remove_file(pid_file_path());
@@ -927,185 +776,4 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     println!("Miner stopped.");
 
     Ok(())
-}
-
-/// Burst-drain buffered solutions using N parallel threads, each with its
-/// own `reqwest::blocking::Client` (= separate TCP connection to server).
-///
-/// Called after GPU mining has stopped — TLB shootdowns are irrelevant,
-/// so we can spawn as many threads as needed.
-fn burst_drain_solutions(
-    solutions: Vec<SolutionReport>,
-    server_url: &str,
-    tracker: &Arc<StatsTracker>,
-    pending_keep_path: &std::path::Path,
-    webcash_wallet_path: &Arc<PathBuf>,
-) {
-    use std::sync::atomic::AtomicUsize;
-
-    const MAX_BURST_THREADS: usize = 8;
-    const BURST_TIMEOUT_SECS: u64 = 300;
-
-    let n_threads = solutions.len().min(MAX_BURST_THREADS);
-    if n_threads == 0 {
-        return;
-    }
-
-    let work = Arc::new(std::sync::Mutex::new(solutions));
-    let submitted = Arc::new(AtomicUsize::new(0));
-    let failed = Arc::new(AtomicUsize::new(0));
-    let overflow = Arc::new(std::sync::Mutex::new(Vec::<SolutionReport>::new()));
-    let burst_start = std::time::Instant::now();
-
-    let mut handles = Vec::with_capacity(n_threads);
-    for t in 0..n_threads {
-        let work = work.clone();
-        let submitted = submitted.clone();
-        let failed = failed.clone();
-        let overflow = overflow.clone();
-        let server_url = server_url.to_string();
-        let tracker = tracker.clone();
-        let pending_keep = pending_keep_path.to_path_buf();
-        let wallet_path = webcash_wallet_path.clone();
-
-        handles.push(
-            std::thread::Builder::new()
-                .name(format!("burst-{t}"))
-                .spawn(move || {
-                    // Each thread creates its own client = own TCP connection.
-                    let client = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(120))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("[burst-{t}] client build failed: {e}");
-                            return;
-                        }
-                    };
-
-                    loop {
-                        // Timeout check — don't start new submissions past deadline.
-                        if burst_start.elapsed().as_secs() > BURST_TIMEOUT_SECS {
-                            // Push remaining work to overflow.
-                            let mut remaining = work.lock().unwrap();
-                            if !remaining.is_empty() {
-                                let mut ov = overflow.lock().unwrap();
-                                ov.append(&mut remaining);
-                            }
-                            break;
-                        }
-
-                        let report = {
-                            let mut w = work.lock().unwrap();
-                            w.pop()
-                        };
-                        let report = match report {
-                            Some(r) => r,
-                            None => break, // work queue empty
-                        };
-
-                        match MiningProtocol::submit_report_with_client(
-                            &client,
-                            &server_url,
-                            &report.preimage,
-                            &report.hash,
-                        ) {
-                            Ok(resp) => {
-                                submitted.fetch_add(1, Ordering::Relaxed);
-                                tracker.record_accepted();
-                                eprintln!(
-                                    "[burst-{t}] accepted: {}",
-                                    &report.keep_secret.to_string()
-                                        [..report.keep_secret.to_string().len().min(24)]
-                                );
-
-                                // Update difficulty from response.
-                                if let Some(_new_diff) = resp.difficulty_target {
-                                    // Difficulty tracking is informational during drain.
-                                }
-
-                                // Write keep to pending log.
-                                let _ = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(&pending_keep)
-                                    .and_then(|mut f| {
-                                        use std::io::Write;
-                                        writeln!(f, "{}", report.keep_secret)
-                                    });
-
-                                // Insert into webcash wallet.
-                                if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                    let _ = rt.block_on(async {
-                                        let wallet =
-                                            webylib::Wallet::open(&*wallet_path).await?;
-                                        wallet.insert(report.keep_secret.clone()).await
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("Didn't use a new secret") {
-                                    // Already submitted — that's fine.
-                                    submitted.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    eprintln!("[burst-{t}] failed: {msg}");
-                                    failed.fetch_add(1, Ordering::Relaxed);
-                                    overflow.lock().unwrap().push(report);
-                                }
-                            }
-                        }
-                    }
-                })
-                .expect("failed to spawn burst thread"),
-        );
-    }
-
-    for h in handles {
-        let _ = h.join();
-    }
-
-    let s = submitted.load(Ordering::Relaxed);
-    let f = failed.load(Ordering::Relaxed);
-    let elapsed = burst_start.elapsed().as_secs();
-    println!("  Burst drain: {s} submitted, {f} failed in {elapsed}s");
-
-    // Write overflow solutions to file for later collection.
-    let overflow = match Arc::try_unwrap(overflow) {
-        Ok(m) => m.into_inner().unwrap(),
-        Err(arc) => {
-            let mut v = Vec::new();
-            std::mem::swap(&mut v, &mut arc.lock().unwrap());
-            v
-        }
-    };
-    if !overflow.is_empty() {
-        println!(
-            "  {} solutions could not be submitted — saved to overflow file",
-            overflow.len()
-        );
-        let path = overflow_solutions_path();
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            use std::io::Write;
-            for r in &overflow {
-                let _ = writeln!(
-                    f,
-                    "{}\t0x{}\t{}\tdifficulty={}",
-                    r.preimage,
-                    hex::encode(&r.hash),
-                    r.keep_secret,
-                    r.difficulty_achieved
-                );
-            }
-        }
-        println!("  Overflow file: {}", path.display());
-        println!(
-            "  Retry with: hrmw webminer collect"
-        );
-    }
 }

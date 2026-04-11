@@ -1138,6 +1138,22 @@ enum WebminerCmd {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
+    /// Internal: subprocess reporter (spawned by mining daemon, not for manual use)
+    #[command(name = "report-worker")]
+    ReportWorker {
+        /// Server URL
+        #[arg(long)]
+        server: String,
+        /// Pre-resolved server address (ip:port)
+        #[arg(long)]
+        resolved_addr: String,
+        /// Number of independent HTTP clients (each = own TCP connection)
+        #[arg(long, default_value = "60")]
+        clients: usize,
+        /// Path to webcash wallet database
+        #[arg(long)]
+        webcash_wallet: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3977,6 +3993,29 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Run `hrmw webcash recover` to pick up newly accepted webcash.");
             }
+        }
+        Cmd::Webminer(WebminerCmd::ReportWorker {
+            server,
+            resolved_addr,
+            clients,
+            webcash_wallet,
+        }) => {
+            let addr: std::net::SocketAddr = resolved_addr
+                .parse()
+                .context("invalid --resolved-addr (expected ip:port)")?;
+            let wallet_path = webcash_wallet.unwrap_or_else(|| {
+                dirs_next::home_dir()
+                    .unwrap_or_default()
+                    .join(".harmoniis")
+                    .join("wallet")
+                    .join("main_webcash.db")
+            });
+            harmoniis_wallet::miner::collect::report_worker(
+                &server,
+                addr,
+                clients,
+                &wallet_path,
+            )?;
         }
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
             use harmoniis_wallet::miner::cloud::{
