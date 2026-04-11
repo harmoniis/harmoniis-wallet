@@ -433,6 +433,121 @@ Mining loop:
 - TCP connection kept alive (no SYN/SYN-ACK per request)
 - HTTP pipelining handled by the keep-alive connection
 
+### Challenge 7: Thread Count Math — 3 Threads Is Provably Insufficient
+
+**The math is unambiguous:**
+- At 100 GH/s, difficulty 36: 100×10⁹ / 2³⁶ ≈ **1.46 solutions/sec**
+- Each report takes **7 seconds** (measured: 7138ms, 7512ms)
+- Required concurrent connections: 1.46 × 7 = **10.2 minimum**
+- With safety margin (burst, jitter): **70+ threads** needed
+- Current: 3 threads = 0.43 reports/sec = **3.4× slower than mining**
+
+3 threads was acceptable at v0.1.50 speeds (~500 MH/s CPU mining, ~0.007 solutions/sec). At 100 GH/s, the reporting throughput must scale 200×.
+
+**The server queuing problem**: If all threads share ONE `reqwest::blocking::Client` with HTTP/1.1 keep-alive, ALL requests go through the same TCP connection. The server (Python/Tornado single-threaded) processes them sequentially — each request waits behind the previous 7-second processing. Effective throughput: 1/7 = 0.14 reports/sec regardless of thread count.
+
+**Why multiple HTTP clients are needed**: Each client creates its own TCP connection. The server handles multiple connections concurrently (OS-level accept). N clients = N parallel processing slots on the server. From the server's perspective, each connection looks like a different miner.
+
+**The solution (to be tested)**:
+- Create N `reqwest::blocking::Client` instances (not 64 — maybe 12-16)
+- Each client: `Client::builder().http1_only().timeout(60s).build()`
+- Distribute threads across clients: 70 threads / 12 clients = ~6 threads per client
+- Each client maintains its own TCP connection with keep-alive
+- Server sees 12 independent connections, processes 12 reports in parallel
+- Throughput: 12/7 = 1.71 reports/sec (matches mining rate)
+
+**CRITICAL**: Client creation must be EAGER, in the main process context (v0.1.52 pattern). NOT lazy, NOT in subprocess. The DNS failure came from creating clients in subprocess context.
+
+**How to test safely:**
+1. Start with 3 threads / 1 client (baseline, proven)
+2. Try 12 threads / 4 clients — measure GPU speed
+3. Try 24 threads / 8 clients — measure GPU speed  
+4. Find the cliff where GPU speed drops
+5. If ANY thread count >3 hurts GPU: use 3 during mining + burst on shutdown
+
+---
+
+## Historic Cloud Mining Architecture & Its Problems
+
+### How Cloud Mining Currently Works (provision.rs)
+
+**Start sequence** (`hrmw webminer cloud start`):
+```
+1. Upload SSH key to Vast.ai
+2. Create instance (GPU container with CUDA image)
+3. Wait for SSH access
+4. Upload pre-built hrmw binary via SCP
+5. Upload labeled webcash wallet
+6. Start miner: hrmw webminer start -f --accept-terms
+7. Start reporter: hrmw webminer collect --watch  (SEPARATE PROCESS)
+8. Auto-start local dispatcher: hrmw webminer cloud watch --interval 30
+```
+
+**Stop sequence** (`hrmw webminer cloud stop`):
+```
+1. Download solution files from remote via SSH (WORKAROUND)
+2. Send SIGINT to remote miner
+3. Wait up to 15s for graceful shutdown, then force kill
+4. Download solution files AGAIN (may have new ones from drain)
+5. Instance stopped but NOT destroyed (to allow manual recovery)
+```
+
+**Local dispatcher daemon** (`hrmw webminer cloud watch`):
+```
+Loop every 30 seconds:
+  1. SSH into each running instance
+  2. Download miner_pending_solutions.log, miner_pending_keeps.log
+  3. Deduplicate against local copies
+  4. Run hrmw webminer collect (submit unsubmitted solutions locally)
+  5. Uses 4 parallel threads for local submission
+```
+
+### The Workaround: SSH File Transfer (BAD — Must Be Eliminated)
+
+**What happens**: The local dispatcher SSH-cats solution files from the remote every 30 seconds. Solutions are submitted from the LOCAL machine, not the remote. The remote's 3 in-process submitter threads AND the separate `collect --watch` process also try to submit. Three separate systems try to submit the same solutions:
+
+1. **Remote in-process submitters** (3 threads) — direct from mining loop, fastest
+2. **Remote collect --watch** (32 threads) — tails solution file, 200ms poll
+3. **Local dispatcher** (4 threads) — SSH download every 30s, submits locally
+
+This triple-redundancy exists because NONE of them was reliable enough alone.
+
+**Why it's bad:**
+- SSH file transfer adds 30-second latency per cycle
+- Solutions are stale by the time they reach the local machine
+- If difficulty changes during the 30s window, solutions are LOST
+- Three systems submitting the same solutions waste server resources
+- "Already accepted" errors flood the logs
+- The local dispatcher can't keep up at high mining speeds
+- SSH connection failures (transient) cause entire cycles to be skipped
+
+### What Must Replace It
+
+**Goal**: The remote machine handles ALL solution reporting autonomously. Zero SSH file transfers. Zero local submission. The local machine only:
+- Monitors status (hashrate, accepted count)  
+- Triggers start/stop
+- Never touches solution data
+
+**On cloud stop**:
+1. Send SIGINT to remote miner
+2. Remote miner stops mining, enters burst drain
+3. Remote miner spawns 60+ threads, drains ALL buffered solutions (max 20s)
+4. Remote miner exits cleanly with all solutions reported
+5. Local machine confirms drain complete (check `solutions_found == solutions_accepted + orphaned`)
+6. Destroy instance
+
+**No file download, no local collection, no dispatcher daemon.**
+
+### Evolution Path
+
+| Phase | Architecture | Reporter | Throughput | Status |
+|-------|-------------|----------|------------|--------|
+| v0.1.42 | Inline submission | Mining loop blocks on HTTP | 0.14/sec | Abandoned |
+| v0.1.50 | 3 in-process threads | Arc\<Mutex\<Receiver\>\> + shared client | 0.43/sec | **Current** |
+| v0.1.52 | + dispatch daemon | Local SSH sync every 30s | 0.43 + 0.57 local | Workaround |
+| v0.1.53-dev | + collect --watch | Separate process, 32 threads | +4.57/sec (theoretical) | Never worked (DNS) |
+| **Target** | N clients, M threads | Eager clients, burst drain | **1.71/sec steady, 8.6/sec drain** | To implement |
+
 ---
 
 ## Release Process
