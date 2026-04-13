@@ -568,7 +568,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
-        let sub_wallet_path = webcash_wallet_path.clone();
+        let _sub_wallet_path = webcash_wallet_path.clone();
         let thread_rx = shared_rx.clone();
         let thread_queue_depth = queue_depth.clone();
 
@@ -580,7 +580,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 // creating+destroying a multi-thread Runtime per accepted solution.
                 // This eliminates ~8 thread create/destroy cycles per solution and
                 // the associated TLB shootdowns across all CPU cores.
-                let wallet_rt = tokio::runtime::Builder::new_current_thread()
+                let _wallet_rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .ok();
@@ -644,18 +644,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     writeln!(f, "{}", msg.keep_secret)
                                 });
 
-                            // Insert into webcash wallet (reused runtime).
-                            if let Some(ref rt) = wallet_rt {
-                                if let Ok(secret) =
-                                    webylib::SecretWebcash::parse(&msg.keep_secret)
-                                {
-                                    let _ = rt.block_on(async {
-                                        let wallet =
-                                            webylib::Wallet::open(&*sub_wallet_path).await?;
-                                        wallet.insert(secret).await
-                                    });
-                                }
-                            }
+                            // Wallet insertion deferred — the keep secret is already
+                            // persisted to pending_keeps.log above. wallet.insert()
+                            // makes an HTTP replace call to webcash.org (~5-10s) which
+                            // would block this reporter thread and halve throughput.
+                            // Use `hrmw webcash recover` after mining to insert keeps.
                         }
                         Err(e) => {
                             let ms = t0.elapsed().as_millis();
