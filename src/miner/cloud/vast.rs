@@ -39,6 +39,22 @@ impl Offer {
         self.flops_per_dphtotal
     }
 
+    /// Estimated SHA256 mining hash rate in GH/s.
+    /// RTX 4090 ≈ 82 TFLOPS → 10.5 GH/s; ratio ~0.128 GH/s per TFLOP.
+    pub fn estimated_hashrate_ghs(&self) -> f64 {
+        self.total_flops * 0.128
+    }
+
+    /// Maximum reporting throughput in solutions/sec for N clients at 7s/report.
+    pub fn max_solutions_per_sec(num_clients: usize) -> f64 {
+        num_clients as f64 / 7.0
+    }
+
+    /// Maximum useful hash rate (GH/s) before solutions overflow at the given difficulty.
+    pub fn max_useful_hashrate_ghs(difficulty: u32, num_clients: usize) -> f64 {
+        Self::max_solutions_per_sec(num_clients) * 2.0_f64.powi(difficulty as i32) / 1e9
+    }
+
     /// Composite score: efficiency first, speed as tiebreaker.
     /// Formula: FLOPS/$ * (1 + TFlops/1000)
     /// The TFlops/1000 term adds ~10-60% bonus for faster GPUs
@@ -50,6 +66,22 @@ impl Offer {
         let efficiency = self.flops_per_dollar();
         let speed_bonus = 1.0 + self.tflops() / 1000.0;
         efficiency * speed_bonus
+    }
+
+    /// Difficulty-aware composite score: penalizes offers whose estimated hash
+    /// rate exceeds what the reporting pipeline can sustain at the current
+    /// difficulty. Instances that produce solutions faster than 8/7 ≈ 1.14/sec
+    /// waste GPU capacity and queue up solutions that delay shutdown.
+    pub fn capacity_score(&self, difficulty: u32, num_clients: usize) -> f64 {
+        let base = self.composite_score();
+        let max_useful = Self::max_useful_hashrate_ghs(difficulty, num_clients);
+        let est = self.estimated_hashrate_ghs();
+        if est > max_useful && max_useful > 0.0 {
+            // Apply penalty proportional to overcapacity (e.g., 2x over = 0.5 penalty)
+            base * (max_useful / est)
+        } else {
+            base
+        }
     }
 }
 

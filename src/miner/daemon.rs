@@ -1,7 +1,7 @@
 //! Daemon process management: start, stop, status, and the main mining loop.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::protocol::MiningProtocol;
@@ -536,34 +536,64 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         .collect();
     println!("  reporter_clients={num_clients} (created eagerly in main process)");
 
-    // Per-client channels — round-robin dispatch from mining loop.
+    // Pre-warm connections: GET /api/v1/target through each client to force TCP+TLS handshake.
+    // The first real mining_report will reuse the warm connection via HTTP/1.1 keep-alive.
+    println!("  Pre-warming {num_clients} connections...");
+    for (i, client) in clients.iter().enumerate() {
+        let url = format!("{}/api/v1/target", config.server_url);
+        match client.get(&url).send() {
+            Ok(_) => eprintln!("[client-{i}] connection warm"),
+            Err(e) => eprintln!("[client-{i}] warmup failed: {e}"),
+        }
+    }
+
+    // Shared work-stealing queue — any free client thread takes the next solution.
+    // This eliminates head-of-line blocking: if one client is slow (timeout), the
+    // others continue processing instead of solutions piling up behind the slow one.
     struct SolutionMsg {
         preimage: String,
         hash: [u8; 32],
         keep_secret: String,
         difficulty_achieved: u32,
     }
-    let mut client_txs: Vec<std::sync::mpsc::Sender<SolutionMsg>> =
-        Vec::with_capacity(num_clients);
+    let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionMsg>();
+    let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
+    let queue_depth = Arc::new(AtomicUsize::new(0));
     let mut submitter_handles = Vec::with_capacity(num_clients);
     let webcash_wallet_path = Arc::new(config.webcash_wallet_path.clone());
 
     for c in 0..num_clients {
-        let (tx, rx) = std::sync::mpsc::channel::<SolutionMsg>();
-        client_txs.push(tx);
-
         let client = clients[c].clone();
         let server_url = config.server_url.clone();
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
         let sub_wallet_path = webcash_wallet_path.clone();
+        let thread_rx = shared_rx.clone();
+        let thread_queue_depth = queue_depth.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("client-{c}"))
             .spawn(move || {
                 eprintln!("[client-{c}] started");
-                while let Ok(msg) = rx.recv() {
+                // Reuse ONE current-thread runtime per submitter instead of
+                // creating+destroying a multi-thread Runtime per accepted solution.
+                // This eliminates ~8 thread create/destroy cycles per solution and
+                // the associated TLB shootdowns across all CPU cores.
+                let wallet_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok();
+                loop {
+                    // Work-stealing: lock shared queue, dequeue one solution, unlock.
+                    // Lock held only for the brief recv() (~ns when msg available).
+                    // All HTTP I/O happens OUTSIDE the lock.
+                    let msg = match thread_rx.lock().unwrap().recv() {
+                        Ok(m) => m,
+                        Err(_) => break, // channel closed → shutdown
+                    };
+                    thread_queue_depth.fetch_sub(1, Ordering::Relaxed);
+
                     // Stale difficulty check.
                     {
                         let current_diff = sub_shared_target.read().unwrap().difficulty;
@@ -586,9 +616,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         Ok(resp) => {
                             let ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
-                            eprintln!(
-                                "[client-{c}] accepted in {ms}ms"
-                            );
+                            eprintln!("[client-{c}] accepted in {ms}ms");
                             println!(
                                 "Mining report accepted! keep={}",
                                 &msg.keep_secret[..msg.keep_secret.len().min(30)]
@@ -616,8 +644,8 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     writeln!(f, "{}", msg.keep_secret)
                                 });
 
-                            // Insert into webcash wallet.
-                            if let Ok(rt) = tokio::runtime::Runtime::new() {
+                            // Insert into webcash wallet (reused runtime).
+                            if let Some(ref rt) = wallet_rt {
                                 if let Ok(secret) =
                                     webylib::SecretWebcash::parse(&msg.keep_secret)
                                 {
@@ -668,7 +696,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             .expect("failed to spawn client thread");
         submitter_handles.push(handle);
     }
-    let mut rr_counter = 0usize;
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
     {
@@ -790,18 +817,23 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 0.0
             };
             let p_zero_pct = (-expected_solutions).exp() * 100.0;
+            let qd = queue_depth.load(Ordering::Relaxed);
             println!(
-                "speed={} difficulty={} solutions={}/{} eta={} expected={:.2} p0={:.2}% (mine={}μs cycle={}μs)",
+                "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% (mine={}μs cycle={}μs)",
                 stats::format_hash_rate(hps),
                 target.difficulty,
                 snapshot.solutions_accepted,
                 snapshot.solutions_found,
+                qd,
                 stats::estimate_time(hps, target.difficulty),
                 expected_solutions,
                 p_zero_pct,
                 mine_us,
                 cycle_us,
             );
+            if qd > num_clients * 2 {
+                eprintln!("⚠ Queue depth {qd} — reporters falling behind");
+            }
             last_stats_print = std::time::Instant::now();
         }
 
@@ -835,29 +867,60 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         f.write_all(pending_line.as_bytes())
                     });
 
-                // Dispatch to next client (round-robin across N connections).
-                let _ = client_txs[rr_counter % num_clients].send(SolutionMsg {
+                // Dispatch to shared work-stealing queue.
+                queue_depth.fetch_add(1, Ordering::Relaxed);
+                let _ = solution_tx.send(SolutionMsg {
                     preimage,
                     hash: solution.hash,
                     keep_secret: wu.keep_secret.to_string(),
                     difficulty_achieved: solution.difficulty_achieved,
                 });
-                rr_counter = rr_counter.wrapping_add(1);
             }
         }
     }
 
-    // Graceful shutdown: drop senders → client threads drain → exit.
-    println!("Miner shutting down — draining {num_clients} client queues...");
+    // Graceful shutdown: close the channel, let reporter threads drain remaining
+    // solutions, then join all threads. Monitor drain progress every second.
+    let pending = queue_depth.load(Ordering::Relaxed);
+    let snapshot = tracker.snapshot();
+    println!(
+        "Miner shutting down — draining {pending} pending solutions across {num_clients} reporters..."
+    );
+    println!(
+        "  Session totals: found={} accepted={} pending={}",
+        snapshot.solutions_found, snapshot.solutions_accepted, pending
+    );
     let drain_start = std::time::Instant::now();
-    drop(client_txs);
+    drop(solution_tx); // Signal EOF — threads will drain remaining and exit.
+
+    // Monitor drain progress with timeout.
+    let drain_timeout = std::time::Duration::from_secs(600);
+    loop {
+        let remaining = queue_depth.load(Ordering::Relaxed);
+        if remaining == 0 {
+            break;
+        }
+        if drain_start.elapsed() > drain_timeout {
+            eprintln!(
+                "⚠ Drain timeout (600s) — {remaining} solutions remain in pending_solutions.log"
+            );
+            eprintln!("  Submit later with: hrmw webminer collect");
+            break;
+        }
+        let est_secs = (remaining as f64 * 7.0 / num_clients as f64).ceil() as u64;
+        println!("  Draining: {remaining} remaining (~{est_secs}s)");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
     for handle in submitter_handles {
         let _ = handle.join();
     }
     let drain_secs = drain_start.elapsed().as_secs();
-    if drain_secs > 0 {
-        println!("  Drained in {drain_secs}s");
-    }
+    let final_snap = tracker.snapshot();
+    println!(
+        "  Drain complete in {drain_secs}s — accepted={} found={}",
+        final_snap.solutions_accepted, final_snap.solutions_found
+    );
 
     let _ = std::fs::remove_file(pid_file_path());
     let _ = tracker.write_to_file(&status_path);

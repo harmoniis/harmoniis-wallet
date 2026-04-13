@@ -16,24 +16,61 @@ const REMOTE_HRMW: &str = "/root/.local/bin/hrmw";
 const REMOTE_WALLET: &str = "/root/cloudminer_webcash.db";
 
 /// Print the top offers table and let the user select.
+/// If `difficulty` is Some, shows estimated hash rate and capacity warnings.
 pub fn print_offers_table(offers: &[super::vast::Offer]) {
+    print_offers_table_with_difficulty(offers, None);
+}
+
+pub fn print_offers_table_with_difficulty(
+    offers: &[super::vast::Offer],
+    difficulty: Option<u32>,
+) {
+    use super::vast::Offer;
     println!();
-    println!(
-        "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8}",
-        "#", "GPUs", "GPU", "TFLOPS", "$/hr", "TF/$/hr", "Score"
-    );
-    println!("{}", "-".repeat(75));
-    for (i, o) in offers.iter().enumerate() {
+    if let Some(d) = difficulty {
+        let max_ghs = Offer::max_useful_hashrate_ghs(d, 8);
         println!(
-            "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}",
-            i + 1,
-            format!("{}x", o.num_gpus),
-            o.gpu_name,
-            o.tflops(),
-            o.dph_total,
-            o.flops_per_dollar(),
-            o.composite_score(),
+            "  Difficulty={d} → max useful hashrate: {:.0} GH/s (8 clients × 7s/report)",
+            max_ghs
         );
+        println!(
+            "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8} {:>8}",
+            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "~GH/s", "Score", "Cap"
+        );
+        println!("{}", "-".repeat(83));
+        for (i, o) in offers.iter().enumerate() {
+            let est_ghs = o.estimated_hashrate_ghs();
+            let cap_flag = if est_ghs > max_ghs * 0.8 { " ⚠" } else { "" };
+            println!(
+                "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}{}",
+                i + 1,
+                format!("{}x", o.num_gpus),
+                o.gpu_name,
+                o.tflops(),
+                o.dph_total,
+                est_ghs,
+                o.capacity_score(d, 8),
+                cap_flag,
+            );
+        }
+    } else {
+        println!(
+            "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8}",
+            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "TF/$/hr", "Score"
+        );
+        println!("{}", "-".repeat(75));
+        for (i, o) in offers.iter().enumerate() {
+            println!(
+                "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}",
+                i + 1,
+                format!("{}x", o.num_gpus),
+                o.gpu_name,
+                o.tflops(),
+                o.dph_total,
+                o.flops_per_dollar(),
+                o.composite_score(),
+            );
+        }
     }
     println!();
 }
@@ -114,6 +151,21 @@ pub async fn start_dev(
     let pubkey = ssh::ssh_public_key_string(ssh_key);
     client.upload_ssh_key(&pubkey).await?;
 
+    // Fetch current difficulty for capacity-aware offer scoring.
+    let difficulty = {
+        use crate::miner::protocol::MiningProtocol;
+        match MiningProtocol::new("https://webcash.org") {
+            Ok(p) => match p.get_target().await {
+                Ok(t) => {
+                    println!("  Current mining difficulty: {}", t.difficulty);
+                    Some(t.difficulty)
+                }
+                Err(_) => None,
+            },
+            Err(_) => None,
+        }
+    };
+
     // 2. Select offer
     let offer_id = if let Some(id) = machine_id {
         println!("[2/5] Using offer: {id}");
@@ -124,12 +176,29 @@ pub async fn start_dev(
         if offers.is_empty() {
             anyhow::bail!("No GPU offers found.");
         }
-        print_offers_table(&offers);
+        print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
+        let est_ghs = selected.estimated_hashrate_ghs();
         println!(
-            "  Selected: {}x {} (${:.2}/hr)",
-            selected.num_gpus, selected.gpu_name, selected.dph_total
+            "  Selected: {}x {} (${:.2}/hr, ~{:.0} GH/s)",
+            selected.num_gpus, selected.gpu_name, selected.dph_total, est_ghs
         );
+        if let Some(d) = difficulty {
+            let max_ghs = super::vast::Offer::max_useful_hashrate_ghs(d, 8);
+            if est_ghs > max_ghs {
+                let sol_per_sec = est_ghs * 1e9 / 2.0_f64.powi(d as i32);
+                let overflow_per_sec = sol_per_sec - 8.0 / 7.0;
+                eprintln!(
+                    "  ⚠ This instance mines ~{:.1} solutions/sec but can only report {:.1}/sec",
+                    sol_per_sec, 8.0 / 7.0
+                );
+                eprintln!(
+                    "  ⚠ Overflow: ~{:.1} solutions/sec → drain time after 1hr: ~{:.0}min",
+                    overflow_per_sec,
+                    (overflow_per_sec * 3600.0) / (8.0 / 7.0) / 60.0
+                );
+            }
+        }
         selected.id
     };
 
@@ -227,7 +296,7 @@ pub async fn start(
     let pubkey = ssh::ssh_public_key_string(ssh_key);
     client.upload_ssh_key(&pubkey).await?;
 
-    // 2. Select offer
+    // 2. Select offer (with difficulty-aware capacity scoring)
     let offer_id = if let Some(id) = machine_id {
         println!("[2/6] Using offer: {id}");
         id
@@ -237,14 +306,22 @@ pub async fn start(
         if offers.is_empty() {
             anyhow::bail!("No GPU offers found. Check Vast.ai availability.");
         }
-        print_offers_table(&offers);
+        // Use difficulty from the already-fetched target if available.
+        let difficulty = {
+            use crate::miner::protocol::MiningProtocol;
+            match MiningProtocol::new("https://webcash.org") {
+                Ok(p) => p.get_target().await.ok().map(|t| t.difficulty),
+                Err(_) => None,
+            }
+        };
+        print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
         println!(
-            "  Selected: {}x {} (${:.2}/hr, {:.1} TFLOPS)",
+            "  Selected: {}x {} (${:.2}/hr, ~{:.0} GH/s)",
             selected.num_gpus,
             selected.gpu_name,
             selected.dph_total,
-            selected.tflops()
+            selected.estimated_hashrate_ghs()
         );
         selected.id
     };
@@ -495,7 +572,9 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
     println!("  Downloading solution files...");
     append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
 
-    // Step 2: SIGINT — miner enters graceful shutdown, drains submitter queue.
+    // Step 2: SIGINT — miner enters graceful shutdown, drains pending solutions.
+    // The miner keeps reporter threads alive to drain the queue, with progress
+    // logging. It times out after 600s and writes remaining to overflow file.
     let _ = ssh::exec(
         ssh_key,
         &state.ssh_host,
@@ -503,24 +582,40 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         "kill -INT $(pgrep -f 'webminer start') 2>/dev/null || true",
     );
 
-    // Step 3: Wait for miner to exit (up to 45s for burst drain, then force kill).
-    // The miner now does burst-drain on shutdown: spawns 64 parallel threads
-    // to submit buffered solutions. This can take up to 30s.
-    for i in 0..22 {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if ssh::exec(
+    // Step 3: Wait for miner to exit. The drain can take minutes depending on
+    // how many solutions are queued. Monitor miner.log for progress.
+    println!("  Waiting for solution drain (up to 10 min)...");
+    let drain_max_polls = 150; // 150 × 4s = 600s = 10 min
+    for i in 0..drain_max_polls {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let status = ssh::exec(
             ssh_key,
             &state.ssh_host,
             state.ssh_port,
             "pgrep -f 'webminer start' > /dev/null 2>&1 && echo R || echo S",
         )
-        .unwrap_or_default()
-        .contains('S')
-        {
+        .unwrap_or_default();
+        if status.contains('S') {
+            println!("  Miner exited cleanly.");
             break;
         }
-        if i == 21 {
-            eprintln!("  Burst drain exceeded 45s — force killing...");
+        // Show drain progress from miner.log
+        if i % 5 == 4 {
+            let tail = ssh::exec(
+                ssh_key,
+                &state.ssh_host,
+                state.ssh_port,
+                "tail -3 /root/miner.log 2>/dev/null | grep -i drain || true",
+            )
+            .unwrap_or_default();
+            if !tail.trim().is_empty() {
+                for line in tail.trim().lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+        if i == drain_max_polls - 1 {
+            eprintln!("  Drain exceeded 10 min — force killing. Remaining solutions in overflow file.");
             let _ = ssh::exec(
                 ssh_key,
                 &state.ssh_host,
@@ -531,7 +626,8 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
         }
     }
 
-    // Step 4: Download again — miner may have written more solutions during drain.
+    // Step 4: Download solution files after drain is complete.
+    println!("  Downloading solution files (post-drain)...");
     append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
 
     println!("  Instance {} stopped.", state.instance_id);
