@@ -21,6 +21,7 @@ pub struct Offer {
     pub gpu_name: String,
     pub num_gpus: u32,
     pub total_flops: f64,
+    pub gpu_mem_bw: f64,
     pub dph_total: f64,
     pub reliability: f64,
     pub cuda_max_good: f64,
@@ -29,81 +30,58 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// Total FLOPS (Vast.ai reports in TFLOPS directly for some offers).
     pub fn tflops(&self) -> f64 {
         self.total_flops
     }
 
-    /// FLOPS per dollar per hour (from Vast.ai, pre-computed).
-    pub fn flops_per_dollar(&self) -> f64 {
-        self.flops_per_dphtotal
-    }
+    /// Calibrated from measured mining data (2026-04-14):
+    ///   RTX 4090: gpu_mem_bw ~890 GB/s → 10.5 GH/s → 0.0118
+    ///   RTX 4070: gpu_mem_bw ~440 GB/s → 5.9  GH/s → 0.0134
+    /// SHA256 mining is memory-bandwidth-limited, not FP32-limited.
+    /// TFLOPS underestimates smaller GPUs by ~64%.
+    const GHS_PER_MEM_BW: f64 = 0.012;
 
-    /// Calibrated from measured data: 10x RTX 4090 = 814 TFLOPS = 100 GH/s.
-    const GHS_PER_TFLOP: f64 = 100.0 / 814.0; // 0.1229
-
-    /// Estimated SHA256 mining hash rate in GH/s from TFLOPS.
+    /// Estimated SHA256 mining hash rate in GH/s from GPU memory bandwidth.
     pub fn estimated_hashrate_ghs(&self) -> f64 {
-        self.total_flops * Self::GHS_PER_TFLOP
+        self.gpu_mem_bw * self.num_gpus as f64 * Self::GHS_PER_MEM_BW
     }
 
-    /// Measured server throughput: webcash.org processes mining reports
-    /// sequentially at ~6 seconds each (single-threaded Tornado backend).
-    /// Multiple concurrent connections do NOT increase throughput — they
-    /// cause cascading queue delays (measured 2026-04-14).
+    /// Webcash.org processes mining reports sequentially at ~6s each
+    /// (single-threaded Tornado). Multiple connections cascade-queue.
     const REPORT_SECONDS: f64 = 6.0;
 
-    /// Maximum reporting throughput in solutions/sec.
-    /// Server is single-threaded: 1 report / 6s = 0.167/sec regardless of
-    /// client count. Concurrent connections just queue behind each other.
     pub fn max_solutions_per_sec() -> f64 {
         1.0 / Self::REPORT_SECONDS
     }
 
-    /// Maximum useful hash rate (GH/s) before solutions overflow.
     pub fn max_useful_hashrate_ghs(difficulty: u32) -> f64 {
         Self::max_solutions_per_sec() * 2.0_f64.powi(difficulty as i32) / 1e9
     }
 
-    /// Maximum useful TFLOPS before solutions overflow.
-    pub fn max_useful_tflops(difficulty: u32) -> f64 {
-        Self::max_useful_hashrate_ghs(difficulty) / Self::GHS_PER_TFLOP
+    /// Max useful GPU memory bandwidth (GB/s, total across all GPUs) at difficulty.
+    pub fn max_useful_mem_bw(difficulty: u32) -> f64 {
+        Self::max_useful_hashrate_ghs(difficulty) / Self::GHS_PER_MEM_BW
     }
 
-    /// Estimated solutions/sec this offer would produce at the given difficulty.
     pub fn estimated_solutions_per_sec(&self, difficulty: u32) -> f64 {
         self.estimated_hashrate_ghs() * 1e9 / 2.0_f64.powi(difficulty as i32)
     }
 
-    /// Whether this offer exceeds the server's reporting capacity at the
-    /// given difficulty. Instances above this threshold lose solutions.
     pub fn exceeds_capacity(&self, difficulty: u32) -> bool {
-        self.estimated_hashrate_ghs() > Self::max_useful_hashrate_ghs(difficulty)
+        self.estimated_hashrate_ghs() > Self::max_useful_hashrate_ghs(difficulty) * 1.2
     }
 
-    /// Composite score: efficiency first, speed as tiebreaker.
-    pub fn composite_score(&self) -> f64 {
+    /// Best value: hashrate per dollar, capped at reporting capacity.
+    /// Score = 0 for overcapacity (excluded from selection).
+    pub fn capacity_score(&self, difficulty: u32) -> f64 {
         if self.dph_total <= 0.0 {
             return 0.0;
         }
-        let efficiency = self.flops_per_dollar();
-        let speed_bonus = 1.0 + self.tflops() / 1000.0;
-        efficiency * speed_bonus
-    }
-
-    /// Difficulty-aware composite score: zeroes out offers that exceed the
-    /// server's reporting capacity. There is no point renting a GPU that
-    /// produces solutions faster than 0.167/sec — the excess is wasted.
-    pub fn capacity_score(&self, difficulty: u32) -> f64 {
-        let base = self.composite_score();
-        let max_useful = Self::max_useful_hashrate_ghs(difficulty);
-        let est = self.estimated_hashrate_ghs();
-        if est > max_useful * 1.2 {
-            // >20% over capacity → score = 0 (effectively excluded)
-            0.0
-        } else {
-            base
+        if self.exceeds_capacity(difficulty) {
+            return 0.0;
         }
+        // GH/s per dollar — how much useful mining per hour per dollar
+        self.estimated_hashrate_ghs() / self.dph_total
     }
 }
 
@@ -243,12 +221,17 @@ impl VastClient {
                 .get("flops_per_dphtotal")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
+            let gpu_mem_bw = raw
+                .get("gpu_mem_bw")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
 
             offers.push(Offer {
                 id,
                 gpu_name,
                 num_gpus,
                 total_flops,
+                gpu_mem_bw,
                 dph_total,
                 reliability,
                 cuda_max_good,
@@ -263,10 +246,11 @@ impl VastClient {
     pub async fn find_best_offers(&self) -> Result<Vec<Offer>> {
         let mut candidates = self.search_offers(40).await?;
 
+        // Sort by GH/s per dollar (best mining value).
         candidates.sort_by(|a, b| {
-            b.composite_score()
-                .partial_cmp(&a.composite_score())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let score_a = if a.dph_total > 0.0 { a.estimated_hashrate_ghs() / a.dph_total } else { 0.0 };
+            let score_b = if b.dph_total > 0.0 { b.estimated_hashrate_ghs() / b.dph_total } else { 0.0 };
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         candidates.truncate(20);

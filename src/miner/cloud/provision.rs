@@ -28,62 +28,56 @@ pub fn print_offers_table_with_difficulty(
     use super::vast::Offer;
     println!();
     if let Some(d) = difficulty {
-        let max_tf = Offer::max_useful_tflops(d);
+        let max_bw = Offer::max_useful_mem_bw(d);
+        let max_ghs = Offer::max_useful_hashrate_ghs(d);
         println!(
-            "  Difficulty={d} → max useful: {:.0} TFLOPS ({:.2} sol/s, server 1 report/6s)",
-            max_tf,
-            Offer::max_solutions_per_sec()
+            "  Difficulty={d} → max useful: {:.0} GB/s mem_bw ({:.1} GH/s, {:.2} sol/s)",
+            max_bw, max_ghs, Offer::max_solutions_per_sec()
         );
         println!(
-            "{:<3} {:<5} {:<16} {:>8} {:>8} {:>6} {:>8} {:>8}",
-            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "sol/s", "Score", ""
+            "{:<3} {:<5} {:<16} {:>7} {:>7} {:>7} {:>6} {:>7}",
+            "#", "GPUs", "GPU", "BW", "~GH/s", "$/hr", "sol/s", "Score"
         );
-        println!("{}", "-".repeat(75));
-        let mut shown = 0;
+        println!("{}", "-".repeat(68));
         for (i, o) in offers.iter().enumerate() {
+            let est_ghs = o.estimated_hashrate_ghs();
             let sol_s = o.estimated_solutions_per_sec(d);
             let score = o.capacity_score(d);
-            let flag = if o.exceeds_capacity(d) {
-                " ✗ LOSES SOLUTIONS"
-            } else if o.tflops() > max_tf * 0.8 {
-                " ⚠ near limit"
-            } else {
-                ""
-            };
+            let bw_total = o.gpu_mem_bw * o.num_gpus as f64;
+            let flag = if bw_total > max_bw * 0.8 { " ⚠" } else { "" };
             println!(
-                "{:<3} {:<5} {:<16} {:>8.1} {:>8.2} {:>6.2} {:>8.0}{}",
+                "{:<3} {:<5} {:<16} {:>7.0} {:>7.1} {:>7.2} {:>6.2} {:>7.0}{}",
                 i + 1,
                 format!("{}x", o.num_gpus),
                 o.gpu_name,
-                o.tflops(),
+                bw_total,
+                est_ghs,
                 o.dph_total,
                 sol_s,
                 score,
                 flag,
             );
-            if score > 0.0 { shown += 1; }
         }
-        if shown == 0 {
+        if offers.is_empty() {
             println!();
             println!("  ⚠ All offers exceed server capacity at difficulty {d}.");
-            println!("  Consider waiting for higher difficulty or using a smaller GPU.");
+            println!("  Wait for higher difficulty or use a smaller GPU.");
         }
     } else {
         println!(
-            "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8}",
-            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "TF/$/hr", "Score"
+            "{:<3} {:<5} {:<16} {:>7} {:>7} {:>7}",
+            "#", "GPUs", "GPU", "BW", "~GH/s", "$/hr"
         );
-        println!("{}", "-".repeat(75));
+        println!("{}", "-".repeat(55));
         for (i, o) in offers.iter().enumerate() {
             println!(
-                "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}",
+                "{:<3} {:<5} {:<16} {:>7.0} {:>7.1} {:>7.2}",
                 i + 1,
                 format!("{}x", o.num_gpus),
                 o.gpu_name,
-                o.tflops(),
+                o.gpu_mem_bw * o.num_gpus as f64,
+                o.estimated_hashrate_ghs(),
                 o.dph_total,
-                o.flops_per_dollar(),
-                o.composite_score(),
             );
         }
     }
@@ -201,19 +195,19 @@ pub async fn start_dev(
             });
             if offers.is_empty() {
                 anyhow::bail!(
-                    "No offers within reporting capacity at difficulty {d} (max {:.0} TFLOPS). Wait for higher difficulty.",
-                    super::vast::Offer::max_useful_tflops(d)
+                    "No offers within reporting capacity at difficulty {d} (max {:.0} GB/s mem_bw). Wait for higher difficulty.",
+                    super::vast::Offer::max_useful_mem_bw(d)
                 );
             }
         }
         print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
         println!(
-            "  Selected: {}x {} (${:.2}/hr, {:.0} TFLOPS, ~{:.2} sol/s)",
+            "  Selected: {}x {} (${:.2}/hr, ~{:.1} GH/s, ~{:.2} sol/s)",
             selected.num_gpus,
             selected.gpu_name,
             selected.dph_total,
-            selected.tflops(),
+            selected.estimated_hashrate_ghs(),
             difficulty.map(|d| selected.estimated_solutions_per_sec(d)).unwrap_or(0.0)
         );
         selected.id
@@ -348,8 +342,8 @@ pub async fn start(
         print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
         println!(
-            "  Selected: {}x {} (${:.2}/hr, {:.0} TFLOPS)",
-            selected.num_gpus, selected.gpu_name, selected.dph_total, selected.tflops()
+            "  Selected: {}x {} (${:.2}/hr, ~{:.1} GH/s)",
+            selected.num_gpus, selected.gpu_name, selected.dph_total, selected.estimated_hashrate_ghs()
         );
         selected.id
     };
