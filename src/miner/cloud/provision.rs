@@ -28,36 +28,34 @@ pub fn print_offers_table_with_difficulty(
     use super::vast::Offer;
     println!();
     if let Some(d) = difficulty {
-        let max_ghs = Offer::max_useful_hashrate_ghs(d);
-        let max_sol = Offer::max_solutions_per_sec();
+        let max_tf = Offer::max_useful_tflops(d);
         println!(
-            "  Difficulty={d} → server limit: {:.2} solutions/sec → max useful: {:.1} GH/s",
-            max_sol, max_ghs
+            "  Difficulty={d} → max useful: {:.0} TFLOPS ({:.2} sol/s, server 1 report/6s)",
+            max_tf,
+            Offer::max_solutions_per_sec()
         );
         println!(
             "{:<3} {:<5} {:<16} {:>8} {:>8} {:>6} {:>8} {:>8}",
-            "#", "GPUs", "GPU", "~GH/s", "$/hr", "sol/s", "Score", ""
+            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "sol/s", "Score", ""
         );
         println!("{}", "-".repeat(75));
         let mut shown = 0;
         for (i, o) in offers.iter().enumerate() {
-            let est_ghs = o.estimated_hashrate_ghs();
             let sol_s = o.estimated_solutions_per_sec(d);
             let score = o.capacity_score(d);
             let flag = if o.exceeds_capacity(d) {
-                " ✗ TOO POWERFUL"
-            } else if est_ghs > max_ghs * 0.8 {
+                " ✗ LOSES SOLUTIONS"
+            } else if o.tflops() > max_tf * 0.8 {
                 " ⚠ near limit"
             } else {
                 ""
             };
-            // Always show, but overcapacity ones get score=0 and are flagged
             println!(
                 "{:<3} {:<5} {:<16} {:>8.1} {:>8.2} {:>6.2} {:>8.0}{}",
                 i + 1,
                 format!("{}x", o.num_gpus),
                 o.gpu_name,
-                est_ghs,
+                o.tflops(),
                 o.dph_total,
                 sol_s,
                 score,

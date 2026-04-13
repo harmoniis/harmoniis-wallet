@@ -39,10 +39,12 @@ impl Offer {
         self.flops_per_dphtotal
     }
 
-    /// Estimated SHA256 mining hash rate in GH/s.
-    /// RTX 4090 ≈ 82 TFLOPS → 10.5 GH/s; ratio ~0.128 GH/s per TFLOP.
+    /// Calibrated from measured data: 10x RTX 4090 = 814 TFLOPS = 100 GH/s.
+    const GHS_PER_TFLOP: f64 = 100.0 / 814.0; // 0.1229
+
+    /// Estimated SHA256 mining hash rate in GH/s from TFLOPS.
     pub fn estimated_hashrate_ghs(&self) -> f64 {
-        self.total_flops * 0.128
+        self.total_flops * Self::GHS_PER_TFLOP
     }
 
     /// Measured server throughput: webcash.org processes mining reports
@@ -58,11 +60,14 @@ impl Offer {
         1.0 / Self::REPORT_SECONDS
     }
 
-    /// Maximum useful hash rate (GH/s) before solutions overflow at the
-    /// given difficulty. Above this, the GPU produces solutions faster than
-    /// the server can accept them — wasting electricity and cloud cost.
+    /// Maximum useful hash rate (GH/s) before solutions overflow.
     pub fn max_useful_hashrate_ghs(difficulty: u32) -> f64 {
         Self::max_solutions_per_sec() * 2.0_f64.powi(difficulty as i32) / 1e9
+    }
+
+    /// Maximum useful TFLOPS before solutions overflow.
+    pub fn max_useful_tflops(difficulty: u32) -> f64 {
+        Self::max_useful_hashrate_ghs(difficulty) / Self::GHS_PER_TFLOP
     }
 
     /// Estimated solutions/sec this offer would produce at the given difficulty.
