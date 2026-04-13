@@ -187,35 +187,35 @@ pub async fn start_dev(
         id
     } else {
         println!("[2/5] Searching for best GPU offers...");
-        let offers = client.find_best_offers().await?;
+        let mut offers = client.find_best_offers().await?;
         if offers.is_empty() {
             anyhow::bail!("No GPU offers found.");
         }
-        print_offers_table_with_difficulty(&offers, difficulty);
-        let selected = prompt_offer_selection(&offers)?;
-        let est_ghs = selected.estimated_hashrate_ghs();
-        println!(
-            "  Selected: {}x {} (${:.2}/hr, ~{:.0} GH/s)",
-            selected.num_gpus, selected.gpu_name, selected.dph_total, est_ghs
-        );
+        // When difficulty is known: filter out overcapacity, sort by capacity_score.
         if let Some(d) = difficulty {
-            if selected.exceeds_capacity(d) {
-                let sol_s = selected.estimated_solutions_per_sec(d);
-                let max_sol = super::vast::Offer::max_solutions_per_sec();
-                let loss_pct = ((sol_s - max_sol) / sol_s * 100.0).round();
-                eprintln!(
-                    "  ✗ REJECTED: mines ~{:.2} solutions/sec but server accepts only {:.2}/sec",
-                    sol_s, max_sol
-                );
-                eprintln!(
-                    "  ✗ {:.0}% of mined solutions would be LOST (cannot be submitted later)",
-                    loss_pct
-                );
+            offers.retain(|o| !o.exceeds_capacity(d));
+            offers.sort_by(|a, b| {
+                b.capacity_score(d)
+                    .partial_cmp(&a.capacity_score(d))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if offers.is_empty() {
                 anyhow::bail!(
-                    "Instance too powerful for difficulty {d}. Select a smaller GPU or wait for higher difficulty."
+                    "No offers within reporting capacity at difficulty {d} (max {:.0} TFLOPS). Wait for higher difficulty.",
+                    super::vast::Offer::max_useful_tflops(d)
                 );
             }
         }
+        print_offers_table_with_difficulty(&offers, difficulty);
+        let selected = prompt_offer_selection(&offers)?;
+        println!(
+            "  Selected: {}x {} (${:.2}/hr, {:.0} TFLOPS, ~{:.2} sol/s)",
+            selected.num_gpus,
+            selected.gpu_name,
+            selected.dph_total,
+            selected.tflops(),
+            difficulty.map(|d| selected.estimated_solutions_per_sec(d)).unwrap_or(0.0)
+        );
         selected.id
     };
 
@@ -319,7 +319,7 @@ pub async fn start(
         id
     } else {
         println!("[2/6] Searching for best GPU offers...");
-        let offers = client.find_best_offers().await?;
+        let mut offers = client.find_best_offers().await?;
         if offers.is_empty() {
             anyhow::bail!("No GPU offers found. Check Vast.ai availability.");
         }
@@ -331,26 +331,26 @@ pub async fn start(
                 Err(_) => None,
             }
         };
-        print_offers_table_with_difficulty(&offers, difficulty);
-        let selected = prompt_offer_selection(&offers)?;
-        let est_ghs = selected.estimated_hashrate_ghs();
-        println!(
-            "  Selected: {}x {} (${:.2}/hr, ~{:.0} GH/s)",
-            selected.num_gpus, selected.gpu_name, selected.dph_total, est_ghs
-        );
+        // Filter out overcapacity, sort by capacity_score.
         if let Some(d) = difficulty {
-            if selected.exceeds_capacity(d) {
-                let sol_s = selected.estimated_solutions_per_sec(d);
-                let max_sol = super::vast::Offer::max_solutions_per_sec();
-                eprintln!(
-                    "  ✗ REJECTED: mines ~{:.2} sol/s but server accepts only {:.2}/s — solutions LOST",
-                    sol_s, max_sol
-                );
+            offers.retain(|o| !o.exceeds_capacity(d));
+            offers.sort_by(|a, b| {
+                b.capacity_score(d)
+                    .partial_cmp(&a.capacity_score(d))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if offers.is_empty() {
                 anyhow::bail!(
-                    "Instance too powerful for difficulty {d}. Select a smaller GPU."
+                    "No offers within reporting capacity at difficulty {d}."
                 );
             }
         }
+        print_offers_table_with_difficulty(&offers, difficulty);
+        let selected = prompt_offer_selection(&offers)?;
+        println!(
+            "  Selected: {}x {} (${:.2}/hr, {:.0} TFLOPS)",
+            selected.num_gpus, selected.gpu_name, selected.dph_total, selected.tflops()
+        );
         selected.id
     };
 
