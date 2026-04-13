@@ -560,7 +560,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
     let queue_depth = Arc::new(AtomicUsize::new(0));
     let mut submitter_handles = Vec::with_capacity(num_clients);
-    let webcash_wallet_path = Arc::new(config.webcash_wallet_path.clone());
 
     for c in 0..num_clients {
         let client = clients[c].clone();
@@ -568,33 +567,21 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
-        let _sub_wallet_path = webcash_wallet_path.clone();
         let thread_rx = shared_rx.clone();
         let thread_queue_depth = queue_depth.clone();
+
 
         let handle = std::thread::Builder::new()
             .name(format!("client-{c}"))
             .spawn(move || {
                 eprintln!("[client-{c}] started");
-                // Reuse ONE current-thread runtime per submitter instead of
-                // creating+destroying a multi-thread Runtime per accepted solution.
-                // This eliminates ~8 thread create/destroy cycles per solution and
-                // the associated TLB shootdowns across all CPU cores.
-                let _wallet_rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok();
                 loop {
-                    // Work-stealing: lock shared queue, dequeue one solution, unlock.
-                    // Lock held only for the brief recv() (~ns when msg available).
-                    // All HTTP I/O happens OUTSIDE the lock.
                     let msg = match thread_rx.lock().unwrap().recv() {
                         Ok(m) => m,
-                        Err(_) => break, // channel closed → shutdown
+                        Err(_) => break,
                     };
                     thread_queue_depth.fetch_sub(1, Ordering::Relaxed);
 
-                    // Stale difficulty check.
                     {
                         let current_diff = sub_shared_target.read().unwrap().difficulty;
                         if msg.difficulty_achieved < current_diff {
@@ -617,10 +604,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             let ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
                             eprintln!("[client-{c}] accepted in {ms}ms");
-                            println!(
-                                "Mining report accepted! keep={}",
-                                &msg.keep_secret[..msg.keep_secret.len().min(30)]
-                            );
 
                             if let Some(new_diff) = resp.difficulty_target {
                                 let mut t = sub_shared_target.write().unwrap();
@@ -634,7 +617,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                 }
                             }
 
-                            // Write keep to pending log.
                             let _ = std::fs::OpenOptions::new()
                                 .create(true)
                                 .append(true)
@@ -643,18 +625,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     use std::io::Write;
                                     writeln!(f, "{}", msg.keep_secret)
                                 });
-
-                            // Wallet insertion deferred — the keep secret is already
-                            // persisted to pending_keeps.log above. wallet.insert()
-                            // makes an HTTP replace call to webcash.org (~5-10s) which
-                            // would block this reporter thread and halve throughput.
-                            // Use `hrmw webcash recover` after mining to insert keeps.
                         }
                         Err(e) => {
                             let ms = t0.elapsed().as_millis();
                             let err = e.to_string();
                             if err.contains("Didn't use a new secret") {
-                                // Already accepted.
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -886,7 +861,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let drain_start = std::time::Instant::now();
     drop(solution_tx); // Signal EOF — threads will drain remaining and exit.
 
-    // Monitor drain progress with timeout.
+    // Monitor drain progress. Server processes ~1 report / 6s sequentially.
     let drain_timeout = std::time::Duration::from_secs(600);
     loop {
         let remaining = queue_depth.load(Ordering::Relaxed);
@@ -895,12 +870,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         }
         if drain_start.elapsed() > drain_timeout {
             eprintln!(
-                "⚠ Drain timeout (600s) — {remaining} solutions remain in pending_solutions.log"
+                "⚠ Drain timeout (600s) — {remaining} solutions LOST (server too slow)"
             );
-            eprintln!("  Submit later with: hrmw webminer collect");
             break;
         }
-        let est_secs = (remaining as f64 * 7.0 / num_clients as f64).ceil() as u64;
+        let est_secs = (remaining as f64 * 6.0).ceil() as u64;
         println!("  Draining: {remaining} remaining (~{est_secs}s)");
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
@@ -914,6 +888,62 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         "  Drain complete in {drain_secs}s — accepted={} found={}",
         final_snap.solutions_accepted, final_snap.solutions_found
     );
+
+    // ── Batch wallet insertion ──
+    // Insert all accepted keep secrets into the webcash wallet. This makes
+    // HTTP replace calls to webcash.org (~5-10s each) but mining is done so
+    // there is no throughput concern. Every accepted solution MUST be
+    // inserted before we consider the session complete.
+    let keeps_path = &pending_keep_path;
+    if keeps_path.exists() {
+        let keeps_content = std::fs::read_to_string(keeps_path).unwrap_or_default();
+        let keep_lines: Vec<&str> = keeps_content.lines().filter(|l| !l.is_empty()).collect();
+        if !keep_lines.is_empty() {
+            println!(
+                "Inserting {} accepted solutions into webcash wallet...",
+                keep_lines.len()
+            );
+            let wallet_path = &config.webcash_wallet_path;
+            let mut inserted = 0usize;
+            let mut failed = 0usize;
+            for (i, keep_str) in keep_lines.iter().enumerate() {
+                if let Ok(secret) = webylib::SecretWebcash::parse(keep_str) {
+                    match webylib::Wallet::open(wallet_path)
+                        .await
+                        .and_then(|w| {
+                            // block_on would deadlock inside an async fn, so we
+                            // just .await directly since run_mining_loop is async.
+                            Ok(w)
+                        })
+                    {
+                        Ok(wallet) => match wallet.insert(secret).await {
+                            Ok(_) => {
+                                inserted += 1;
+                                if (i + 1) % 5 == 0 || i + 1 == keep_lines.len() {
+                                    println!(
+                                        "  Wallet insert: {}/{} done",
+                                        i + 1,
+                                        keep_lines.len()
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                eprintln!("  Wallet insert failed: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("  Wallet open failed: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            println!(
+                "  Wallet insertion complete: {inserted} inserted, {failed} failed"
+            );
+        }
+    }
 
     let _ = std::fs::remove_file(pid_file_path());
     let _ = tracker.write_to_file(&status_path);
