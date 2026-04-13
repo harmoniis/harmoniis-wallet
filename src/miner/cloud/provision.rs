@@ -1007,16 +1007,19 @@ async fn wait_for_running(client: &VastClient, instance_id: u64) -> Result<super
 }
 
 async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16) -> Result<()> {
-    // Poll every 2s — instance is running, SSH should come up fast.
-    for _ in 0..60 {
+    // Poll every 3s for up to 5 minutes. CUDA Docker images take longer to boot.
+    for i in 0..100 {
         if let Ok(out) = ssh::exec(ssh_key, host, port, "echo ok") {
             if out.contains("ok") {
                 return Ok(());
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if i % 10 == 9 {
+            eprintln!("  SSH not ready yet, waiting... ({:.0}s)", (i + 1) as f64 * 3.0);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
-    anyhow::bail!("SSH not ready after 2 minutes")
+    anyhow::bail!("SSH not ready after 5 minutes")
 }
 
 async fn install_hrmw_remote(
