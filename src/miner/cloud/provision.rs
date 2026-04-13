@@ -28,30 +28,47 @@ pub fn print_offers_table_with_difficulty(
     use super::vast::Offer;
     println!();
     if let Some(d) = difficulty {
-        let max_ghs = Offer::max_useful_hashrate_ghs(d, 8);
+        let max_ghs = Offer::max_useful_hashrate_ghs(d);
+        let max_sol = Offer::max_solutions_per_sec();
         println!(
-            "  Difficulty={d} → max useful hashrate: {:.0} GH/s (8 clients × 7s/report)",
-            max_ghs
+            "  Difficulty={d} → server limit: {:.2} solutions/sec → max useful: {:.1} GH/s",
+            max_sol, max_ghs
         );
         println!(
-            "{:<3} {:<5} {:<16} {:>10} {:>8} {:>10} {:>8} {:>8}",
-            "#", "GPUs", "GPU", "TFLOPS", "$/hr", "~GH/s", "Score", "Cap"
+            "{:<3} {:<5} {:<16} {:>8} {:>8} {:>6} {:>8} {:>8}",
+            "#", "GPUs", "GPU", "~GH/s", "$/hr", "sol/s", "Score", ""
         );
-        println!("{}", "-".repeat(83));
+        println!("{}", "-".repeat(75));
+        let mut shown = 0;
         for (i, o) in offers.iter().enumerate() {
             let est_ghs = o.estimated_hashrate_ghs();
-            let cap_flag = if est_ghs > max_ghs * 0.8 { " ⚠" } else { "" };
+            let sol_s = o.estimated_solutions_per_sec(d);
+            let score = o.capacity_score(d);
+            let flag = if o.exceeds_capacity(d) {
+                " ✗ TOO POWERFUL"
+            } else if est_ghs > max_ghs * 0.8 {
+                " ⚠ near limit"
+            } else {
+                ""
+            };
+            // Always show, but overcapacity ones get score=0 and are flagged
             println!(
-                "{:<3} {:<5} {:<16} {:>10.1} {:>8.2} {:>10.1} {:>8.0}{}",
+                "{:<3} {:<5} {:<16} {:>8.1} {:>8.2} {:>6.2} {:>8.0}{}",
                 i + 1,
                 format!("{}x", o.num_gpus),
                 o.gpu_name,
-                o.tflops(),
-                o.dph_total,
                 est_ghs,
-                o.capacity_score(d, 8),
-                cap_flag,
+                o.dph_total,
+                sol_s,
+                score,
+                flag,
             );
+            if score > 0.0 { shown += 1; }
+        }
+        if shown == 0 {
+            println!();
+            println!("  ⚠ All offers exceed server capacity at difficulty {d}.");
+            println!("  Consider waiting for higher difficulty or using a smaller GPU.");
         }
     } else {
         println!(
@@ -184,18 +201,20 @@ pub async fn start_dev(
             selected.num_gpus, selected.gpu_name, selected.dph_total, est_ghs
         );
         if let Some(d) = difficulty {
-            let max_ghs = super::vast::Offer::max_useful_hashrate_ghs(d, 8);
-            if est_ghs > max_ghs {
-                let sol_per_sec = est_ghs * 1e9 / 2.0_f64.powi(d as i32);
-                let overflow_per_sec = sol_per_sec - 8.0 / 7.0;
+            if selected.exceeds_capacity(d) {
+                let sol_s = selected.estimated_solutions_per_sec(d);
+                let max_sol = super::vast::Offer::max_solutions_per_sec();
+                let loss_pct = ((sol_s - max_sol) / sol_s * 100.0).round();
                 eprintln!(
-                    "  ⚠ This instance mines ~{:.1} solutions/sec but can only report {:.1}/sec",
-                    sol_per_sec, 8.0 / 7.0
+                    "  ✗ REJECTED: mines ~{:.2} solutions/sec but server accepts only {:.2}/sec",
+                    sol_s, max_sol
                 );
                 eprintln!(
-                    "  ⚠ Overflow: ~{:.1} solutions/sec → drain time after 1hr: ~{:.0}min",
-                    overflow_per_sec,
-                    (overflow_per_sec * 3600.0) / (8.0 / 7.0) / 60.0
+                    "  ✗ {:.0}% of mined solutions would be LOST (cannot be submitted later)",
+                    loss_pct
+                );
+                anyhow::bail!(
+                    "Instance too powerful for difficulty {d}. Select a smaller GPU or wait for higher difficulty."
                 );
             }
         }
@@ -316,13 +335,24 @@ pub async fn start(
         };
         print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
+        let est_ghs = selected.estimated_hashrate_ghs();
         println!(
             "  Selected: {}x {} (${:.2}/hr, ~{:.0} GH/s)",
-            selected.num_gpus,
-            selected.gpu_name,
-            selected.dph_total,
-            selected.estimated_hashrate_ghs()
+            selected.num_gpus, selected.gpu_name, selected.dph_total, est_ghs
         );
+        if let Some(d) = difficulty {
+            if selected.exceeds_capacity(d) {
+                let sol_s = selected.estimated_solutions_per_sec(d);
+                let max_sol = super::vast::Offer::max_solutions_per_sec();
+                eprintln!(
+                    "  ✗ REJECTED: mines ~{:.2} sol/s but server accepts only {:.2}/s — solutions LOST",
+                    sol_s, max_sol
+                );
+                anyhow::bail!(
+                    "Instance too powerful for difficulty {d}. Select a smaller GPU."
+                );
+            }
+        }
         selected.id
     };
 

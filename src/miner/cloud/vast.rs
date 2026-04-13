@@ -45,20 +45,38 @@ impl Offer {
         self.total_flops * 0.128
     }
 
-    /// Maximum reporting throughput in solutions/sec for N clients at 7s/report.
-    pub fn max_solutions_per_sec(num_clients: usize) -> f64 {
-        num_clients as f64 / 7.0
+    /// Measured server throughput: webcash.org processes mining reports
+    /// sequentially at ~6 seconds each (single-threaded Tornado backend).
+    /// Multiple concurrent connections do NOT increase throughput — they
+    /// cause cascading queue delays (measured 2026-04-14).
+    const REPORT_SECONDS: f64 = 6.0;
+
+    /// Maximum reporting throughput in solutions/sec.
+    /// Server is single-threaded: 1 report / 6s = 0.167/sec regardless of
+    /// client count. Concurrent connections just queue behind each other.
+    pub fn max_solutions_per_sec() -> f64 {
+        1.0 / Self::REPORT_SECONDS
     }
 
-    /// Maximum useful hash rate (GH/s) before solutions overflow at the given difficulty.
-    pub fn max_useful_hashrate_ghs(difficulty: u32, num_clients: usize) -> f64 {
-        Self::max_solutions_per_sec(num_clients) * 2.0_f64.powi(difficulty as i32) / 1e9
+    /// Maximum useful hash rate (GH/s) before solutions overflow at the
+    /// given difficulty. Above this, the GPU produces solutions faster than
+    /// the server can accept them — wasting electricity and cloud cost.
+    pub fn max_useful_hashrate_ghs(difficulty: u32) -> f64 {
+        Self::max_solutions_per_sec() * 2.0_f64.powi(difficulty as i32) / 1e9
+    }
+
+    /// Estimated solutions/sec this offer would produce at the given difficulty.
+    pub fn estimated_solutions_per_sec(&self, difficulty: u32) -> f64 {
+        self.estimated_hashrate_ghs() * 1e9 / 2.0_f64.powi(difficulty as i32)
+    }
+
+    /// Whether this offer exceeds the server's reporting capacity at the
+    /// given difficulty. Instances above this threshold lose solutions.
+    pub fn exceeds_capacity(&self, difficulty: u32) -> bool {
+        self.estimated_hashrate_ghs() > Self::max_useful_hashrate_ghs(difficulty)
     }
 
     /// Composite score: efficiency first, speed as tiebreaker.
-    /// Formula: FLOPS/$ * (1 + TFlops/1000)
-    /// The TFlops/1000 term adds ~10-60% bonus for faster GPUs
-    /// without letting raw speed dominate cost efficiency.
     pub fn composite_score(&self) -> f64 {
         if self.dph_total <= 0.0 {
             return 0.0;
@@ -68,17 +86,16 @@ impl Offer {
         efficiency * speed_bonus
     }
 
-    /// Difficulty-aware composite score: penalizes offers whose estimated hash
-    /// rate exceeds what the reporting pipeline can sustain at the current
-    /// difficulty. Instances that produce solutions faster than 8/7 ≈ 1.14/sec
-    /// waste GPU capacity and queue up solutions that delay shutdown.
-    pub fn capacity_score(&self, difficulty: u32, num_clients: usize) -> f64 {
+    /// Difficulty-aware composite score: zeroes out offers that exceed the
+    /// server's reporting capacity. There is no point renting a GPU that
+    /// produces solutions faster than 0.167/sec — the excess is wasted.
+    pub fn capacity_score(&self, difficulty: u32) -> f64 {
         let base = self.composite_score();
-        let max_useful = Self::max_useful_hashrate_ghs(difficulty, num_clients);
+        let max_useful = Self::max_useful_hashrate_ghs(difficulty);
         let est = self.estimated_hashrate_ghs();
-        if est > max_useful && max_useful > 0.0 {
-            // Apply penalty proportional to overcapacity (e.g., 2x over = 0.5 penalty)
-            base * (max_useful / est)
+        if est > max_useful * 1.2 {
+            // >20% over capacity → score = 0 (effectively excluded)
+            0.0
         } else {
             base
         }
