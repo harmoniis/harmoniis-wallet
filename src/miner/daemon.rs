@@ -546,46 +546,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionMsg>();
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
-    // Background wallet insertion thread — accepts keep secrets from reporters
-    // and inserts them into the webcash wallet via the /replace endpoint.
-    // This runs on its own thread so it never blocks the reporter pipeline.
-    let (wallet_tx, wallet_rx) = std::sync::mpsc::channel::<String>();
-    let wallet_inserted = Arc::new(AtomicUsize::new(0));
-    let wallet_thread = {
-        let wallet_path = config.webcash_wallet_path.clone();
-        let inserted = wallet_inserted.clone();
-        std::thread::Builder::new()
-            .name("wallet-insert".into())
-            .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("[wallet] failed to create runtime: {e}");
-                        return;
-                    }
-                };
-                while let Ok(keep_secret) = wallet_rx.recv() {
-                    if let Ok(secret) = webylib::SecretWebcash::parse(&keep_secret) {
-                        let result = rt.block_on(async {
-                            let wallet = webylib::Wallet::open(&wallet_path).await?;
-                            wallet.insert(secret).await
-                        });
-                        match result {
-                            Ok(_) => {
-                                let n = inserted.fetch_add(1, Ordering::Relaxed) + 1;
-                                eprintln!("[wallet] inserted #{n}");
-                            }
-                            Err(e) => eprintln!("[wallet] insert failed: {e}"),
-                        }
-                    }
-                }
-                eprintln!("[wallet] exiting");
-            })
-            .expect("failed to spawn wallet thread")
-    };
+    // Wallet insertion happens AFTER mining stops and all reports are drained.
+    // The /api/v1/replace endpoint shares the single-threaded Tornado backend
+    // with /mining_report — concurrent calls cause cascading queue delays.
+    // Keep secrets are saved to pending_keeps.log during mining and batch-
+    // inserted into the wallet after the reporter thread exits.
 
     let reporter_handle = {
         let client = reporter_client.clone();
@@ -593,7 +558,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
-        let sub_wallet_tx = wallet_tx.clone();
         let sub_queue_depth = queue_depth.clone();
 
         std::thread::Builder::new()
@@ -646,8 +610,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     use std::io::Write;
                                     writeln!(f, "{}", msg.keep_secret)
                                 });
-
-                            let _ = sub_wallet_tx.send(msg.keep_secret.clone());
                         }
                         Err(e) => {
                             let ms = t0.elapsed().as_millis();
@@ -661,7 +623,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                         use std::io::Write;
                                         writeln!(f, "{}", msg.keep_secret)
                                     });
-                                let _ = sub_wallet_tx.send(msg.keep_secret.clone());
                             } else {
                                 eprintln!("[reporter] FAILED in {ms}ms: {err}");
                                 let _ = std::fs::OpenOptions::new()
@@ -906,18 +867,49 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         final_snap.solutions_accepted, final_snap.solutions_found
     );
 
-    // Wait for background wallet insertion thread to finish all pending inserts.
-    // Drop sender first to signal EOF, then join.
-    drop(wallet_tx);
-    println!(
-        "Waiting for wallet insertions ({} done so far)...",
-        wallet_inserted.load(Ordering::Relaxed)
-    );
-    let _ = wallet_thread.join();
-    println!(
-        "  Wallet complete: {} inserted",
-        wallet_inserted.load(Ordering::Relaxed)
-    );
+    // Batch wallet insertion — insert all accepted keep secrets now that
+    // mining and reporting are done. The /replace endpoint shares the same
+    // single-threaded server, so this MUST NOT run during mining.
+    let keeps_path = &pending_keep_path;
+    if keeps_path.exists() {
+        let keeps = std::fs::read_to_string(keeps_path).unwrap_or_default();
+        let keep_lines: Vec<&str> = keeps.lines().filter(|l| !l.is_empty()).collect();
+        if !keep_lines.is_empty() {
+            println!(
+                "Inserting {} keeps into webcash wallet...",
+                keep_lines.len()
+            );
+            let wallet_path = &config.webcash_wallet_path;
+            let mut inserted = 0usize;
+            let mut skipped = 0usize;
+            for (i, keep_str) in keep_lines.iter().enumerate() {
+                if let Ok(secret) = webylib::SecretWebcash::parse(keep_str) {
+                    match webylib::Wallet::open(wallet_path).await {
+                        Ok(wallet) => match wallet.insert(secret).await {
+                            Ok(_) => inserted += 1,
+                            Err(e) if e.to_string().contains("UNIQUE constraint") => {
+                                skipped += 1;
+                            }
+                            Err(e) => eprintln!("  Wallet insert failed: {e}"),
+                        },
+                        Err(e) => {
+                            eprintln!("  Wallet open failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                if (i + 1) % 10 == 0 || i + 1 == keep_lines.len() {
+                    println!("  Wallet: {}/{} done", i + 1, keep_lines.len());
+                }
+            }
+            println!("  Wallet complete: {inserted} inserted, {skipped} already present");
+        }
+    }
+
+    // Clear pending_solutions.log — solutions are either accepted (in wallet)
+    // or lost (stale timestamps). Keeping them causes "Bad timestamp" errors
+    // on future collect attempts. The keeps log is the source of truth.
+    let _ = std::fs::write(pending_solutions_path(), "");
 
     let _ = std::fs::remove_file(pid_file_path());
     let _ = tracker.write_to_file(&status_path);
