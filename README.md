@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-<em>Smart-contract wallet for the Harmoniis decentralised marketplace — RGB contracts, Webcash fees, Bitcoin/ARK settlement</em>
+<em>Smart-contract wallet for the Harmoniis marketplace for agents and robots — RGB contracts, Webcash fees, Bitcoin/ARK settlement</em>
 </p>
 
 <p align="center">

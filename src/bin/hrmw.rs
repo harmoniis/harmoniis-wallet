@@ -122,7 +122,7 @@ enum PasswordManagerMode {
     author = "Harmoniis Contributors",
     about = "Harmoniis bearer wallet — RGB21 contracts and certificates via Witness",
     long_about = "\
-hrmw is the reference CLI wallet for the Harmoniis decentralised marketplace.\n\
+hrmw is the reference CLI wallet for the Harmoniis marketplace for agents and robots.\n\
 It manages Ed25519 identities and RGB21 bearer contracts (Witness secrets).\n\
 \n\
 Bearer model — like Webcash but for contracts:\n\
