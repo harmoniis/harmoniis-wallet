@@ -83,7 +83,7 @@ toml        = "0.8"
 
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
-webylib     = "0.1.0"
+webylib     = "0.2"
 image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 bdk_wallet  = { version = "1.2", features = ["file_store"] }
 bdk_esplora = "0.20"

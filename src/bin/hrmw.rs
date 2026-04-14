@@ -2812,14 +2812,20 @@ async fn main() -> anyhow::Result<()> {
 
             // Deterministic webcash reconstruction.
             let webcash_wallet = resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
-            let webcash_summary = webcash_wallet
-                .recover_from_wallet(40)
-                .await
-                .unwrap_or_else(|e| format!("webcash recover skipped: {e}"));
-            println!("Deterministic recovery complete.");
-            println!("Recovered identities: {recovered_identities}");
-            println!("Recovered contracts:  {recovered_contracts}");
-            println!("{webcash_summary}");
+            match webcash_wallet.recover_from_wallet(40).await {
+                Ok(result) => {
+                    println!("Deterministic recovery complete.");
+                    println!("Recovered identities: {recovered_identities}");
+                    println!("Recovered contracts:  {recovered_contracts}");
+                    println!("{result}");
+                }
+                Err(e) => {
+                    println!("Deterministic recovery complete.");
+                    println!("Recovered identities: {recovered_identities}");
+                    println!("Recovered contracts:  {recovered_contracts}");
+                    println!("Webcash recover skipped: {e}");
+                }
+            }
         }
 
         // ── identity register ─────────────────────────────────────────────────
