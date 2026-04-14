@@ -72,6 +72,24 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo check --lib --no-default-features --features bundled-sqlite,actix-actors
 
+  # ── Mobile compile check ─────────────────────────────────────────
+  mobile-check:
+    name: Mobile check (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-ios
+            runner: macos-latest
+          - target: aarch64-apple-ios-sim
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check (library only)
+        run: cargo check --target ${{ matrix.target }} --lib --no-default-features --features bundled-sqlite
 
   test-freebsd:
     name: Test (FreeBSD)
@@ -110,13 +128,13 @@ jobs:
   release:
     name: Release (${{ matrix.platform }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, test-freebsd]
+    needs: [test, test-freebsd, mobile-check]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux — GPU + CUDA
+          # ── Desktop / Server ──
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             platform: linux-x86_64
@@ -125,7 +143,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
             features: bundled-sqlite,gpu,cuda
-          # macOS — GPU (wgpu only, no CUDA)
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos-aarch64
@@ -134,12 +151,11 @@ jobs:
             target: x86_64-apple-darwin
             platform: macos-x86_64
             features: bundled-sqlite,gpu
-          # Windows — GPU + CUDA
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x86_64
             features: bundled-sqlite,gpu,cuda
-          # FreeBSD — GPU (wgpu only, no CUDA)
+          # FreeBSD
           - os: ubuntu-latest
             target: x86_64-unknown-freebsd
             platform: freebsd-x86_64
@@ -147,6 +163,36 @@ jobs:
             freebsd_vm: true
             freebsd_version: "14.2"
             freebsd_arch: x86-64
+          # ── iOS — library only (SDK use) ──
+          - os: macos-latest
+            target: aarch64-apple-ios
+            platform: ios-aarch64
+            features: bundled-sqlite
+            lib_only: true
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+            platform: ios-aarch64-sim
+            features: bundled-sqlite
+            lib_only: true
+          # ── Android — library only (SDK use) ──
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            platform: android-aarch64
+            features: bundled-sqlite
+            lib_only: true
+            android: true
+          - os: ubuntu-latest
+            target: armv7-linux-androideabi
+            platform: android-armv7
+            features: bundled-sqlite
+            lib_only: true
+            android: true
+          - os: ubuntu-latest
+            target: x86_64-linux-android
+            platform: android-x86_64
+            features: bundled-sqlite
+            lib_only: true
+            android: true
     steps:
       - uses: actions/checkout@v4
 
@@ -169,6 +215,37 @@ jobs:
           "AR=lib.exe" >> $env:GITHUB_ENV
           "CC_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
           "CXX_x86_64_pc_windows_msvc=cl.exe" >> $env:GITHUB_ENV
+
+      # Android NDK setup (matching webylib pattern)
+      - name: Setup Android NDK
+        if: matrix.android
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      - name: Configure Android toolchain
+        if: matrix.android
+        shell: bash
+        run: |
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          TOOLCHAIN="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)   CLANG_PREFIX="aarch64-linux-android24" ; BARE_PREFIX="aarch64-linux-android" ;;
+            armv7-linux-androideabi) CLANG_PREFIX="armv7a-linux-androideabi24" ; BARE_PREFIX="arm-linux-androideabi" ;;
+            x86_64-linux-android)   CLANG_PREFIX="x86_64-linux-android24" ; BARE_PREFIX="x86_64-linux-android" ;;
+          esac
+          CC="${TOOLCHAIN}/bin/${CLANG_PREFIX}-clang"
+          AR="${TOOLCHAIN}/bin/llvm-ar"
+          RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          ENV_TARGET=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          echo "CC_${ENV_TARGET}=${CC}" >> "$GITHUB_ENV"
+          echo "AR_${ENV_TARGET}=${AR}" >> "$GITHUB_ENV"
+          echo "RANLIB_${ENV_TARGET}=${RANLIB}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${ENV_TARGET}_LINKER=${CC}" >> "$GITHUB_ENV"
+          echo "${TOOLCHAIN}/bin" >> "$GITHUB_PATH"
+          ln -sf "${CC}" "${TOOLCHAIN}/bin/${BARE_PREFIX}-clang"
+          ln -sf "${TOOLCHAIN}/bin/llvm-ar" "${TOOLCHAIN}/bin/${BARE_PREFIX}-ar"
 
       - uses: actions/cache@v4
         if: "!matrix.freebsd_vm"
@@ -204,32 +281,57 @@ jobs:
 
       # Native release build (Windows — pwsh to avoid Git link.exe conflict)
       - name: Build release binary (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !matrix.lib_only
         shell: pwsh
         run: cargo build --release --no-default-features --features ${{ matrix.features }}
 
-      # Docker release build (Linux x86_64 — GLIBC 2.31 compat for Vast.ai)
-      # Native release build (Unix)
+      # Library-only build (iOS, Android — no CLI binary)
+      - name: Build library (mobile)
+        if: matrix.lib_only
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --lib --no-default-features --features ${{ matrix.features }}
+
+      # Desktop/Server release build (Unix)
       - name: Build release binary
-        if: "!matrix.freebsd_vm && runner.os != 'Windows'"
+        if: "!matrix.freebsd_vm && !matrix.lib_only && runner.os != 'Windows'"
         shell: bash
         run: |
           HOST_TARGET=$(rustc -vV | grep host | awk '{print $2}')
           if [ "${{ matrix.target }}" != "$HOST_TARGET" ]; then
             cargo build --release --no-default-features --features ${{ matrix.features }} --target ${{ matrix.target }}
-            # Copy cross-compiled artifacts for build_release.sh
             mkdir -p target/release
             cp target/${{ matrix.target }}/release/hrmw target/release/ 2>/dev/null || true
           else
             cargo build --release --no-default-features --features ${{ matrix.features }}
           fi
 
+      # Package desktop releases (CLI binary + docs)
       - name: Build release tarball
-        if: "!matrix.freebsd_vm"
+        if: "!matrix.freebsd_vm && !matrix.lib_only"
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           bash scripts/build_release.sh "$VERSION" "${{ matrix.platform }}"
+
+      # Package library releases (static/dynamic libs for SDK)
+      - name: Package library
+        if: matrix.lib_only
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="${{ matrix.target }}"
+          STAGING="harmoniis-wallet-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "$STAGING"
+          cp LICENSE README.md CHANGELOG.md "$STAGING/"
+          find "target/${TARGET}/release" -maxdepth 1 \
+            \( -name '*.a' -o -name '*.so' -o -name '*.dylib' \) \
+            -exec cp {} "$STAGING/" \;
+          tar czf "${STAGING}.tar.gz" "$STAGING"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
+          else
+            shasum -a 256 "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
+          fi
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
