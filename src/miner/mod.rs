@@ -368,8 +368,7 @@ pub async fn enumerate_all_devices() -> EnumeratedDevices {
                 .iter()
                 .map(|a| a.get_info().device_pci_bus_id.trim().to_string())
                 .collect();
-            let unique_buses: HashSet<&str> =
-                dx_buses.iter().map(|s| s.as_str()).collect();
+            let unique_buses: HashSet<&str> = dx_buses.iter().map(|s| s.as_str()).collect();
             let has_dup_buses = unique_buses.len() < dx_buses.len() && adapters.len() > 1;
 
             if has_dup_buses || adapters.is_empty() {
@@ -392,7 +391,9 @@ pub async fn enumerate_all_devices() -> EnumeratedDevices {
                         eprintln!(
                             "GPU: DX12 found {} adapters, Vulkan found {} physical GPUs — \
                              adding {} headless via Vulkan",
-                            dx_count, vk_count, vk_count - dx_count,
+                            dx_count,
+                            vk_count,
+                            vk_count - dx_count,
                         );
                         let dx_bus_set: HashSet<String> = adapters
                             .iter()
@@ -472,11 +473,8 @@ pub async fn select_backend_for_devices(
     let enumerated = enumerate_all_devices().await;
 
     #[cfg(feature = "gpu")]
-    let mut adapter_slots: Vec<Option<wgpu::Adapter>> = enumerated
-        .wgpu_adapters
-        .into_iter()
-        .map(Some)
-        .collect();
+    let mut adapter_slots: Vec<Option<wgpu::Adapter>> =
+        enumerated.wgpu_adapters.into_iter().map(Some).collect();
 
     let mut backends: Vec<Arc<dyn MinerBackend>> = Vec::new();
 
@@ -553,11 +551,8 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     eprintln!("GPU: {} device(s) found", wgpu_devices.len());
 
     // Convert to Option slots so we can take() individual adapters by index.
-    let mut adapter_slots: Vec<Option<wgpu::Adapter>> = enumerated
-        .wgpu_adapters
-        .into_iter()
-        .map(Some)
-        .collect();
+    let mut adapter_slots: Vec<Option<wgpu::Adapter>> =
+        enumerated.wgpu_adapters.into_iter().map(Some).collect();
 
     let mut miners = Vec::new();
     for dev in &wgpu_devices {

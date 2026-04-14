@@ -139,7 +139,9 @@ impl Instance {
 
     /// Effective status: prefers `cur_state` (actual API field), falls back to `actual_status`.
     pub fn status(&self) -> Option<String> {
-        self.cur_state.clone().or_else(|| self.actual_status.clone())
+        self.cur_state
+            .clone()
+            .or_else(|| self.actual_status.clone())
     }
 }
 
@@ -248,9 +250,19 @@ impl VastClient {
 
         // Sort by GH/s per dollar (best mining value).
         candidates.sort_by(|a, b| {
-            let score_a = if a.dph_total > 0.0 { a.estimated_hashrate_ghs() / a.dph_total } else { 0.0 };
-            let score_b = if b.dph_total > 0.0 { b.estimated_hashrate_ghs() / b.dph_total } else { 0.0 };
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            let score_a = if a.dph_total > 0.0 {
+                a.estimated_hashrate_ghs() / a.dph_total
+            } else {
+                0.0
+            };
+            let score_b = if b.dph_total > 0.0 {
+                b.estimated_hashrate_ghs() / b.dph_total
+            } else {
+                0.0
+            };
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         candidates.truncate(20);

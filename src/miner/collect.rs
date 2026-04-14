@@ -194,8 +194,7 @@ pub fn report_worker(
                             if let Ok(rt) = tokio::runtime::Runtime::new() {
                                 if let Ok(secret) = webylib::SecretWebcash::parse(&keep) {
                                     let _ = rt.block_on(async {
-                                        let wallet =
-                                            webylib::Wallet::open(&wallet_path).await?;
+                                        let wallet = webylib::Wallet::open(&wallet_path).await?;
                                         wallet.insert(secret).await
                                     });
                                 }

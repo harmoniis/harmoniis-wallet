@@ -21,10 +21,7 @@ pub fn print_offers_table(offers: &[super::vast::Offer]) {
     print_offers_table_with_difficulty(offers, None);
 }
 
-pub fn print_offers_table_with_difficulty(
-    offers: &[super::vast::Offer],
-    difficulty: Option<u32>,
-) {
+pub fn print_offers_table_with_difficulty(offers: &[super::vast::Offer], difficulty: Option<u32>) {
     use super::vast::Offer;
     println!();
     if let Some(d) = difficulty {
@@ -32,7 +29,9 @@ pub fn print_offers_table_with_difficulty(
         let max_ghs = Offer::max_useful_hashrate_ghs(d);
         println!(
             "  Difficulty={d} → max useful: {:.0} GB/s mem_bw ({:.1} GH/s, {:.2} sol/s)",
-            max_bw, max_ghs, Offer::max_solutions_per_sec()
+            max_bw,
+            max_ghs,
+            Offer::max_solutions_per_sec()
         );
         println!(
             "{:<3} {:<5} {:<16} {:>7} {:>7} {:>7} {:>6} {:>7}",
@@ -208,7 +207,9 @@ pub async fn start_dev(
             selected.gpu_name,
             selected.dph_total,
             selected.estimated_hashrate_ghs(),
-            difficulty.map(|d| selected.estimated_solutions_per_sec(d)).unwrap_or(0.0)
+            difficulty
+                .map(|d| selected.estimated_solutions_per_sec(d))
+                .unwrap_or(0.0)
         );
         selected.id
     };
@@ -334,16 +335,17 @@ pub async fn start(
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             if offers.is_empty() {
-                anyhow::bail!(
-                    "No offers within reporting capacity at difficulty {d}."
-                );
+                anyhow::bail!("No offers within reporting capacity at difficulty {d}.");
             }
         }
         print_offers_table_with_difficulty(&offers, difficulty);
         let selected = prompt_offer_selection(&offers)?;
         println!(
             "  Selected: {}x {} (${:.2}/hr, ~{:.1} GH/s)",
-            selected.num_gpus, selected.gpu_name, selected.dph_total, selected.estimated_hashrate_ghs()
+            selected.num_gpus,
+            selected.gpu_name,
+            selected.dph_total,
+            selected.estimated_hashrate_ghs()
         );
         selected.id
     };
@@ -637,7 +639,9 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
             }
         }
         if i == drain_max_polls - 1 {
-            eprintln!("  Drain exceeded 10 min — force killing. Remaining solutions in overflow file.");
+            eprintln!(
+                "  Drain exceeded 10 min — force killing. Remaining solutions in overflow file."
+            );
             let _ = ssh::exec(
                 ssh_key,
                 &state.ssh_host,
@@ -1009,7 +1013,10 @@ async fn wait_for_ssh(ssh_key: &ed25519_dalek::SigningKey, host: &str, port: u16
             }
         }
         if i % 10 == 9 {
-            eprintln!("  SSH not ready yet, waiting... ({:.0}s)", (i + 1) as f64 * 3.0);
+            eprintln!(
+                "  SSH not ready yet, waiting... ({:.0}s)",
+                (i + 1) as f64 * 3.0
+            );
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }

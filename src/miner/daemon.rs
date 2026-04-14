@@ -71,7 +71,10 @@ pub fn retry_pending_solutions_verbose(server_url: &str) -> anyhow::Result<(usiz
     retry_pending_solutions_inner(server_url, true)
 }
 
-fn retry_pending_solutions_inner(server_url: &str, verbose: bool) -> anyhow::Result<(usize, usize, usize)> {
+fn retry_pending_solutions_inner(
+    server_url: &str,
+    verbose: bool,
+) -> anyhow::Result<(usize, usize, usize)> {
     use super::protocol::MiningProtocol;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -887,9 +890,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             break;
         }
         if drain_start.elapsed() > drain_timeout {
-            eprintln!(
-                "⚠ Drain timeout (600s) — {remaining} solutions LOST (server too slow)"
-            );
+            eprintln!("⚠ Drain timeout (600s) — {remaining} solutions LOST (server too slow)");
             break;
         }
         let est_secs = (remaining as f64 * 6.0).ceil() as u64;

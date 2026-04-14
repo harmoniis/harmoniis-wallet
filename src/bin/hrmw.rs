@@ -4011,12 +4011,7 @@ async fn main() -> anyhow::Result<()> {
                     .join("wallet")
                     .join("main_webcash.db")
             });
-            harmoniis_wallet::miner::collect::report_worker(
-                &server,
-                addr,
-                clients,
-                &wallet_path,
-            )?;
+            harmoniis_wallet::miner::collect::report_worker(&server, addr, clients, &wallet_path)?;
         }
         Cmd::Webminer(WebminerCmd::Cloud { cmd: cloud_cmd }) => {
             use harmoniis_wallet::miner::cloud::{
@@ -4048,8 +4043,8 @@ async fn main() -> anyhow::Result<()> {
                         let _lock = cloud_config::acquire_start_lock()
                             .context("Another cloud start is in progress")?;
 
-                        let _wc = resolve_webcash_wallet(&wallet_path, &wallet, Some(&label))
-                            .await?;
+                        let _wc =
+                            resolve_webcash_wallet(&wallet_path, &wallet, Some(&label)).await?;
                         let db_path =
                             labeled_wallet_display_path(&wallet_path, "webcash", Some(&label));
 
@@ -4063,7 +4058,8 @@ async fn main() -> anyhow::Result<()> {
                             .join("cloud");
                         let _ = std::fs::create_dir_all(&key_dir);
                         let key_path = key_dir.join("id_ed25519");
-                        let key_file = harmoniis_wallet::miner::cloud::ssh::write_temp_key_file(&ssh_key)?;
+                        let key_file =
+                            harmoniis_wallet::miner::cloud::ssh::write_temp_key_file(&ssh_key)?;
                         let _ = std::fs::copy(&key_file, &key_path);
                         #[cfg(unix)]
                         {
@@ -4269,7 +4265,8 @@ async fn main() -> anyhow::Result<()> {
                         if pending > 0 {
                             println!();
                             println!("{pending} uncollected solutions found — starting collect daemon...");
-                            let exe = std::env::current_exe().context("cannot find own executable")?;
+                            let exe =
+                                std::env::current_exe().context("cannot find own executable")?;
                             match std::process::Command::new(exe)
                                 .args(["webminer", "collect"])
                                 .stdin(std::process::Stdio::null())
@@ -4277,7 +4274,9 @@ async fn main() -> anyhow::Result<()> {
                                 .stderr(std::process::Stdio::null())
                                 .spawn()
                             {
-                                Ok(child) => println!("Collect daemon started (PID {}).", child.id()),
+                                Ok(child) => {
+                                    println!("Collect daemon started (PID {}).", child.id())
+                                }
                                 Err(e) => eprintln!("Warning: failed to start collect daemon: {e}"),
                             }
                         }
