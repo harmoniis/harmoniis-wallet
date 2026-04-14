@@ -131,8 +131,9 @@ impl MinerBackend for MultiGpuMiner {
     }
 
     fn recommended_pipeline_depth(&self) -> usize {
-        // Match CUDA: 32 work units per GPU. Keeps GPUs busy longer and
-        // amortizes per-cycle CPU overhead (work unit creation, dispatch).
+        // 32 work units per GPU — matches wgpu MAX_BATCH (32 pre-allocated
+        // buffer slots) and CUDA's multiplier. Keeps GPU busy longer and
+        // amortizes per-cycle CPU overhead.
         (self.miners.len() * 32).max(1)
     }
 

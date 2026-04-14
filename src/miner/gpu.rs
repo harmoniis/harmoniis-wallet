@@ -271,8 +271,8 @@ pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     ok
 }
 
-/// Maximum work units batched per GPU in a single submit (matches CUDA MAX_BATCH).
-const MAX_BATCH: usize = 8;
+/// Maximum work units batched per GPU in a single submit (matches CUDA).
+const MAX_BATCH: usize = 64;
 
 /// One slot = one concurrent dispatch with its own input/result/staging/bind_group.
 struct BatchSlot {
