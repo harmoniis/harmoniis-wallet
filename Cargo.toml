@@ -34,6 +34,9 @@ default = ["bundled-sqlite", "gpu", "cuda"]
 bundled-sqlite = ["rusqlite/bundled"]
 gpu = ["dep:wgpu"]
 cuda = ["dep:cudarc"]
+# Vendor OpenSSL from source for cross-compilation targets (Android)
+# that lack system OpenSSL. iOS uses Security.framework via native-tls.
+vendored-openssl = ["openssl/vendored"]
 
 # DORMANT — Phase 3 security tokens (ContractBasket, Bond, RevenueShare).
 # Do NOT enable in production. Dependency order:
@@ -93,6 +96,9 @@ ark-client    = "0.8.0"
 ark-bdk-wallet = "0.8.0"
 ark-core      = "0.8.0"
 ark-grpc      = "0.8.0"
+
+# OpenSSL (only needed when vendored-openssl feature is on for Android cross-compile)
+openssl       = { version = "0.10", optional = true }
 rustls        = { version = "0.23", features = ["ring"] }
 
 # Actix actors (optional, for backend integration)

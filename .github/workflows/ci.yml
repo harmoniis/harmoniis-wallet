@@ -174,23 +174,23 @@ jobs:
             platform: ios-aarch64-sim
             features: bundled-sqlite
             lib_only: true
-          # ── Android — library only (SDK use) ──
+          # ── Android — library only (SDK use), vendored OpenSSL ──
           - os: ubuntu-latest
             target: aarch64-linux-android
             platform: android-aarch64
-            features: bundled-sqlite
+            features: bundled-sqlite,vendored-openssl
             lib_only: true
             android: true
           - os: ubuntu-latest
             target: armv7-linux-androideabi
             platform: android-armv7
-            features: bundled-sqlite
+            features: bundled-sqlite,vendored-openssl
             lib_only: true
             android: true
           - os: ubuntu-latest
             target: x86_64-linux-android
             platform: android-x86_64
-            features: bundled-sqlite
+            features: bundled-sqlite,vendored-openssl
             lib_only: true
             android: true
     steps:
