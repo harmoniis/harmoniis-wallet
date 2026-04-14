@@ -44,3 +44,4 @@ bench_results/
 .envrc
 *.log
 *.crate
+src/.DS_Store
