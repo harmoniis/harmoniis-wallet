@@ -28,6 +28,8 @@ pub mod stats;
 pub mod work_unit;
 
 use async_trait::async_trait;
+#[cfg(all(feature = "gpu", target_os = "windows"))]
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -276,11 +278,23 @@ fn cuda_device_count() -> usize {
 pub enum DeviceKind {
     #[cfg(feature = "cuda")]
     Cuda { ordinal: usize },
-    /// One physical GPU on the chosen backend. No grouping — one adapter
-    /// = one device. Backend is selected once at startup (best of Vulkan,
-    /// DX12, Metal).
+    /// One physical GPU on the chosen backend. `adapter_index` is the
+    /// position in `EnumeratedDevices::wgpu_adapters` — used to consume
+    /// the adapter handle without re-enumerating.
     #[cfg(feature = "gpu")]
-    Wgpu { adapter: gpu::AdapterIdentity },
+    Wgpu {
+        adapter: gpu::AdapterIdentity,
+        adapter_index: usize,
+    },
+}
+
+/// Result of `enumerate_all_devices()`.  Carries adapter handles alongside
+/// device metadata so callers can consume adapters directly without
+/// re-enumerating (eliminates identity-matching bugs on DX12).
+pub struct EnumeratedDevices {
+    pub devices: Vec<DeviceInfo>,
+    #[cfg(feature = "gpu")]
+    pub wgpu_adapters: Vec<wgpu::Adapter>,
 }
 
 /// One entry in the device list = one physical GPU.
@@ -294,12 +308,14 @@ pub struct DeviceInfo {
 /// Enumerate all physical GPU devices across all backends.
 ///
 /// CUDA: one ordinal = one physical GPU.
-/// wgpu: pick the single best backend (Vulkan or DX12 or Metal),
-/// then each adapter on that backend = one physical GPU.
-/// No grouping, no deduplication, no PCI bus ID matching.
+/// wgpu: pick the single best backend (DX12 on Windows, Metal on macOS,
+/// Vulkan on Linux), then each adapter on that backend = one physical GPU.
+///
+/// Adapter handles are returned in `EnumeratedDevices::wgpu_adapters` so
+/// callers can consume them directly without re-enumerating.
 ///
 /// Order: CUDA devices first, then wgpu devices.
-pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
+pub async fn enumerate_all_devices() -> EnumeratedDevices {
     let mut devices = Vec::new();
     #[allow(unused_mut, unused_variables)]
     let mut next_id = 0usize;
@@ -323,21 +339,97 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
     }
 
     // 2. wgpu — one backend per platform, each adapter = one physical GPU.
+    //
+    // On Windows DX12: wgpu-hal's get_adapter_pci_info() matches SetupDi by
+    // vendor+device and returns the FIRST hit, so identical GPUs all report
+    // the same PCI bus ID.  DXGI EnumAdapters1 can also return duplicates or
+    // collapse identical headless cards.  When duplicate PCI bus IDs are
+    // detected, we probe Vulkan for the true physical GPU topology and either
+    // trim DX12 duplicates or add Vulkan adapters for headless GPUs that DX12
+    // cannot see.
     #[cfg(feature = "gpu")]
-    {
+    let wgpu_adapters = {
         let backend = gpu::platform_backend();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: backend,
             ..Default::default()
         });
-        let adapters = instance.enumerate_adapters(backend).await;
+        let raw = instance.enumerate_adapters(backend).await;
+        #[allow(unused_mut)]
+        let mut adapters: Vec<wgpu::Adapter> = raw
+            .into_iter()
+            .filter(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+            .collect();
 
+        // --- Windows DX12: cross-reference with Vulkan probe ---
+        #[cfg(target_os = "windows")]
+        {
+            let dx_buses: Vec<String> = adapters
+                .iter()
+                .map(|a| a.get_info().device_pci_bus_id.trim().to_string())
+                .collect();
+            let unique_buses: HashSet<&str> =
+                dx_buses.iter().map(|s| s.as_str()).collect();
+            let has_dup_buses = unique_buses.len() < dx_buses.len() && adapters.len() > 1;
+
+            if has_dup_buses || adapters.is_empty() {
+                // DX12 returned duplicate PCI bus IDs (impossible for distinct
+                // physical GPUs) or found no adapters.  Ask Vulkan for truth.
+                if let Some(vk_adapters) = gpu::enumerate_vulkan_gpus().await {
+                    let vk_count = vk_adapters.len();
+                    let dx_count = adapters.len();
+
+                    if dx_count > vk_count {
+                        // More DX12 adapters than physical GPUs → duplicates.
+                        eprintln!(
+                            "GPU: DX12 enumerated {} adapters but Vulkan found {} physical \
+                             GPUs — trimming DX12 duplicates",
+                            dx_count, vk_count,
+                        );
+                        adapters.truncate(vk_count);
+                    } else if dx_count < vk_count {
+                        // DX12 missed headless GPUs. Add Vulkan adapters for them.
+                        eprintln!(
+                            "GPU: DX12 found {} adapters, Vulkan found {} physical GPUs — \
+                             adding {} headless via Vulkan",
+                            dx_count, vk_count, vk_count - dx_count,
+                        );
+                        let dx_bus_set: HashSet<String> = adapters
+                            .iter()
+                            .map(|a| a.get_info().device_pci_bus_id.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        for vk_a in vk_adapters {
+                            let bus = vk_a.get_info().device_pci_bus_id.trim().to_string();
+                            if !bus.is_empty() && !dx_bus_set.contains(&bus) {
+                                adapters.push(vk_a);
+                                if adapters.len() >= vk_count {
+                                    break;
+                                }
+                            }
+                        }
+                    } else if has_dup_buses {
+                        // Same count but DX12 has duplicate bus IDs.  The DX12
+                        // adapters are likely N copies of one GPU while Vulkan
+                        // found N distinct GPUs.  Replace with Vulkan adapters
+                        // which are guaranteed unique (VK_EXT_pci_bus_info).
+                        eprintln!(
+                            "GPU: DX12 adapters share PCI bus IDs (wgpu-hal SetupDi \
+                             first-match bug) — switching to Vulkan adapters for \
+                             reliable multi-GPU ({} devices)",
+                            vk_count,
+                        );
+                        adapters = vk_adapters;
+                    }
+                }
+            }
+        }
+
+        let mut kept = Vec::new();
         for adapter in adapters {
             let info = adapter.get_info();
-            if info.device_type == wgpu::DeviceType::Cpu {
-                continue;
-            }
             let identity = gpu::AdapterIdentity::from_info(&info);
+            let adapter_index = kept.len();
             eprintln!(
                 "GPU:   [{}] {} ({}) pci_bus={}",
                 next_id,
@@ -352,37 +444,50 @@ pub async fn enumerate_all_devices() -> Vec<DeviceInfo> {
             devices.push(DeviceInfo {
                 id: next_id,
                 label: identity.name.clone(),
-                kind: DeviceKind::Wgpu { adapter: identity },
+                kind: DeviceKind::Wgpu {
+                    adapter: identity,
+                    adapter_index,
+                },
             });
+            kept.push(adapter);
             next_id += 1;
         }
-    }
+        kept
+    };
 
-    devices
+    EnumeratedDevices {
+        devices,
+        #[cfg(feature = "gpu")]
+        wgpu_adapters,
+    }
 }
 
 /// Create a mining backend for specific GPU device IDs.
+///
+/// Adapters are consumed from `EnumeratedDevices` by index — no
+/// re-enumeration needed.
 pub async fn select_backend_for_devices(
     device_ids: &[usize],
 ) -> anyhow::Result<Box<dyn MinerBackend>> {
-    let all = enumerate_all_devices().await;
+    let enumerated = enumerate_all_devices().await;
 
     #[cfg(feature = "gpu")]
-    let mut available = {
-        let backend = gpu::platform_backend();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: backend,
-            ..Default::default()
-        });
-        instance.enumerate_adapters(backend).await
-    };
+    let mut adapter_slots: Vec<Option<wgpu::Adapter>> = enumerated
+        .wgpu_adapters
+        .into_iter()
+        .map(Some)
+        .collect();
 
     let mut backends: Vec<Arc<dyn MinerBackend>> = Vec::new();
 
     for &id in device_ids {
-        let dev = all.iter().find(|d| d.id == id).ok_or_else(|| {
-            anyhow::anyhow!("device {id} not found (run `webminer list-devices`)")
-        })?;
+        let dev = enumerated
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("device {id} not found (run `webminer list-devices`)")
+            })?;
 
         #[allow(unreachable_code, unused_variables)]
         let backend: Option<Arc<dyn MinerBackend>> = match &dev.kind {
@@ -392,12 +497,11 @@ pub async fn select_backend_for_devices(
                 m.map(|m| Arc::new(m) as Arc<dyn MinerBackend>)
             }
             #[cfg(feature = "gpu")]
-            DeviceKind::Wgpu { adapter: identity } => {
-                let pos = available
-                    .iter()
-                    .position(|a| identity.matches(&a.get_info()));
-                if let Some(idx) = pos {
-                    let adapter = available.swap_remove(idx);
+            DeviceKind::Wgpu { adapter_index, .. } => {
+                if let Some(adapter) = adapter_slots
+                    .get_mut(*adapter_index)
+                    .and_then(|slot| slot.take())
+                {
                     if let Some(m) = gpu::GpuMiner::try_from_adapter(adapter).await {
                         println!("Device {id}: {}", dev.label);
                         backends.push(Arc::new(m) as _);
@@ -428,15 +532,17 @@ pub async fn select_backend_for_devices(
     Ok(Box::new(composite::CompositeBackend::new(backends).await))
 }
 
-/// Initialize wgpu GPU miners — one adapter per device, no grouping.
+/// Initialize wgpu GPU miners from enumerated devices.
 ///
-/// Each device from `enumerate_all_devices` has exactly one adapter on
-/// the platform's native backend. Enumerate that backend's adapters once,
-/// match each device to its adapter, create a miner.
+/// Adapters are consumed directly from `EnumeratedDevices::wgpu_adapters`
+/// by index — no re-enumeration, no identity matching.  This eliminates
+/// the DX12 bug where identity matching via duplicate PCI bus IDs would
+/// map N device entries to the same physical GPU.
 #[cfg(feature = "gpu")]
 pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
-    let devices = enumerate_all_devices().await;
-    let wgpu_devices: Vec<&DeviceInfo> = devices
+    let enumerated = enumerate_all_devices().await;
+    let wgpu_devices: Vec<&DeviceInfo> = enumerated
+        .devices
         .iter()
         .filter(|d| matches!(&d.kind, DeviceKind::Wgpu { .. }))
         .collect();
@@ -446,22 +552,20 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     }
     eprintln!("GPU: {} device(s) found", wgpu_devices.len());
 
-    // Enumerate adapters from the platform backend ONCE.
-    let backend = gpu::platform_backend();
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: backend,
-        ..Default::default()
-    });
-    let mut available: Vec<wgpu::Adapter> = instance.enumerate_adapters(backend).await;
+    // Convert to Option slots so we can take() individual adapters by index.
+    let mut adapter_slots: Vec<Option<wgpu::Adapter>> = enumerated
+        .wgpu_adapters
+        .into_iter()
+        .map(Some)
+        .collect();
 
     let mut miners = Vec::new();
     for dev in &wgpu_devices {
-        if let DeviceKind::Wgpu { adapter: identity } = &dev.kind {
-            let pos = available
-                .iter()
-                .position(|a| identity.matches(&a.get_info()));
-            if let Some(idx) = pos {
-                let adapter = available.swap_remove(idx);
+        if let DeviceKind::Wgpu { adapter_index, .. } = &dev.kind {
+            if let Some(adapter) = adapter_slots
+                .get_mut(*adapter_index)
+                .and_then(|slot| slot.take())
+            {
                 if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
                     eprintln!("GPU[{}]: {} ready", dev.id, dev.label);
                     miners.push(miner);
@@ -469,7 +573,7 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
                     eprintln!("GPU[{}]: {} — device init failed", dev.id, dev.label);
                 }
             } else {
-                eprintln!("GPU[{}]: {} — adapter not found", dev.id, dev.label);
+                eprintln!("GPU[{}]: {} — adapter already consumed", dev.id, dev.label);
             }
         }
     }

@@ -514,42 +514,26 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Each client = own TCP connection. Server sees N independent miners,
     // processes them in parallel. N scales with GPU count.
     // Override with HRMW_REPORTER_CLIENTS env var.
-    let gpu_count = backend.recommended_pipeline_depth() / 32;
-    let gpu_count = gpu_count.max(1);
-    let auto_clients = (gpu_count + 2).clamp(3, 8);
-    let num_clients: usize = std::env::var("HRMW_REPORTER_CLIENTS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(auto_clients);
+    // Single reporter client — the webcash.org server processes mining reports
+    // sequentially (~6s each, single-threaded Tornado). Multiple connections
+    // provide zero throughput benefit and add threads that steal CPU from mining.
+    let num_clients: usize = 1;
+    let reporter_client = Arc::new(
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("failed to build blocking HTTP client"),
+    );
 
-    // Create N separate blocking HTTP clients EAGERLY (before mining starts).
-    // Each has its own connection pool = own TCP connection to server.
-    let clients: Vec<Arc<reqwest::blocking::Client>> = (0..num_clients)
-        .map(|_| {
-            Arc::new(
-                reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
-                    .build()
-                    .expect("failed to build blocking HTTP client"),
-            )
-        })
-        .collect();
-    println!("  reporter_clients={num_clients} (created eagerly in main process)");
-
-    // Pre-warm connections: GET /api/v1/target through each client to force TCP+TLS handshake.
-    // The first real mining_report will reuse the warm connection via HTTP/1.1 keep-alive.
-    println!("  Pre-warming {num_clients} connections...");
-    for (i, client) in clients.iter().enumerate() {
+    // Pre-warm: establish TCP+TLS connection before mining starts.
+    {
         let url = format!("{}/api/v1/target", config.server_url);
-        match client.get(&url).send() {
-            Ok(_) => eprintln!("[client-{i}] connection warm"),
-            Err(e) => eprintln!("[client-{i}] warmup failed: {e}"),
+        match reporter_client.get(&url).send() {
+            Ok(_) => eprintln!("[reporter] connection warm"),
+            Err(e) => eprintln!("[reporter] warmup failed: {e}"),
         }
     }
 
-    // Shared work-stealing queue — any free client thread takes the next solution.
-    // This eliminates head-of-line blocking: if one client is slow (timeout), the
-    // others continue processing instead of solutions piling up behind the slow one.
     struct SolutionMsg {
         preimage: String,
         hash: [u8; 32],
@@ -557,9 +541,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         difficulty_achieved: u32,
     }
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionMsg>();
-    let shared_rx = Arc::new(std::sync::Mutex::new(solution_rx));
     let queue_depth = Arc::new(AtomicUsize::new(0));
-    let mut submitter_handles = Vec::with_capacity(num_clients);
 
     // Background wallet insertion thread — accepts keep secrets from reporters
     // and inserts them into the webcash wallet via the /replace endpoint.
@@ -602,33 +584,27 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             .expect("failed to spawn wallet thread")
     };
 
-    for c in 0..num_clients {
-        let client = clients[c].clone();
+    let reporter_handle = {
+        let client = reporter_client.clone();
         let server_url = config.server_url.clone();
         let sub_tracker = tracker.clone();
         let sub_pending_keep = pending_keep_path.clone();
         let sub_shared_target = shared_target.clone();
         let sub_wallet_tx = wallet_tx.clone();
-        let thread_rx = shared_rx.clone();
-        let thread_queue_depth = queue_depth.clone();
+        let sub_queue_depth = queue_depth.clone();
 
-
-        let handle = std::thread::Builder::new()
-            .name(format!("client-{c}"))
+        std::thread::Builder::new()
+            .name("reporter".into())
             .spawn(move || {
-                eprintln!("[client-{c}] started");
-                loop {
-                    let msg = match thread_rx.lock().unwrap().recv() {
-                        Ok(m) => m,
-                        Err(_) => break,
-                    };
-                    thread_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                eprintln!("[reporter] started");
+                while let Ok(msg) = solution_rx.recv() {
+                    sub_queue_depth.fetch_sub(1, Ordering::Relaxed);
 
                     {
                         let current_diff = sub_shared_target.read().unwrap().difficulty;
                         if msg.difficulty_achieved < current_diff {
                             eprintln!(
-                                "[client-{c}] skipping stale (diff {} < {})",
+                                "[reporter] skipping stale (diff {} < {})",
                                 msg.difficulty_achieved, current_diff
                             );
                             continue;
@@ -645,7 +621,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         Ok(resp) => {
                             let ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
-                            eprintln!("[client-{c}] accepted in {ms}ms");
+                            eprintln!("[reporter] accepted in {ms}ms");
 
                             if let Some(new_diff) = resp.difficulty_target {
                                 let mut t = sub_shared_target.write().unwrap();
@@ -668,7 +644,6 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     writeln!(f, "{}", msg.keep_secret)
                                 });
 
-                            // Send to background wallet insertion thread (non-blocking).
                             let _ = sub_wallet_tx.send(msg.keep_secret.clone());
                         }
                         Err(e) => {
@@ -685,7 +660,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                     });
                                 let _ = sub_wallet_tx.send(msg.keep_secret.clone());
                             } else {
-                                eprintln!("[client-{c}] FAILED in {ms}ms: {err}");
+                                eprintln!("[reporter] FAILED in {ms}ms: {err}");
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -705,11 +680,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         }
                     }
                 }
-                eprintln!("[client-{c}] exiting");
+                eprintln!("[reporter] exiting");
             })
-            .expect("failed to spawn client thread");
-        submitter_handles.push(handle);
-    }
+            .expect("failed to spawn reporter thread")
+    };
     // Background target refresher — polls server every 15s without ever
     // blocking the mining loop. Updates are picked up atomically next cycle.
     {
@@ -897,9 +871,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // solutions, then join all threads. Monitor drain progress every second.
     let pending = queue_depth.load(Ordering::Relaxed);
     let snapshot = tracker.snapshot();
-    println!(
-        "Miner shutting down — draining {pending} pending solutions across {num_clients} reporters..."
-    );
+    println!("Miner shutting down — draining {pending} pending solutions...");
     println!(
         "  Session totals: found={} accepted={} pending={}",
         snapshot.solutions_found, snapshot.solutions_accepted, pending
@@ -925,9 +897,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
 
-    for handle in submitter_handles {
-        let _ = handle.join();
-    }
+    let _ = reporter_handle.join();
     let drain_secs = drain_start.elapsed().as_secs();
     let final_snap = tracker.snapshot();
     println!(

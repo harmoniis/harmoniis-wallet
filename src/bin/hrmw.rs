@@ -3902,7 +3902,8 @@ async fn main() -> anyhow::Result<()> {
 
         // ── webminer ────────────────────────────────────────────────────────────
         Cmd::Webminer(WebminerCmd::ListDevices) => {
-            let devices = harmoniis_wallet::miner::enumerate_all_devices().await;
+            let enumerated = harmoniis_wallet::miner::enumerate_all_devices().await;
+            let devices = enumerated.devices;
             if devices.is_empty() {
                 println!("No mining devices found.");
             } else {

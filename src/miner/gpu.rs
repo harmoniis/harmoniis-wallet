@@ -44,6 +44,38 @@ pub fn platform_backend() -> wgpu::Backends {
     }
 }
 
+/// Enumerate Vulkan adapters on Windows to detect the true physical GPU
+/// topology.  DX12/DXGI has two known bugs with identical GPUs:
+///
+///   1. `get_adapter_pci_info()` in wgpu-hal matches SetupDi by vendor+device
+///      and returns the FIRST hit — so all identical cards share one PCI bus ID.
+///   2. `EnumAdapters1` can return the same adapter multiple times or collapse
+///      identical headless cards into one "linked adapter".
+///
+/// Vulkan's `VK_EXT_pci_bus_info` provides a unique PCI bus address per PCIe
+/// slot and `vkEnumeratePhysicalDevices` sees all GPUs regardless of monitors.
+///
+/// Returns `None` if Vulkan is unavailable (no driver) — caller falls back to
+/// DX12 as-is, no regression.
+#[cfg(target_os = "windows")]
+pub async fn enumerate_vulkan_gpus() -> Option<Vec<wgpu::Adapter>> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    let adapters: Vec<wgpu::Adapter> = instance
+        .enumerate_adapters(wgpu::Backends::VULKAN)
+        .await
+        .into_iter()
+        .filter(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+        .collect();
+    if adapters.is_empty() {
+        None
+    } else {
+        Some(adapters)
+    }
+}
+
 /// Identity of a physical GPU adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AdapterIdentity {
