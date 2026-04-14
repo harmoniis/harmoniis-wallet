@@ -38,12 +38,13 @@ impl Offer {
     /// bandwidth-limited on newer GPUs (Ampere/Ada). Effective hashrate
     /// is min(compute_ceiling, bandwidth_ceiling).
     ///
-    /// Calibrated from measured data (2026-04-14):
-    ///   RTX 4090 (Ada):    81 TF, 900 GB/s → 10.5 GH/s (BW-limited)
-    ///   RTX 4070 (Ada):    29 TF, 440 GB/s →  5.9 GH/s (BW-limited)
-    ///   Titan Xp (Pascal): 12 TF, 547 GB/s →  3.3 GH/s (compute-limited)
-    const GHS_PER_TFLOP: f64 = 0.275; // compute ceiling
-    const GHS_PER_MEM_BW: f64 = 0.012; // bandwidth ceiling
+    /// Calibrated from measured data (2026-04-14, latest optimized build):
+    ///   RTX 4090 (Ada):       81 TF, 898 GB/s → 14.5 GH/s (BW-limited)
+    ///   RTX 4070 (Ada):       29 TF, 440 GB/s →  5.9 GH/s (BW-limited)
+    ///   Titan X Pascal:       12 TF, 338 GB/s →  3.2 GH/s (compute-limited)
+    ///   2x Titan Xp (Pascal): 24 TF, 411 GB/s →  6.0 GH/s (compute-limited)
+    const GHS_PER_TFLOP: f64 = 0.267; // compute ceiling (3.2 / 12.0)
+    const GHS_PER_MEM_BW: f64 = 0.016; // bandwidth ceiling (14.5 / 898)
 
     /// Estimated SHA256 hash rate — min(compute, bandwidth) per GPU × num_gpus.
     pub fn estimated_hashrate_ghs(&self) -> f64 {
