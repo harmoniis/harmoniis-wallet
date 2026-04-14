@@ -9,6 +9,51 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.55] — 2026-04-14
+
+### Added
+
+- **iOS and Android library targets**: `aarch64-apple-ios`, `aarch64-apple-ios-sim`,
+  `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`.
+  Built as static/dynamic libraries for SDK integration.
+- **Difficulty-aware cloud instance selection**: Offers that exceed server
+  reporting capacity at the current difficulty are filtered out and rejected.
+  Prevents renting GPUs that would lose solutions.
+- **Background wallet insertion thread**: Keep secrets are inserted into the
+  webcash wallet on a separate OS thread immediately after each mining report,
+  without blocking the reporter pipeline.
+- **Drain-before-shutdown**: Monitored drain with progress display and 600s
+  timeout. Wallet insertion completes before exit.
+- **Queue depth monitoring**: `pending=N` in periodic stats line. Warns when
+  reporters fall behind.
+
+### Changed
+
+- **Single reporter thread**: Server processes reports sequentially (~6s each).
+  Multiple clients provided zero throughput and wasted CPU. Now 1 reporter + 1
+  wallet thread = 3 OS threads total (was 6-16).
+- **wgpu MAX_BATCH 8→64, pipeline_depth 4→32**: +50% mining speed on wgpu
+  (390→587 MH/s on AMD RX 580). Matches CUDA batch size.
+- **Roofline hashrate estimation**: `min(TFLOPS × 0.267, mem_bw × 0.016)` GH/s
+  per GPU. Generic formula — works across Pascal, Ampere, Ada without per-GPU
+  hardcoding. Correctly estimates RTX 4090 (14.4 vs 14.5 actual), Titan X
+  Pascal (3.2 vs 3.2 actual).
+- **Lazy wallet runtime**: Tokio runtime for wallet insertion only created when
+  first solution is accepted. Zero overhead during pure mining.
+- **Webcash pricing (backend)**: Updated to roofline model with server reporting
+  cap (600 solutions/hr max). Overcapacity offers filtered from pricing average.
+- Upgraded webylib 0.1→0.2 (fixes iOS compilation).
+- Branding: "marketplace for agents and robots" (not "decentralised marketplace").
+
+### Fixed
+
+- Cloud stop: waits up to 10 min for solution drain before destroying instance.
+- Stale `pending_solutions.log` cleared after drain (prevents "Bad timestamp"
+  errors on collect).
+- UNIQUE constraint on wallet insert handled gracefully (skip, don't error).
+- Removed broken `collect --watch` from cloud start (wallet insertion is built-in).
+- SSH wait increased to 5 min for slow CUDA Docker boot on vast.ai.
+
 ## [0.2.0] — 2026-03-29
 
 ### Changed
@@ -395,7 +440,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.55...HEAD
+[0.1.55]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.54...v0.1.55
 [0.2.0]: https://github.com/harmoniis/harmoniis-wallet/compare/v0.1.39...v0.2.0
 [0.1.39]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.39
 [0.1.12]: https://github.com/harmoniis/harmoniis-wallet/releases/tag/v0.1.12
