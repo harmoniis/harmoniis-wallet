@@ -34,16 +34,23 @@ impl Offer {
         self.total_flops
     }
 
-    /// Calibrated from measured mining data (2026-04-14):
-    ///   RTX 4090: gpu_mem_bw ~890 GB/s → 10.5 GH/s → 0.0118
-    ///   RTX 4070: gpu_mem_bw ~440 GB/s → 5.9  GH/s → 0.0134
-    /// SHA256 mining is memory-bandwidth-limited, not FP32-limited.
-    /// TFLOPS underestimates smaller GPUs by ~64%.
-    const GHS_PER_MEM_BW: f64 = 0.012;
+    /// SHA256 mining is compute-limited on older GPUs (Pascal) and
+    /// bandwidth-limited on newer GPUs (Ampere/Ada). Effective hashrate
+    /// is min(compute_ceiling, bandwidth_ceiling).
+    ///
+    /// Calibrated from measured data (2026-04-14):
+    ///   RTX 4090 (Ada):    81 TF, 900 GB/s → 10.5 GH/s (BW-limited)
+    ///   RTX 4070 (Ada):    29 TF, 440 GB/s →  5.9 GH/s (BW-limited)
+    ///   Titan Xp (Pascal): 12 TF, 547 GB/s →  3.3 GH/s (compute-limited)
+    const GHS_PER_TFLOP: f64 = 0.275; // compute ceiling
+    const GHS_PER_MEM_BW: f64 = 0.012; // bandwidth ceiling
 
-    /// Estimated SHA256 mining hash rate in GH/s from GPU memory bandwidth.
+    /// Estimated SHA256 hash rate — min(compute, bandwidth) per GPU × num_gpus.
     pub fn estimated_hashrate_ghs(&self) -> f64 {
-        self.gpu_mem_bw * self.num_gpus as f64 * Self::GHS_PER_MEM_BW
+        let per_gpu_compute = self.total_flops / self.num_gpus.max(1) as f64 * Self::GHS_PER_TFLOP;
+        let per_gpu_bw = self.gpu_mem_bw * Self::GHS_PER_MEM_BW;
+        let per_gpu = per_gpu_compute.min(per_gpu_bw);
+        per_gpu * self.num_gpus as f64
     }
 
     /// Webcash.org processes mining reports sequentially at ~6s each

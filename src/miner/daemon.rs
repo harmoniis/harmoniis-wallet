@@ -557,23 +557,22 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         std::thread::Builder::new()
             .name("wallet-insert".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("[wallet] runtime failed: {e}");
-                        return;
-                    }
-                };
+                // Wait for first keep — no runtime, no I/O polling, zero CPU.
+                // This ensures pure mining has zero extra thread overhead.
+                let mut rt: Option<tokio::runtime::Runtime> = None;
                 while let Ok(keep_secret) = wallet_rx.recv() {
+                    // Lazy-init runtime on first actual insert.
+                    let rt = rt.get_or_insert_with(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("wallet runtime")
+                    });
                     if let Ok(secret) = webylib::SecretWebcash::parse(&keep_secret) {
-                        let result = rt.block_on(async {
+                        match rt.block_on(async {
                             let wallet = webylib::Wallet::open(&wallet_path).await?;
                             wallet.insert(secret).await
-                        });
-                        match result {
+                        }) {
                             Ok(_) => {
                                 let n = inserted.fetch_add(1, Ordering::Relaxed) + 1;
                                 eprintln!("[wallet] inserted #{n}");
