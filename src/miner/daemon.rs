@@ -551,22 +551,17 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // one insert at a time, does not block the reporter thread.
     let (wallet_tx, wallet_rx) = std::sync::mpsc::channel::<String>();
     let wallet_inserted = Arc::new(AtomicUsize::new(0));
+    // Wallet insertion on separate OS thread with its OWN HTTP client.
+    // /replace and /mining_report are different server endpoints — they
+    // don't share a bottleneck. Both run in parallel, independently.
     let wallet_thread = {
         let wallet_path = config.webcash_wallet_path.clone();
         let inserted = wallet_inserted.clone();
-        let wallet_queue_depth = queue_depth.clone();
         std::thread::Builder::new()
             .name("wallet-insert".into())
             .spawn(move || {
                 let mut rt: Option<tokio::runtime::Runtime> = None;
                 while let Ok(keep_secret) = wallet_rx.recv() {
-                    // Yield to reporter: /replace and /mining_report share the
-                    // same single-threaded server. If solutions are pending,
-                    // the reporter needs 100% of server bandwidth. Only insert
-                    // when the reporter is idle (queue empty).
-                    while wallet_queue_depth.load(Ordering::Relaxed) > 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    }
                     let rt = rt.get_or_insert_with(|| {
                         tokio::runtime::Builder::new_current_thread()
                             .enable_all()
