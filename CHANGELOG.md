@@ -9,6 +9,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.57] — 2026-04-15
+
+### Changed
+
+- **Naming (webcash)**: Prefer **secret** / **secret webcash string** over “token”
+  for bearer `e…:secret:…` values. `extract_webcash_token` is replaced by
+  `extract_webcash_secret` (library + CLI). Payment CLI output label updated.
+- **Internal**: `rail_token` identifiers in the paid-request engine renamed to
+  `rail_key` (payment rail label, not webcash).
+- **Metadata helpers**: `normalize_token` renamed to `normalize_metadata_tag` in
+  CLI support (category/location tags, unrelated to webcash).
+
 ## [0.1.55] — 2026-04-14
 
 ### Added

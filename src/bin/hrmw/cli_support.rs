@@ -698,18 +698,8 @@ pub fn labeled_wallet_display_path(
     resolve_labeled_db_path(master_wallet_path, family, label)
 }
 
-pub fn extract_webcash_token(payment_output: &str) -> anyhow::Result<String> {
-    let trimmed = payment_output.trim();
-    if trimmed.starts_with('e') && trimmed.contains(":secret:") {
-        return Ok(trimmed.to_string());
-    }
-    if let Some((_, right)) = trimmed.rsplit_once("recipient:") {
-        let token = right.trim();
-        if token.starts_with('e') && token.contains(":secret:") {
-            return Ok(token.to_string());
-        }
-    }
-    anyhow::bail!("failed to extract webcash token from payment output: {trimmed}");
+pub fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {
+    harmoniis_wallet::wallet::webcash::extract_webcash_secret(payment_output)
 }
 
 pub async fn pay_from_wallet(
@@ -725,7 +715,7 @@ pub async fn pay_from_wallet(
         .pay(parsed_amount, memo)
         .await
         .with_context(|| format!("failed to create wallet payment for {memo}"))?;
-    extract_webcash_token(&payment_output)
+    extract_webcash_secret(&payment_output)
 }
 
 pub async fn pay_voucher_from_wallet(
@@ -770,7 +760,7 @@ pub fn parse_keywords_csv(input: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn normalize_token(input: Option<String>) -> Option<String> {
+fn normalize_metadata_tag(input: Option<String>) -> Option<String> {
     input
         .map(|v| v.trim().to_lowercase())
         .filter(|v| !v.is_empty())
@@ -779,12 +769,12 @@ fn normalize_token(input: Option<String>) -> Option<String> {
 fn normalize_list(values: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     for value in values {
-        let token = value.trim().to_lowercase();
-        if token.is_empty() {
+        let tag = value.trim().to_lowercase();
+        if tag.is_empty() {
             continue;
         }
-        if !out.iter().any(|v| v == &token) {
-            out.push(token);
+        if !out.iter().any(|v| v == &tag) {
+            out.push(tag);
         }
     }
     out
@@ -865,19 +855,19 @@ pub fn build_activity_metadata(
     unit_label: Option<String>,
 ) -> anyhow::Result<Option<PostActivityMetadata>> {
     let mut meta = PostActivityMetadata::default();
-    meta.category = normalize_token(category);
-    meta.location = normalize_token(location);
-    meta.location_country = normalize_token(location_country);
+    meta.category = normalize_metadata_tag(category);
+    meta.location = normalize_metadata_tag(location);
+    meta.location_country = normalize_metadata_tag(location_country);
     meta.remote_ok = if remote_ok { Some(true) } else { None };
     meta.service_terms = normalize_list(service_terms);
     meta.tags = parse_keywords_csv(tags_csv.as_deref());
     meta.price_min = normalize_optional_decimal(price_min)?;
     meta.price_max = normalize_optional_decimal(price_max)?;
-    meta.currency = normalize_token(currency);
-    meta.billing_model = normalize_token(billing_model);
-    meta.billing_cycle = normalize_token(billing_cycle);
-    meta.invoice_rule = normalize_token(invoice_rule);
-    meta.unit_label = normalize_token(unit_label);
+    meta.currency = normalize_metadata_tag(currency);
+    meta.billing_model = normalize_metadata_tag(billing_model);
+    meta.billing_cycle = normalize_metadata_tag(billing_cycle);
+    meta.invoice_rule = normalize_metadata_tag(invoice_rule);
+    meta.unit_label = normalize_metadata_tag(unit_label);
     meta.intent = if post_type == "general" {
         None
     } else {

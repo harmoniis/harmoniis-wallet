@@ -135,10 +135,10 @@ pub async fn execute_paid_request(
     let service_origin = origin_string(&url);
     let endpoint_path = url.path().to_string();
     let method_upper = request.method.as_str().to_ascii_uppercase();
-    let rail_token = directive.rail_name.to_ascii_lowercase();
+    let rail_key = directive.rail_name.to_ascii_lowercase();
     let request_hash_value = request_hash(request);
 
-    if wallet.is_payment_blacklisted(&service_origin, &endpoint_path, &method_upper, &rail_token)? {
+    if wallet.is_payment_blacklisted(&service_origin, &endpoint_path, &method_upper, &rail_key)? {
         anyhow::bail!(
             "Refusing to pay {} {}{}: this service returned errors after consuming payment 3 times in the last 24 hours. Endpoint is blacklisted pending human attention.",
             method_upper,
@@ -151,7 +151,7 @@ pub async fn execute_paid_request(
         service_origin: &service_origin,
         endpoint_path: &endpoint_path,
         method: &method_upper,
-        rail: &rail_token,
+        rail: &rail_key,
         action_hint: &request.action_hint,
         required_amount: &directive.required_amount,
         payment_unit: &directive.payment_unit,
@@ -181,7 +181,7 @@ pub async fn execute_paid_request(
         contract_ref: None,
         invoice_ref: None,
         challenge_id: directive.challenge_id.as_deref(),
-        rail: &rail_token,
+        rail: &rail_key,
         payment_unit: &directive.payment_unit,
         quoted_amount: Some(&directive.required_amount),
         settled_amount: None,
@@ -196,7 +196,7 @@ pub async fn execute_paid_request(
         metadata_json: Some(&challenge_metadata),
     })?;
     let challenge_event_details = serde_json::json!({
-        "rail": &rail_token,
+        "rail": &rail_key,
         "required_amount": &directive.required_amount,
         "payment_unit": &directive.payment_unit,
         "response_code": &directive.response_code,
@@ -400,13 +400,13 @@ async fn recover_or_log_loss(
     response_body: Option<&str>,
     service_base_url: &str,
 ) -> anyhow::Result<()> {
-    let rail_token = directive.rail_name.to_ascii_lowercase();
+    let rail_key = directive.rail_name.to_ascii_lowercase();
     let (proof_kind, proof_ref) = payment_transaction_proof(payment);
     match payment {
         AcquiredPayment::Webcash { header_value, .. } => {
             let webcash_wallet = resolve_webcash_wallet(wallet_path, wallet, None).await?;
             let secret = SecretWebcash::parse(header_value)
-                .map_err(|e| anyhow::anyhow!("invalid paid webcash token: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("invalid paid webcash secret: {e}"))?;
             match webcash_wallet.insert(secret).await {
                 Ok(()) => {
                     let recovered_details = serde_json::json!({
@@ -526,7 +526,7 @@ async fn recover_or_log_loss(
                         service_origin,
                         endpoint_path,
                         method_upper,
-                        &rail_token,
+                        &rail_key,
                         &directive.required_amount,
                         Some(payment.payment_reference()),
                         "post_payment_response_error",
@@ -660,7 +660,7 @@ async fn recover_or_log_loss(
                     service_origin,
                     endpoint_path,
                     method_upper,
-                    &rail_token,
+                    &rail_key,
                     &directive.required_amount,
                     Some(payment.payment_reference()),
                     "post_payment_response_error",
@@ -732,7 +732,7 @@ async fn recover_or_log_loss(
                 service_origin,
                 endpoint_path,
                 method_upper,
-                &rail_token,
+                &rail_key,
                 &directive.required_amount,
                 Some(payment.payment_reference()),
                 "post_payment_response_error",
@@ -810,13 +810,13 @@ async fn acquire_payment(
 ) -> anyhow::Result<AcquiredPayment> {
     match directive.rail {
         PaymentRail::Webcash => {
-            let token =
+            let webcash_secret =
                 pay_from_wallet(wallet_path, wallet, &directive.required_amount, action_hint)
                     .await?;
             Ok(AcquiredPayment::Webcash {
                 header_name: directive.header_name.clone(),
-                payment_reference: hashed_reference(&token),
-                header_value: token,
+                payment_reference: hashed_reference(&webcash_secret),
+                header_value: webcash_secret,
             })
         }
         PaymentRail::Voucher => {

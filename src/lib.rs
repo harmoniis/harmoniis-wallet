@@ -50,7 +50,8 @@ pub use wallet::{
 
 // Webcash types re-exported from webylib (single dependency for consumers).
 pub use wallet::webcash::{
-    Amount as WebcashAmount, PublicWebcash, SecretWebcash, WebcashServerClient, WebcashWallet,
+    extract_webcash_secret, Amount as WebcashAmount, PublicWebcash, SecretWebcash,
+    WebcashServerClient, WebcashWallet,
 };
 
 #[cfg(feature = "securities")]

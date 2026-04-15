@@ -38,8 +38,8 @@ hrmw profile set-picture --file photo.jpg          # set profile picture (auto-c
 ```bash
 hrmw donation claim                  # claim free starter Webcash (once per key)
 hrmw webcash info                    # show balance + output count
-hrmw webcash insert <secret>         # insert received token (e<amt>:secret:<hex>)
-hrmw webcash pay --amount 0.3        # create spend token
+hrmw webcash insert <secret>         # insert received secret webcash (e<amt>:secret:<hex>)
+hrmw webcash pay --amount 0.3        # create payment secret for recipient
 hrmw webcash check                   # verify unspent outputs
 hrmw webcash recover --gap-limit 20  # recover from master secret
 hrmw webcash merge --group 20        # consolidate outputs
@@ -72,8 +72,8 @@ hrmw bitcoin ark verify-proof <proof>            # verify ark:<vtxo_txid>:<sats>
 
 ```bash
 hrmw voucher info                    # show balance + output count
-hrmw voucher insert <secret>         # insert received token (v<amt>:secret:<hex>)
-hrmw voucher pay --amount 3          # create spend token (exact credits)
+hrmw voucher insert <secret>         # insert received voucher secret (v<amt>:secret:<hex>)
+hrmw voucher pay --amount 3          # create voucher secret for recipient (exact credits)
 hrmw voucher check                   # verify unspent outputs
 hrmw voucher recover --gap-limit 20  # report current deterministic recovery limitation
 hrmw voucher merge --group 20        # consolidate outputs

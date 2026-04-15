@@ -17,6 +17,7 @@ use harmoniis_wallet::{
         timeline::{PublishPostRequest, RegisterRequest},
         HarmoniisClient,
     },
+    extract_webcash_secret,
     types::{ContractStatus, ContractType, Role, WitnessSecret},
     wallet::RgbWallet,
     Contract,
@@ -52,23 +53,10 @@ fn required_amount_from_error(err: &harmoniis_wallet::error::Error) -> Option<St
     }
 }
 
-fn extract_webcash_token(payment_output: &str) -> String {
-    if payment_output.starts_with('e') && payment_output.contains(":secret:") {
-        return payment_output.to_string();
-    }
-    if let Some((_, right)) = payment_output.rsplit_once("recipient:") {
-        let token = right.trim();
-        if token.starts_with('e') && token.contains(":secret:") {
-            return token.to_string();
-        }
-    }
-    panic!("failed to parse webcash secret from output: {payment_output}");
-}
-
 async fn wallet_pay(wallet: &WebcashWallet, amount: &str, memo: &str) -> String {
     let parsed_amount = WebcashAmount::from_str(amount).expect("valid webcash amount");
     let payment_output = wallet.pay(parsed_amount, memo).await.expect("wallet pay");
-    extract_webcash_token(&payment_output)
+    extract_webcash_secret(&payment_output).expect("extract webcash secret from pay output")
 }
 
 #[tokio::test]

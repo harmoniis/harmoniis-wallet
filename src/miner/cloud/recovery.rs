@@ -2,7 +2,7 @@
 //!
 //! Extracted from the inline logic in the CLI handler. Each labeled wallet
 //! is recovered independently (deterministic secret scan), then its balance
-//! is transferred to the main wallet via webcash token.
+//! is transferred to the main wallet via a secret webcash string.
 
 use std::str::FromStr;
 
@@ -27,7 +27,7 @@ pub struct RecoverySummary {
 /// For each label:
 /// 1. Open the labeled webcash wallet (caller provides the opener)
 /// 2. Run `recover_from_wallet(50)` — deterministic secret scan
-/// 3. If balance > 0: pay full amount → extract token → insert into main
+/// 3. If balance > 0: pay full amount → extract secret string → insert into main
 ///
 /// The `open_wallet` closure takes a label and returns (labeled_wallet, main_wallet).
 /// This avoids pulling CLI-specific functions into the library.
@@ -68,10 +68,9 @@ where
                 .await
                 .context("failed to pay from mining wallet")?;
 
-            // Extract the webcash token from the payment output.
-            let token = extract_token(&payment)?;
-            let parsed = webylib::SecretWebcash::parse(&token)
-                .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+            let secret_str = crate::wallet::webcash::extract_webcash_secret(&payment)?;
+            let parsed = webylib::SecretWebcash::parse(&secret_str)
+                .map_err(|e| anyhow::anyhow!("bad webcash secret: {e}"))?;
 
             main_wc
                 .insert(parsed)
@@ -108,23 +107,3 @@ where
     })
 }
 
-/// Extract a webcash token from payment output string.
-fn extract_token(payment_output: &str) -> Result<String> {
-    let trimmed = payment_output.trim();
-    if trimmed.starts_with('e') && trimmed.contains(":secret:") {
-        return Ok(trimmed.to_string());
-    }
-    if let Some((_, right)) = trimmed.rsplit_once("recipient:") {
-        let token = right.trim();
-        if token.starts_with('e') && token.contains(":secret:") {
-            return Ok(token.to_string());
-        }
-    }
-    for line in trimmed.lines().rev() {
-        let line = line.trim();
-        if line.starts_with('e') && line.contains(":secret:") {
-            return Ok(line.to_string());
-        }
-    }
-    anyhow::bail!("Could not extract webcash token from payment output")
-}

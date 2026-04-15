@@ -45,7 +45,7 @@ mod media;
 mod request_engine;
 use cli_support::{
     build_activity_metadata, build_post_attachments, check_master_in_password_manager,
-    effective_label, extract_webcash_token, labeled_wallet_display_path, make_client,
+    effective_label, extract_webcash_secret, labeled_wallet_display_path, make_client,
     next_contract_id, now_utc, open_or_create_wallet, parse_amount_to_units, parse_keywords_csv,
     remove_master_from_password_manager, resolve_bitcoin_db_path, resolve_voucher_wallet,
     resolve_wallet_path, resolve_webcash_wallet, store_master_in_password_manager,
@@ -261,7 +261,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum DonationCmd {
-    /// Claim one donation token for this wallet fingerprint (one per key)
+    /// Claim one donation allocation for this wallet fingerprint (one per key)
     Claim,
 }
 
@@ -273,15 +273,15 @@ enum WebcashCmd {
         #[arg(long)]
         label: Option<String>,
     },
-    /// Insert a secret webcash token into the local wallet
+    /// Insert a bearer webcash secret (`e<amount>:secret:<hex>`) into the local wallet
     Insert {
-        /// Webcash secret token: e<amount>:secret:<hex>
+        /// Full secret webcash string
         secret: String,
         /// Use a labeled sub-wallet (e.g. "mining") instead of the default
         #[arg(long)]
         label: Option<String>,
     },
-    /// Create a spend token from the local wallet
+    /// Pay: produce a secret webcash string for the recipient
     Pay {
         /// Amount in webcash decimal (e.g. 0.3, 1.5, 0.00000001)
         amount: String,
@@ -564,13 +564,13 @@ enum VoucherCmd {
     },
     /// Insert a voucher secret into the local wallet
     Insert {
-        /// Voucher secret token: v<amount>:secret:<hex>
+        /// Full voucher secret string: v<amount>:secret:<hex>
         secret: String,
         /// Use a labeled sub-wallet instead of the default "main"
         #[arg(long)]
         label: Option<String>,
     },
-    /// Create a spend token from the local wallet
+    /// Pay: produce a voucher secret string for the recipient
     Pay {
         /// Amount in credits (e.g. 1, 0.5, 0.00000001)
         amount: String,
@@ -1992,9 +1992,9 @@ async fn main() -> anyhow::Result<()> {
                 .pay(parsed_amount, &memo)
                 .await
                 .context("failed to create payment")?;
-            let token = extract_webcash_token(&output)?;
-            println!("Payment token:");
-            println!("{token}");
+            let secret = extract_webcash_secret(&output)?;
+            println!("Payment secret (webcash):");
+            println!("{secret}");
         }
 
         Cmd::Webcash(WebcashCmd::Check { label }) => {
@@ -4239,11 +4239,11 @@ async fn main() -> anyhow::Result<()> {
                                 )
                                 .await
                                 .context("failed to pay from mining wallet")?;
-                            let token = extract_webcash_token(&payment)?;
+                            let secret_str = extract_webcash_secret(&payment)?;
                             let main_wc =
                                 resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
-                            let parsed = SecretWebcash::parse(&token)
-                                .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                            let parsed = SecretWebcash::parse(&secret_str)
+                                .map_err(|e| anyhow::anyhow!("bad webcash secret: {e}"))?;
                             main_wc
                                 .insert(parsed)
                                 .await
@@ -4341,11 +4341,11 @@ async fn main() -> anyhow::Result<()> {
                                 let payment = labeled_wc
                                     .pay(WebcashAmount::from_str(&balance)?, "cloud-mining-collect")
                                     .await?;
-                                let token = extract_webcash_token(&payment)?;
+                                let secret_str = extract_webcash_secret(&payment)?;
                                 let main_wc =
                                     resolve_webcash_wallet(&wallet_path, &wallet, None).await?;
-                                let parsed = SecretWebcash::parse(&token)
-                                    .map_err(|e| anyhow::anyhow!("bad token: {e}"))?;
+                                let parsed = SecretWebcash::parse(&secret_str)
+                                    .map_err(|e| anyhow::anyhow!("bad webcash secret: {e}"))?;
                                 main_wc.insert(parsed).await?;
                                 total_transferred += balance.parse::<f64>().unwrap_or(0.0);
                             }
