@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.61] — 2026-04-15
+
+### Fixed
+
+- **CI**: crates.io check sends a **`curl` User-Agent** (403 without it).
+
 ## [0.1.60] — 2026-04-15
 
 ### Changed

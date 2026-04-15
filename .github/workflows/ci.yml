@@ -30,7 +30,7 @@ jobs:
             exit 1
           fi
           echo "Cargo.toml requires webylib $ver — checking crates.io…"
-          code=$(curl -sS -o /tmp/crates-webylib.json -w '%{http_code}' "https://crates.io/api/v1/crates/webylib/${ver}")
+          code=$(curl -sS -A "harmoniis-wallet-ci (https://github.com/harmoniis/harmoniis-wallet)" -o /tmp/crates-webylib.json -w '%{http_code}' "https://crates.io/api/v1/crates/webylib/${ver}")
           if [[ "$code" != "200" ]]; then
             echo "webylib $ver is not on crates.io (HTTP $code). Release webylib first, wait for publish-crate, then tag this repo."
             exit 1
