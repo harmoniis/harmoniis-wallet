@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.58"
+version     = "0.1.59"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -86,7 +86,7 @@ toml        = "0.8"
 
 # Time
 chrono      = { version = "0.4", features = ["serde"] }
-webylib     = "0.2"
+webylib     = "0.2.6"
 image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 bdk_wallet  = { version = "1.2", features = ["file_store"] }
 bdk_esplora = "0.20"
