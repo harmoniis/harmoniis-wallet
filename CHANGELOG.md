@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.60] — 2026-04-15
+
+### Changed
+
+- **CI**: Fail fast unless the **webylib** version in `Cargo.toml` is already published on crates.io (release webylib before tagging).
+
 ## [0.1.59] — 2026-04-15
 
 ### Changed

@@ -15,8 +15,31 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  webylib-on-crates-io:
+    name: webylib published (crates.io)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required webylib version exists on crates.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(grep -E '^webylib[[:space:]]*=' Cargo.toml | head -1 | sed -E 's/^webylib[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          if [[ -z "$ver" || "$ver" == *webylib* ]]; then
+            echo "Could not parse webylib version from Cargo.toml"
+            exit 1
+          fi
+          echo "Cargo.toml requires webylib $ver — checking crates.io…"
+          code=$(curl -sS -o /tmp/crates-webylib.json -w '%{http_code}' "https://crates.io/api/v1/crates/webylib/${ver}")
+          if [[ "$code" != "200" ]]; then
+            echo "webylib $ver is not on crates.io (HTTP $code). Release webylib first, wait for publish-crate, then tag this repo."
+            exit 1
+          fi
+          echo "OK: webylib $ver is published."
+
   test:
     name: Test (${{ matrix.os }})
+    needs: [webylib-on-crates-io]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -75,6 +98,7 @@ jobs:
   # ── Mobile compile check ─────────────────────────────────────────
   mobile-check:
     name: Mobile check (${{ matrix.target }})
+    needs: [webylib-on-crates-io]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -93,6 +117,7 @@ jobs:
 
   test-freebsd:
     name: Test (FreeBSD)
+    needs: [webylib-on-crates-io]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +144,7 @@ jobs:
 
   msrv:
     name: MSRV (1.86)
+    needs: [webylib-on-crates-io]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
