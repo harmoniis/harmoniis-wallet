@@ -31,7 +31,7 @@ impl HarmoniisClient {
     /// Parses `results[proof_str]["spent"]` — `spent: false` means live.
     pub async fn witness_is_live(&self, proof: &WitnessProof) -> Result<bool> {
         let proof_str = proof.display();
-        let result = self.witness_check(&[proof_str.clone()]).await?;
+        let result = self.witness_check(std::slice::from_ref(&proof_str)).await?;
         // { "results": { "<proof>": { "spent": false, ... } } }
         let entry = result.get("results").and_then(|r| r.get(&proof_str));
         match entry {

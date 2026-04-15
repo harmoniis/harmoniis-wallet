@@ -209,6 +209,7 @@ impl HarmoniisClient {
     }
 
     /// `POST /api/v1/timeline` with encrypted payload for private messaging.
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish_encrypted_reply(
         &self,
         author_fingerprint: &str,
@@ -231,6 +232,7 @@ impl HarmoniisClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish_encrypted_reply_with_payment(
         &self,
         author_fingerprint: &str,

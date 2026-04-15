@@ -159,8 +159,8 @@ mod tests {
         let our_hash = midstate.finalize(&tail);
 
         let mut hasher = Sha256::new();
-        hasher.update(&prefix);
-        hasher.update(&tail);
+        hasher.update(prefix);
+        hasher.update(tail);
         let ref_hash: [u8; 32] = hasher.finalize().into();
 
         assert_eq!(our_hash, ref_hash, "midstate hash must match sha2 crate");
@@ -176,8 +176,8 @@ mod tests {
         let our_hash = midstate.finalize(&tail);
 
         let mut hasher = Sha256::new();
-        hasher.update(&prefix);
-        hasher.update(&tail);
+        hasher.update(prefix);
+        hasher.update(tail);
         let ref_hash: [u8; 32] = hasher.finalize().into();
 
         assert_eq!(our_hash, ref_hash);
@@ -197,8 +197,8 @@ mod tests {
         let our_hash = midstate.finalize(&tail);
 
         let mut hasher = Sha256::new();
-        hasher.update(&prefix);
-        hasher.update(&tail);
+        hasher.update(prefix);
+        hasher.update(tail);
         let ref_hash: [u8; 32] = hasher.finalize().into();
 
         assert_eq!(our_hash, ref_hash);
@@ -306,8 +306,8 @@ mod tests {
             let our_hash = midstate.finalize(&tail);
 
             let mut hasher = Sha256::new();
-            hasher.update(&prefix);
-            hasher.update(&tail);
+            hasher.update(prefix);
+            hasher.update(tail);
             let ref_hash: [u8; 32] = hasher.finalize().into();
 
             assert_eq!(our_hash, ref_hash, "mismatch on fuzz iteration");

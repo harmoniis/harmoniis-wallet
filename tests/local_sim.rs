@@ -567,7 +567,10 @@ fn test_rgb20_stablecash_split_and_merge() {
     // Merge back: 3 + 7 → 10 USDH
     let merged_secret = StablecashSecret::generate(1_000_000_000, "USDH_MAIN");
     witness
-        .replace_rgb20(&[pay_secret, change_secret], &[merged_secret.clone()])
+        .replace_rgb20(
+            &[pay_secret, change_secret],
+            std::slice::from_ref(&merged_secret),
+        )
         .unwrap();
 
     let merged_proof = merged_secret.public_proof();
@@ -584,7 +587,7 @@ fn test_rgb20_stablecash_split_and_merge() {
     let over_pay = StablecashSecret::generate(1_000_000_001, "USDH_MAIN");
     assert!(
         witness
-            .replace_rgb20(&[merged_secret.clone()], &[over_pay])
+            .replace_rgb20(std::slice::from_ref(&merged_secret), &[over_pay])
             .is_err(),
         "amount mismatch must fail"
     );
@@ -626,8 +629,8 @@ fn test_all_signature_messages() {
 
     // All message formats used in the 6-phase flow
     let messages = [
-        format!("register:alice"),
-        format!("post:some content here"),
+        "register:alice".to_string(),
+        "post:some content here".to_string(),
         format!(
             "buy_contract:{}:{}:{}:{}",
             fp,

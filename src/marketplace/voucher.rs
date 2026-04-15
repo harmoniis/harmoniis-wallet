@@ -21,7 +21,7 @@ impl HarmoniisClient {
     /// Check if a single voucher proof is live.
     pub async fn voucher_is_live(&self, proof: &VoucherProof) -> Result<bool> {
         let proof_str = proof.display();
-        let result = self.voucher_check(&[proof_str.clone()]).await?;
+        let result = self.voucher_check(std::slice::from_ref(&proof_str)).await?;
         Ok(result["results"][&proof_str]["spent"]
             .as_bool()
             .map(|b| !b)

@@ -556,20 +556,23 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
 
     let mut miners = Vec::new();
     for dev in &wgpu_devices {
-        if let DeviceKind::Wgpu { adapter_index, .. } = &dev.kind {
-            if let Some(adapter) = adapter_slots
-                .get_mut(*adapter_index)
-                .and_then(|slot| slot.take())
-            {
-                if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
-                    eprintln!("GPU[{}]: {} ready", dev.id, dev.label);
-                    miners.push(miner);
-                } else {
-                    eprintln!("GPU[{}]: {} — device init failed", dev.id, dev.label);
-                }
+        let adapter_index = match &dev.kind {
+            DeviceKind::Wgpu { adapter_index, .. } => *adapter_index,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("wgpu_devices is filtered to Wgpu entries only"),
+        };
+        if let Some(adapter) = adapter_slots
+            .get_mut(adapter_index)
+            .and_then(|slot| slot.take())
+        {
+            if let Some(miner) = gpu::GpuMiner::try_from_adapter(adapter).await {
+                eprintln!("GPU[{}]: {} ready", dev.id, dev.label);
+                miners.push(miner);
             } else {
-                eprintln!("GPU[{}]: {} — adapter already consumed", dev.id, dev.label);
+                eprintln!("GPU[{}]: {} — device init failed", dev.id, dev.label);
             }
+        } else {
+            eprintln!("GPU[{}]: {} — adapter already consumed", dev.id, dev.label);
         }
     }
 

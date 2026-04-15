@@ -160,7 +160,7 @@ fn retry_pending_solutions_inner(
     let server_url = server_url.to_string();
 
     let mut handles = Vec::new();
-    let chunk_size = (total + RETRY_THREADS - 1) / RETRY_THREADS;
+    let chunk_size = total.div_ceil(RETRY_THREADS);
 
     for t in 0..RETRY_THREADS {
         let start = t * chunk_size;
@@ -677,7 +677,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                             f,
                                             "{}\t0x{}\t{}\tdifficulty={}",
                                             msg.preimage,
-                                            hex::encode(&msg.hash),
+                                            hex::encode(msg.hash),
                                             msg.keep_secret,
                                             msg.difficulty_achieved
                                         )
@@ -840,7 +840,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 println!(
                     "SOLUTION FOUND! difficulty={} hash=0x{}",
                     solution.difficulty_achieved,
-                    hex::encode(&solution.hash)
+                    hex::encode(solution.hash)
                 );
 
                 // Persist to disk FIRST (crash safety), then queue for
@@ -848,7 +848,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 let pending_line = format!(
                     "{}\t0x{}\t{}\tdifficulty={}\n",
                     preimage,
-                    hex::encode(&solution.hash),
+                    hex::encode(solution.hash),
                     wu.keep_secret,
                     solution.difficulty_achieved,
                 );

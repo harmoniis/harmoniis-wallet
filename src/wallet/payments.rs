@@ -256,6 +256,7 @@ impl WalletCore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn store_payment_loss(
         &self,
         attempt_id: &str,

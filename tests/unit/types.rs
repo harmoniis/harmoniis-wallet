@@ -22,7 +22,7 @@ fn witness_secret_format_correct() {
 
 #[test]
 fn witness_secret_parse_rejects_wrong_prefix() {
-    let err = WitnessSecret::parse("x:CTR_abc:secret:aa".repeat(1).as_str());
+    let err = WitnessSecret::parse("x:CTR_abc:secret:aa");
     assert!(err.is_err());
 }
 

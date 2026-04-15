@@ -82,7 +82,7 @@ fn encrypt_for_seller_envelope(
     let eph_pub = PublicKey::from(&eph);
     let shared = eph.diffie_hellman(&PublicKey::from(seller_x25519));
     let key_material = Sha256::digest(shared.as_bytes());
-    let cipher = ChaCha20Poly1305::new((&key_material).into());
+    let cipher = ChaCha20Poly1305::new(&key_material);
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -184,7 +184,7 @@ pub fn decrypt_witness_secret_envelope(
     eph_pub.copy_from_slice(&eph_bytes);
     let shared = x25519(x_priv, eph_pub);
     let key_material = Sha256::digest(shared);
-    let cipher = ChaCha20Poly1305::new((&key_material).into());
+    let cipher = ChaCha20Poly1305::new(&key_material);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext.as_ref())

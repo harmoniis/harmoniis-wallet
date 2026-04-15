@@ -9,6 +9,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.58] — 2026-04-15
+
+### Fixed
+
+- **Clippy / hygiene**: Resolve new `clippy` lints (including `-D warnings` cleanups)
+  across library, miner, marketplace, and tests; document allowed lints for the large CLI surface in `Cargo.toml`.
+- **Async**: `recover_pending` no longer holds the SQLite `MutexGuard` across `.await`.
+
 ## [0.1.57] — 2026-04-15
 
 ### Changed

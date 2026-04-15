@@ -134,7 +134,7 @@ fn save_instances(instances: &[InstanceState]) -> Result<()> {
 
 /// Backward compat: save single instance (replaces all).
 pub fn save_state(state: &InstanceState) -> Result<()> {
-    save_instances(&[state.clone()])
+    save_instances(std::slice::from_ref(state))
 }
 
 /// Remove all instance state.

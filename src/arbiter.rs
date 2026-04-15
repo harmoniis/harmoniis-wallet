@@ -72,6 +72,7 @@ use crate::identity::Identity;
 ///
 /// **Must match** `ArbiterKey::canonical_message` in the Harmoniis backend.
 /// If you change the field list or encoding here, update both sides.
+#[allow(clippy::too_many_arguments)]
 pub fn canonical_message(
     contract_id: &str,
     buyer_fp: &str,
@@ -97,7 +98,7 @@ pub fn canonical_message(
     for field in fields {
         let bytes = field.as_bytes();
         // Length-prefix: prevents field-value injection via special characters.
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
     format!("arbiter_issue:{}", hex::encode(hasher.finalize()))
@@ -108,6 +109,7 @@ pub fn canonical_message(
 /// Prefer [`HarmoniisClient::verify_contract_signature`] which fetches the
 /// pubkey from the server automatically. Only use this directly if you have
 /// already obtained and cached a trusted pubkey from the legitimate server.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_with_pubkey(
     arbiter_pubkey_hex: &str,
     contract_id: &str,

@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.57"
+version     = "0.1.58"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -134,3 +134,17 @@ cudarc      = { version = "0.19.3", optional = true, default-features = false, f
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["full"] }
+
+# CLI and integration tests carry many parameters and formatted output; CI runs
+# `clippy` without `-D warnings`. These caps keep local `clippy -- -D warnings`
+# aligned with the warnings the project already accepts upstream.
+[lints.clippy]
+too_many_arguments = "allow"
+needless_return = "allow"
+field_reassign_with_default = "allow"
+if_same_then_else = "allow"
+unnecessary_lazy_evaluations = "allow"
+large_enum_variant = "allow"
+ptr_arg = "allow"
+print_literal = "allow"
+format_in_format_args = "allow"

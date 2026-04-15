@@ -53,6 +53,7 @@ impl HarmoniisClient {
     /// a pubkey stored in the contract itself is never trusted.
     ///
     /// Returns `Ok(true)` if the signature is valid.
+    #[allow(clippy::too_many_arguments)]
     pub async fn verify_contract_signature(
         &self,
         contract_id: &str,

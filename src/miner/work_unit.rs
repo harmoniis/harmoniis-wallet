@@ -20,6 +20,12 @@ pub struct NonceTable {
     data: Vec<u8>,
 }
 
+impl Default for NonceTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NonceTable {
     /// Generate the nonce table (deterministic — same output every time).
     pub fn new() -> Self {

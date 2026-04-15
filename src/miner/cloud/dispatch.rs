@@ -5,7 +5,7 @@
 //!   - Remote: 3 submitter threads write to remote `miner_pending_keeps.log`
 //!   - Local:  4 submitter threads write to local  `miner_pending_keeps.log`
 //!   - Sync:   both solutions AND keeps are downloaded — keeps merge prevents
-//!             re-submitting what the remote already reported
+//!     re-submitting what the remote already reported
 //!   - Safety: double-submission to webcash server is idempotent ("already accepted")
 //!
 //! The dispatch daemon runs until all instances stop or SIGINT is received.

@@ -262,9 +262,8 @@ impl VoucherWallet {
                         params![input.public_proof().public_hash, now],
                     )?;
                 }
-                if change_secret.is_some() {
+                if let Some(change) = change_secret.as_ref() {
                     // pending_change -> live
-                    let change = change_secret.as_ref().unwrap();
                     tx.execute(
                         "UPDATE voucher_outputs SET status = 'live', updated_at = ?2 WHERE public_hash = ?1",
                         params![change.public_proof().public_hash, now],
@@ -396,32 +395,32 @@ impl VoucherWallet {
     /// remote call and the local database update.  Checks the server for the
     /// real status of any pending outputs and finalizes them.
     pub async fn recover_pending(&self, client: &HarmoniisClient) -> Result<String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
-
-        // Find pending_spend inputs and pending_change outputs.
-        let mut stmt = conn.prepare(
-            "SELECT public_hash, secret_display, status FROM voucher_outputs WHERE status IN ('pending_spend', 'pending_change')",
-        )?;
-        let rows: Vec<(String, String, String)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
+        let rows: Vec<(String, String, String)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
+            let mut stmt = conn.prepare(
+                "SELECT public_hash, secret_display, status FROM voucher_outputs WHERE status IN ('pending_spend', 'pending_change')",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
 
         if rows.is_empty() {
             return Ok("No pending voucher operations to recover.".to_string());
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let mut recovered = 0usize;
+        let mut updates: Vec<(String, &'static str)> = Vec::new();
 
         for (public_hash, secret_display, status) in &rows {
             let secret = VoucherSecret::parse(secret_display)?;
@@ -448,6 +447,15 @@ impl VoucherWallet {
                 _ => continue,
             };
 
+            updates.push((public_hash.clone(), new_status));
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| Error::Other(anyhow::anyhow!("voucher wallet mutex poisoned")))?;
+        let mut recovered = 0usize;
+        for (public_hash, new_status) in &updates {
             conn.execute(
                 "UPDATE voucher_outputs SET status = ?2, updated_at = ?3 WHERE public_hash = ?1",
                 params![public_hash, new_status, now],
