@@ -1,16 +1,18 @@
 //! Webcash types re-exported from [`webylib`].
 //!
-//! Pure crypto types are always available (WASM-compatible).
-//! Network/storage types require the `native` feature.
+//! Available only with the `native` feature (webylib requires SQLite + tokio).
+//! For WASM, use the webcash HD derivation directly from keychain + sha2.
 
-// Always available — pure data types
+#[cfg(feature = "native")]
 pub use webylib::amount::Amount;
+#[cfg(feature = "native")]
 pub use webylib::error::Error as WebcashError;
+#[cfg(feature = "native")]
 pub use webylib::hd::HDWallet as WebcashHDWallet;
-pub use webylib::webcash::{PublicWebcash, SecretWebcash};
+#[cfg(feature = "native")]
 pub use webylib::hd::ChainCode as WebcashChainCode;
-
-// Native only — require networking/storage
+#[cfg(feature = "native")]
+pub use webylib::webcash::{PublicWebcash, SecretWebcash};
 #[cfg(feature = "native")]
 pub use webylib::server::ServerClient as WebcashServerClient;
 #[cfg(feature = "native")]

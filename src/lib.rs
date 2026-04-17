@@ -17,9 +17,13 @@ pub use wallet::labeled_wallets::LabeledWallet;
 pub use wallet::vault;
 pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 
-// Webcash types re-exported from webylib.
+// Webcash utilities (always available)
+pub use wallet::webcash::extract_webcash_secret;
+
+// Webcash types from webylib (native only — webylib requires SQLite + tokio)
+#[cfg(feature = "native")]
 pub use wallet::webcash::{
-    extract_webcash_secret, Amount as WebcashAmount, PublicWebcash, SecretWebcash,
+    Amount as WebcashAmount, PublicWebcash, SecretWebcash,
 };
 
 // ── Native-only modules and re-exports ───────────────────────────

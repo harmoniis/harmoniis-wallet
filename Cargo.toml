@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.63"
+version     = "0.1.64"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -27,151 +27,145 @@ name = "hrmw"
 path = "src/bin/hrmw.rs"
 required-features = ["cli", "bitcoin", "ark"]
 
-# ── Feature flags ──────────────────────────────────────────────────────────────
+
+# ── Feature Flags ─────────────────────────────────────────────────
+#
+# Layer 0 — Core (no features needed, always compiled):
+#   Pure crypto: keychain, vault, identity, types, crypto, config
+#   Deps: sha2, hkdf, hex, bip39, bitcoin, ed25519-dalek, serde, chrono
+#   Target: native + wasm32
+#
+# Layer 1 — Wallet (native feature):
+#   SQLite-backed WalletCore, webcash ops via webylib, networking
+#   Deps: rusqlite, webylib, reqwest, tokio, keyring
+#   Target: native only
+#
+# Layer 2 — Protocols (bitcoin, ark features):
+#   Bitcoin BDK, ARK VTXOs — require Layer 1
+#   Deps: bdk_wallet, bdk_esplora, ark-client
+#   Target: native only (WASM BDK/Ark planned separately)
+#
+# Layer 3 — Mining (gpu, cuda features):
+#   GPU/CPU mining — requires Layer 1
+#   Deps: wgpu, cudarc, rayon
+#   Target: native only (WASM WebGPU planned)
+
 [features]
 default = ["native"]
 
-# Native target: full functionality (SQLite, networking, CLI, mining)
+# ── Layer 1: Full native wallet ───────────────────────────────
 native = [
-    "cli",
-    "bundled-sqlite",
-    "bitcoin",
-    "ark",
+    "dep:webylib",
     "dep:rusqlite",
     "dep:reqwest",
     "dep:tokio",
+    "dep:keyring",
+    "dep:rustls",
     "dep:dirs-next",
     "dep:toml",
     "dep:image",
     "dep:signal-hook",
     "dep:libc",
     "dep:rayon",
-    "dep:keyring",
-    "dep:rustls",
+    "bundled-sqlite",
+    "bitcoin",
+    "ark",
+    "cli",
 ]
-
-# CLI binary (requires native)
-cli = ["dep:clap"]
-
-# Bundle SQLite from source
 bundled-sqlite = ["rusqlite?/bundled"]
 
-# GPU mining
+# ── Layer 2: Protocol modules ─────────────────────────────────
+bitcoin = ["dep:bdk_wallet", "dep:bdk_esplora"]
+ark = ["dep:ark-client", "dep:ark-bdk-wallet", "dep:ark-core", "dep:ark-grpc"]
+
+# ── Layer 3: Mining ───────────────────────────────────────────
 gpu = ["dep:wgpu"]
 cuda = ["dep:cudarc"]
 
-# Bitcoin (BDK + Esplora)
-bitcoin = ["dep:bdk_wallet", "dep:bdk_esplora"]
-
-# ARK protocol (offchain Bitcoin via VTXOs)
-ark = ["dep:ark-client", "dep:ark-bdk-wallet", "dep:ark-core", "dep:ark-grpc"]
-
-# WASM target: pure crypto + state management, no I/O
+# ── WASM target ───────────────────────────────────────────────
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
 
-# Vendor OpenSSL for Android cross-compile
+# ── Other optional features ───────────────────────────────────
+cli = ["dep:clap"]
 vendored-openssl = ["openssl/vendored"]
-
-# Dormant Phase 3 securities
 securities = []
-
-# Actix actors for backend integration
 actix-actors = ["dep:actix", "dep:actix-rt"]
 
 
-# ── Dependencies ───────────────────────────────────────────────────────────────
+# ── Dependencies ──────────────────────────────────────────────
 [dependencies]
-# Core (always available)
-anyhow      = "1.0"
-thiserror   = "2"
-serde       = { version = "1.0", features = ["derive"] }
-serde_json  = "1.0"
 
-# Cryptography (always available — all WASM-compatible)
-sha2        = { version = "0.10", features = ["compress"] }
-hkdf        = "0.12"
-hex         = "0.4"
-bip39       = "2.1"
-rand        = "0.8"
-rand_core   = "0.6"
-getrandom   = "0.2"
-zeroize     = { version = "1.8", features = ["derive"] }
-ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8", "pem"] }
+# ── Layer 0: Core (always available, WASM-safe) ──────────────
+anyhow          = "1.0"
+thiserror       = "2"
+serde           = { version = "1.0", features = ["derive"] }
+serde_json      = "1.0"
+sha2            = { version = "0.10", features = ["compress"] }
+hkdf            = "0.12"
+hex             = "0.4"
+bip39           = "2.1"
+bitcoin         = { version = "0.32", default-features = false, features = ["secp-recovery"] }
+rand            = "0.8"
+rand_core       = "0.6"
+getrandom       = "0.2"
+zeroize         = { version = "1.8", features = ["derive"] }
+ed25519-dalek   = { version = "2.1", features = ["rand_core", "pkcs8", "pem"] }
 curve25519-dalek = "4"
-x25519-dalek = "2"
+x25519-dalek    = "2"
 chacha20poly1305 = "0.10"
-pkcs8       = { version = "0.10", features = ["pem"] }
+pkcs8           = { version = "0.10", features = ["pem"] }
+chrono          = { version = "0.4", features = ["serde"] }
+base64          = "0.22"
+num-bigint      = "0.4"
+async-trait     = "0.1"
+bytemuck        = { version = "1", features = ["derive"] }
 
-# Time (always available)
-chrono      = { version = "0.4", features = ["serde"] }
+# ── Layer 1: Native wallet (optional) ────────────────────────
+webylib         = { version = "0.3.0", optional = true }
+rusqlite        = { version = "0.37", optional = true }
+reqwest         = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
+tokio           = { version = "1", features = ["full"], optional = true }
+keyring         = { version = "3", optional = true }
+rustls          = { version = "0.23", features = ["ring"], optional = true }
+dirs-next       = { version = "2", optional = true }
+toml            = { version = "0.8", optional = true }
+image           = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+signal-hook     = { version = "0.3", optional = true }
+libc            = { version = "0.2", optional = true }
+rayon           = { version = "1.10", optional = true }
 
-# BIP32 key derivation (always available — pure crypto, compiles to WASM)
-bitcoin     = { version = "0.32", default-features = false, features = ["secp-recovery"] }
+# ── Layer 2: Protocols (optional) ────────────────────────────
+bdk_wallet      = { version = "1.2", features = ["file_store"], optional = true }
+bdk_esplora     = { version = "0.20", optional = true }
+ark-client      = { version = "0.8.0", optional = true }
+ark-bdk-wallet  = { version = "0.8.0", optional = true }
+ark-core        = { version = "0.8.0", optional = true }
+ark-grpc        = { version = "0.8.0", optional = true }
 
-# Webcash (always available — webylib's pure crypto compiles to WASM via Store trait)
-webylib     = "0.3.0"
-
-# Utilities (always available)
-base64      = "0.22"
-num-bigint  = "0.4"
-async-trait = "0.1"
-bytemuck    = { version = "1", features = ["derive"] }
-
-# Storage (native only)
-rusqlite    = { version = "0.37", optional = true }
-
-# Networking (native only)
-reqwest     = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
-tokio       = { version = "1", features = ["full"], optional = true }
-rustls      = { version = "0.23", features = ["ring"], optional = true }
-
-# CLI (native only)
-clap        = { version = "4", features = ["derive"], optional = true }
-dirs-next   = { version = "2", optional = true }
-toml        = { version = "0.8", optional = true }
-
-# Image (native only)
-image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
-
-# System (native only)
-signal-hook = { version = "0.3", optional = true }
-libc        = { version = "0.2", optional = true }
-rayon       = { version = "1.10", optional = true }
-
-# Platform keystore (native only)
-keyring     = { version = "3", optional = true }
-
-# Bitcoin (optional)
-bdk_wallet  = { version = "1.2", features = ["file_store"], optional = true }
-bdk_esplora = { version = "0.20", optional = true }
-
-# ARK protocol (optional)
-ark-client    = { version = "0.8.0", optional = true }
-ark-bdk-wallet = { version = "0.8.0", optional = true }
-ark-core      = { version = "0.8.0", optional = true }
-ark-grpc      = { version = "0.8.0", optional = true }
-
-# OpenSSL (optional, for Android)
-openssl       = { version = "0.10", optional = true }
-
-# Actix actors (optional)
-actix       = { version = "0.13", optional = true }
-actix-rt    = { version = "2", optional = true }
-
-# Mining (optional)
-wgpu        = { version = "28", optional = true, features = ["spirv"] }
-cudarc      = { version = "0.19.3", optional = true, default-features = false, features = [
+# ── Layer 3: Mining (optional) ───────────────────────────────
+wgpu            = { version = "28", optional = true, features = ["spirv"] }
+cudarc          = { version = "0.19.3", optional = true, default-features = false, features = [
     "std", "driver", "runtime", "nvrtc", "fallback-dynamic-loading", "cuda-12000",
 ] }
 
-# WASM (optional)
-wasm-bindgen     = { version = "0.2", optional = true }
-js-sys           = { version = "0.3", optional = true }
-serde-wasm-bindgen = { version = "0.6", optional = true }
+# ── CLI (optional) ───────────────────────────────────────────
+clap            = { version = "4", features = ["derive"], optional = true }
+
+# ── WASM (optional) ──────────────────────────────────────────
+wasm-bindgen        = { version = "0.2", optional = true }
+js-sys              = { version = "0.3", optional = true }
+serde-wasm-bindgen  = { version = "0.6", optional = true }
+
+# ── Cross-compile helpers (optional) ─────────────────────────
+openssl         = { version = "0.10", optional = true }
+actix           = { version = "0.13", optional = true }
+actix-rt        = { version = "2", optional = true }
+
 
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["full"] }
+
 
 [lints.clippy]
 too_many_arguments = "allow"
