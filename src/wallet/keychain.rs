@@ -217,9 +217,54 @@ fn validate_entropy_len(len: usize) -> Result<()> {
     }
 }
 
+// ── Bitcoin address derivation (pure crypto, WASM-safe) ──────────
+
+impl HdKeychain {
+    /// Derive a BIP86 Taproot xpriv from the bitcoin slot seed.
+    /// Path: m/86'/0'/0' (or m/86'/1'/0' for testnet)
+    pub fn derive_bitcoin_taproot_xpriv(
+        &self,
+        network: Network,
+    ) -> Result<Xpriv> {
+        let slot_hex = self.derive_slot_hex("bitcoin", 0)?;
+        let slot_bytes = hex::decode(&slot_hex).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+        let slot_xpriv = Xpriv::new_master(network, &slot_bytes).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+        let secp = Secp256k1::new();
+        let coin_type = if network == Network::Bitcoin { 0 } else { 1 };
+        let path = DerivationPath::from_str(&format!("m/86'/{coin_type}'/0'"))
+            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+        slot_xpriv.derive_priv(&secp, &path).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))
+    }
+
+    /// Derive a BIP86 Taproot receive address at the given index.
+    pub fn derive_bitcoin_taproot_address(
+        &self,
+        network: Network,
+        index: u32,
+    ) -> Result<String> {
+        use bitcoin::Address;
+        use bitcoin::secp256k1::PublicKey;
+        let account_xpriv = self.derive_bitcoin_taproot_xpriv(network)?;
+        let secp = Secp256k1::new();
+        let child_path = DerivationPath::from(vec![
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index },
+        ]);
+        let child = account_xpriv.derive_priv(&secp, &child_path)
+            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&child.private_key.secret_bytes())
+            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
+        let pubkey = PublicKey::from_secret_key(&secp, &sk);
+        let (xonly, _parity) = pubkey.x_only_public_key();
+        let address = Address::p2tr(&secp, xonly, None, network);
+        Ok(address.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HdKeychain, SLOT_FAMILY_VAULT};
+    use bitcoin::Network;
 
     #[test]
     fn deterministic_slots_from_known_mnemonic() {
@@ -270,6 +315,23 @@ mod tests {
         let voucher = keychain.derive_slot_hex("voucher", 0).unwrap();
         assert_eq!(voucher.len(), 64);
         assert_ne!(voucher, vault);
+    }
+
+    #[test]
+    fn bitcoin_taproot_address_deterministic() {
+        let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let keychain = HdKeychain::from_mnemonic_words(mnemonic_str).unwrap();
+        let addr = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 0).unwrap();
+        assert!(addr.starts_with("bc1p"), "Taproot address must start with bc1p, got: {addr}");
+        // Same mnemonic → same address
+        let addr2 = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 0).unwrap();
+        assert_eq!(addr, addr2);
+        // Different index → different address
+        let addr3 = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 1).unwrap();
+        assert_ne!(addr, addr3);
+        // Testnet → different prefix
+        let taddr = keychain.derive_bitcoin_taproot_address(Network::Testnet, 0).unwrap();
+        assert!(taddr.starts_with("tb1p"), "Testnet taproot must start with tb1p, got: {taddr}");
     }
 
     #[test]
