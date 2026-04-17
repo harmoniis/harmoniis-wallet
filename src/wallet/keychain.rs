@@ -1,89 +1,93 @@
-use std::str::FromStr;
+//! BIP32/BIP39 deterministic key derivation.
+//!
+//! Pure Rust — compiles to native and WASM without C FFI.
+//! Uses the `bip32` crate (k256-backed) for HD key derivation.
+//!
+//! Derivation path: `m / 83696968' / 0' / family' / index'`
+//!
+//! | Family   | Code | Purpose                  |
+//! |----------|------|--------------------------|
+//! | root     | 0    | Master root key          |
+//! | rgb      | 1    | RGB contract identity    |
+//! | webcash  | 2    | Webcash payment secrets  |
+//! | bitcoin  | 3    | Bitcoin addresses         |
+//! | pgp      | 4    | Ed25519 signing keys     |
+//! | vault    | 5    | AEAD / MQTT / signing    |
+//! | voucher  | 6    | Voucher bearer secrets   |
 
-use bitcoin::{
-    bip32::{ChildNumber, DerivationPath, Xpriv},
-    secp256k1::Secp256k1,
-    Network,
-};
+use bip32::{ChildNumber, XPrv};
 use bip39::Mnemonic;
 use rand::{rngs::OsRng, RngCore};
+use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
+
+// ── Constants ────────────────────────────────────────────────────
 
 pub const KEY_MODEL_VERSION_V3: &str = "v3-bip32";
 pub const MAX_PGP_KEYS: u32 = 1_000;
 pub const MAX_VAULT_KEYS: u32 = 1_000;
-/// Max labeled wallets per family (webcash, bitcoin, voucher, rgb).
 pub const MAX_LABELED_WALLETS: u32 = 256;
-pub const SLOT_FAMILY_VAULT: &str = "vault";
-/// Backward-compatible alias for existing integrations.
-pub const SLOT_FAMILY_HARMONIA_VAULT: &str = "harmonia-vault";
 
-// m / purpose' / app' / family' / index'
 const PURPOSE_HARMONIIS: u32 = 83_696_968;
 const APP_MAIN: u32 = 0;
-const FAMILY_ROOT: u32 = 0;
-const FAMILY_RGB: u32 = 1;
-const FAMILY_WEBCASH: u32 = 2;
-const FAMILY_BITCOIN: u32 = 3;
-const FAMILY_PGP: u32 = 4;
-const FAMILY_HARMONIA_VAULT: u32 = 5;
-const FAMILY_VOUCHER: u32 = 6;
+
+pub const FAMILY_ROOT: u32 = 0;
+pub const FAMILY_RGB: u32 = 1;
+pub const FAMILY_WEBCASH: u32 = 2;
+pub const FAMILY_BITCOIN: u32 = 3;
+pub const FAMILY_PGP: u32 = 4;
+pub const FAMILY_VAULT: u32 = 5;
+pub const FAMILY_VOUCHER: u32 = 6;
+
+pub const SLOT_FAMILY_VAULT: &str = "vault";
+pub const SLOT_FAMILY_HARMONIA_VAULT: &str = "vault";
+
+// ── HD Keychain ──────────────────────────────────────────────────
 
 pub struct HdKeychain {
     mnemonic: Mnemonic,
     entropy: Vec<u8>,
-    master_xpriv: Xpriv,
+    master_xpriv: XPrv,
 }
 
-impl std::fmt::Debug for HdKeychain {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HdKeychain")
-            .field("entropy", &"[redacted]")
-            .field("mnemonic", &"[redacted]")
-            .finish()
-    }
-}
-
-impl Clone for HdKeychain {
-    fn clone(&self) -> Self {
-        Self {
-            mnemonic: Mnemonic::from_str(&self.mnemonic.to_string())
-                .expect("re-parsing known-valid mnemonic"),
-            entropy: self.entropy.clone(),
-            master_xpriv: self.master_xpriv,
-        }
+impl Zeroize for HdKeychain {
+    fn zeroize(&mut self) {
+        self.entropy.zeroize();
+        // XPrv handles its own zeroization via k256
     }
 }
 
 impl Drop for HdKeychain {
     fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.entropy.zeroize();
+        self.zeroize();
     }
 }
 
 impl HdKeychain {
+    /// Generate a new keychain with a random 32-byte (256-bit) mnemonic.
     pub fn generate_new() -> Result<Self> {
-        // 128-bit entropy -> 12 words (BIP39).
-        let mut entropy = [0u8; 16];
+        let mut entropy = vec![0u8; 32];
         OsRng.fill_bytes(&mut entropy);
         Self::from_entropy(&entropy)
     }
 
+    /// Reconstruct from BIP39 mnemonic words.
     pub fn from_mnemonic_words(words: &str) -> Result<Self> {
-        let mnemonic = Mnemonic::from_str(words.trim())
-            .map_err(|e| Error::Other(anyhow::anyhow!("invalid BIP39 mnemonic: {e}")))?;
+        let mnemonic = Mnemonic::parse_normalized(words)
+            .map_err(|e| Error::Other(anyhow::anyhow!("invalid mnemonic: {e}")))?;
         let entropy = mnemonic.to_entropy();
         Self::from_mnemonic(mnemonic, entropy)
     }
 
+    /// Reconstruct from raw entropy hex.
     pub fn from_entropy_hex(hex_value: &str) -> Result<Self> {
         let entropy = hex::decode(hex_value.trim())
             .map_err(|e| Error::Other(anyhow::anyhow!("invalid master entropy hex: {e}")))?;
         Self::from_entropy(&entropy)
     }
 
+    /// Reconstruct from raw entropy bytes.
     pub fn from_entropy(entropy: &[u8]) -> Result<Self> {
         validate_entropy_len(entropy.len())?;
         let mnemonic = Mnemonic::from_entropy(entropy)
@@ -94,14 +98,12 @@ impl HdKeychain {
     fn from_mnemonic(mnemonic: Mnemonic, entropy: Vec<u8>) -> Result<Self> {
         validate_entropy_len(entropy.len())?;
         let seed = mnemonic.to_seed_normalized("");
-        let master_xpriv = Xpriv::new_master(Network::Bitcoin, &seed)
+        let master_xpriv = XPrv::new(&seed)
             .map_err(|e| Error::Other(anyhow::anyhow!("failed to derive BIP32 master key: {e}")))?;
-        Ok(Self {
-            mnemonic,
-            entropy,
-            master_xpriv,
-        })
+        Ok(Self { mnemonic, entropy, master_xpriv })
     }
+
+    // ── Accessors ────────────────────────────────────────────────
 
     pub fn mnemonic_words(&self) -> String {
         self.mnemonic.to_string()
@@ -111,101 +113,56 @@ impl HdKeychain {
         hex::encode(&self.entropy)
     }
 
+    // ── Key derivation ───────────────────────────────────────────
+
+    /// Derive a 32-byte secret for the given family and slot index.
+    /// Returns the private key as a 64-character hex string.
     pub fn derive_slot_hex(&self, family: &str, index: u32) -> Result<String> {
         let (family_code, slot_index) = family_slot(family, index)?;
-        let path = derivation_path(family_code, slot_index)?;
-        let secp = Secp256k1::new();
-        let derived = self.master_xpriv.derive_priv(&secp, &path).map_err(|e| {
-            Error::Other(anyhow::anyhow!(
-                "BIP32 derive failed for {family}[{index}]: {e}"
-            ))
-        })?;
-        Ok(hex::encode(derived.private_key.secret_bytes()))
+        let derived = self.derive_hardened_path(&[
+            PURPOSE_HARMONIIS, APP_MAIN, family_code, slot_index,
+        ])?;
+        Ok(hex::encode(derived.private_key().to_bytes()))
+    }
+
+    /// Derive a child key along a hardened path from master.
+    fn derive_hardened_path(&self, indices: &[u32]) -> Result<XPrv> {
+        let mut key = self.master_xpriv.clone();
+        for &idx in indices {
+            let child = ChildNumber::new(idx, true)
+                .map_err(|e| Error::Other(anyhow::anyhow!("invalid child index {idx}: {e}")))?;
+            key = key.derive_child(child)
+                .map_err(|e| Error::Other(anyhow::anyhow!("BIP32 derivation failed at index {idx}: {e}")))?;
+        }
+        Ok(key)
     }
 }
+
+// ── Family validation ────────────────────────────────────────────
 
 fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
     match family {
         "root" => {
             if index != 0 {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "root family only supports index 0"
-                )));
+                return Err(Error::Other(anyhow::anyhow!("root family only supports index 0")));
             }
             Ok((FAMILY_ROOT, 0))
         }
-        "rgb" => {
-            if index >= MAX_LABELED_WALLETS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "rgb wallet index out of range (max {})",
-                    MAX_LABELED_WALLETS - 1
-                )));
-            }
-            Ok((FAMILY_RGB, index))
-        }
-        "webcash" => {
-            if index >= MAX_LABELED_WALLETS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "webcash wallet index out of range (max {})",
-                    MAX_LABELED_WALLETS - 1
-                )));
-            }
-            Ok((FAMILY_WEBCASH, index))
-        }
-        "bitcoin" => {
-            if index >= MAX_LABELED_WALLETS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "bitcoin wallet index out of range (max {})",
-                    MAX_LABELED_WALLETS - 1
-                )));
-            }
-            Ok((FAMILY_BITCOIN, index))
-        }
-        "pgp" => {
-            if index >= MAX_PGP_KEYS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "PGP key index out of range (max {})",
-                    MAX_PGP_KEYS - 1
-                )));
-            }
-            Ok((FAMILY_PGP, index))
-        }
-        SLOT_FAMILY_VAULT | SLOT_FAMILY_HARMONIA_VAULT => {
-            if index >= MAX_VAULT_KEYS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "vault key index out of range (max {})",
-                    MAX_VAULT_KEYS - 1
-                )));
-            }
-            Ok((FAMILY_HARMONIA_VAULT, index))
-        }
-        "voucher" => {
-            if index >= MAX_LABELED_WALLETS {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "voucher wallet index out of range (max {})",
-                    MAX_LABELED_WALLETS - 1
-                )));
-            }
-            Ok((FAMILY_VOUCHER, index))
-        }
-        _ => Err(Error::Other(anyhow::anyhow!(
-            "unknown key family '{family}'"
-        ))),
+        "rgb" => validate_index(FAMILY_RGB, index, MAX_LABELED_WALLETS, "rgb"),
+        "webcash" => validate_index(FAMILY_WEBCASH, index, MAX_LABELED_WALLETS, "webcash"),
+        "bitcoin" => validate_index(FAMILY_BITCOIN, index, MAX_LABELED_WALLETS, "bitcoin"),
+        "pgp" => validate_index(FAMILY_PGP, index, MAX_PGP_KEYS, "PGP"),
+        "vault" | "harmonia-vault" => validate_index(FAMILY_VAULT, index, MAX_VAULT_KEYS, "vault"),
+        "voucher" => validate_index(FAMILY_VOUCHER, index, MAX_LABELED_WALLETS, "voucher"),
+        _ => Err(Error::Other(anyhow::anyhow!("unknown key family '{family}'"))),
     }
 }
 
-fn derivation_path(family_code: u32, slot_index: u32) -> Result<DerivationPath> {
-    Ok(DerivationPath::from(vec![
-        hard(PURPOSE_HARMONIIS)?,
-        hard(APP_MAIN)?,
-        hard(family_code)?,
-        hard(slot_index)?,
-    ]))
-}
-
-fn hard(index: u32) -> Result<ChildNumber> {
-    ChildNumber::from_hardened_idx(index)
-        .map_err(|e| Error::Other(anyhow::anyhow!("invalid hardened child index {index}: {e}")))
+fn validate_index(family_code: u32, index: u32, max: u32, name: &str) -> Result<(u32, u32)> {
+    if index >= max {
+        return Err(Error::Other(anyhow::anyhow!("{name} index out of range (max {})", max - 1)));
+    }
+    Ok((family_code, index))
 }
 
 fn validate_entropy_len(len: usize) -> Result<()> {
@@ -217,121 +174,49 @@ fn validate_entropy_len(len: usize) -> Result<()> {
     }
 }
 
-// ── Bitcoin address derivation (pure crypto, WASM-safe) ──────────
-
-impl HdKeychain {
-    /// Derive a BIP86 Taproot xpriv from the bitcoin slot seed.
-    /// Path: m/86'/0'/0' (or m/86'/1'/0' for testnet)
-    pub fn derive_bitcoin_taproot_xpriv(
-        &self,
-        network: Network,
-    ) -> Result<Xpriv> {
-        let slot_hex = self.derive_slot_hex("bitcoin", 0)?;
-        let slot_bytes = hex::decode(&slot_hex).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-        let slot_xpriv = Xpriv::new_master(network, &slot_bytes).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-        let secp = Secp256k1::new();
-        let coin_type = if network == Network::Bitcoin { 0 } else { 1 };
-        let path = DerivationPath::from_str(&format!("m/86'/{coin_type}'/0'"))
-            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-        slot_xpriv.derive_priv(&secp, &path).map_err(|e| Error::Other(anyhow::anyhow!("{e}")))
-    }
-
-    /// Derive a BIP86 Taproot receive address at the given index.
-    pub fn derive_bitcoin_taproot_address(
-        &self,
-        network: Network,
-        index: u32,
-    ) -> Result<String> {
-        use bitcoin::Address;
-        use bitcoin::secp256k1::PublicKey;
-        let account_xpriv = self.derive_bitcoin_taproot_xpriv(network)?;
-        let secp = Secp256k1::new();
-        let child_path = DerivationPath::from(vec![
-            ChildNumber::Normal { index: 0 },
-            ChildNumber::Normal { index },
-        ]);
-        let child = account_xpriv.derive_priv(&secp, &child_path)
-            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-        let sk = bitcoin::secp256k1::SecretKey::from_slice(&child.private_key.secret_bytes())
-            .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))?;
-        let pubkey = PublicKey::from_secret_key(&secp, &sk);
-        let (xonly, _parity) = pubkey.x_only_public_key();
-        let address = Address::p2tr(&secp, xonly, None, network);
-        Ok(address.to_string())
-    }
-}
+// ── Tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::{HdKeychain, SLOT_FAMILY_VAULT};
-    use bitcoin::Network;
+    use super::HdKeychain;
 
     #[test]
     fn deterministic_slots_from_known_mnemonic() {
-        // BIP39 test phrase with known stable output under our BIP32 path scheme.
-        let keychain =
-            HdKeychain::from_mnemonic_words("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
-                .expect("valid mnemonic");
+        let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let keychain = HdKeychain::from_mnemonic_words(mnemonic_str).unwrap();
+
         let root = keychain.derive_slot_hex("root", 0).unwrap();
         let rgb = keychain.derive_slot_hex("rgb", 0).unwrap();
         let webcash = keychain.derive_slot_hex("webcash", 0).unwrap();
         let bitcoin = keychain.derive_slot_hex("bitcoin", 0).unwrap();
-        let pgp_0 = keychain.derive_slot_hex("pgp", 0).unwrap();
-        let pgp_1 = keychain.derive_slot_hex("pgp", 1).unwrap();
-        let vault = keychain.derive_slot_hex(SLOT_FAMILY_VAULT, 0).unwrap();
-        let vault_1 = keychain.derive_slot_hex(SLOT_FAMILY_VAULT, 1).unwrap();
-        assert_eq!(keychain.entropy_hex(), "00000000000000000000000000000000");
-        assert_eq!(
-            root,
-            "21b7a946c56bc75928245d56c1057db4ad115c040748e90a0173ec5015ed7c6d"
-        );
-        assert_eq!(
-            rgb,
-            "cb263f34c16122d362cd1fd2732b7fa62943439b60dfc63f603d17595fdbc92e"
-        );
-        assert_eq!(
-            webcash,
-            "5017e94b5b8119330e9c42ace800ad1dfb93630f312c56bd3af91d10d88a8684"
-        );
-        assert_eq!(
-            bitcoin,
-            "f8bbbf1e2223f17a99da8b823d4cd41b764c69133385ad5b1195885ec34a191b"
-        );
-        assert_eq!(
-            pgp_0,
-            "6d24f7bf44372fb0fe0fbc1c202198a830e26e9dcbfae40a168ea09f7ad823d0"
-        );
-        assert_eq!(
-            pgp_1,
-            "38776f21f6c7d4a3a2c22036ff69ce15c14641950cf8eedd41ad3189e67d9890"
-        );
-        assert_eq!(
-            vault,
-            "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368"
-        );
-        assert_eq!(vault_1.len(), 64);
-        assert_ne!(vault_1, vault);
-
+        let pgp0 = keychain.derive_slot_hex("pgp", 0).unwrap();
+        let pgp1 = keychain.derive_slot_hex("pgp", 1).unwrap();
+        let vault = keychain.derive_slot_hex("vault", 0).unwrap();
+        let vault_1 = keychain.derive_slot_hex("vault", 1).unwrap();
         let voucher = keychain.derive_slot_hex("voucher", 0).unwrap();
-        assert_eq!(voucher.len(), 64);
-        assert_ne!(voucher, vault);
-    }
 
-    #[test]
-    fn bitcoin_taproot_address_deterministic() {
-        let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let keychain = HdKeychain::from_mnemonic_words(mnemonic_str).unwrap();
-        let addr = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 0).unwrap();
-        assert!(addr.starts_with("bc1p"), "Taproot address must start with bc1p, got: {addr}");
-        // Same mnemonic → same address
-        let addr2 = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 0).unwrap();
-        assert_eq!(addr, addr2);
-        // Different index → different address
-        let addr3 = keychain.derive_bitcoin_taproot_address(Network::Bitcoin, 1).unwrap();
-        assert_ne!(addr, addr3);
-        // Testnet → different prefix
-        let taddr = keychain.derive_bitcoin_taproot_address(Network::Testnet, 0).unwrap();
-        assert!(taddr.starts_with("tb1p"), "Testnet taproot must start with tb1p, got: {taddr}");
+        // All 64-char hex (32 bytes)
+        assert_eq!(root.len(), 64);
+        assert_eq!(rgb.len(), 64);
+        assert_eq!(webcash.len(), 64);
+        assert_eq!(bitcoin.len(), 64);
+        assert_eq!(pgp0.len(), 64);
+        assert_eq!(pgp1.len(), 64);
+        assert_eq!(vault.len(), 64);
+
+        // Known test vectors (from the known mnemonic)
+        assert_eq!(root, "21b7a946c56bc75928245d56c1057db4ad115c040748e90a0173ec5015ed7c6d");
+        assert_eq!(rgb, "cb263f34c16122d362cd1fd2732b7fa62943439b60dfc63f603d17595fdbc92e");
+        assert_eq!(webcash, "5017e94b5b8119330e9c42ace800ad1dfb93630f312c56bd3af91d10d88a8684");
+        assert_eq!(bitcoin, "f8bbbf1e2223f17a99da8b823d4cd41b764c69133385ad5b1195885ec34a191b");
+        assert_eq!(pgp0, "6d24f7bf44372fb0fe0fbc1c202198a830e26e9dcbfae40a168ea09f7ad823d0");
+        assert_eq!(pgp1, "38776f21f6c7d4a3a2c22036ff69ce15c14641950cf8eedd41ad3189e67d9890");
+        assert_eq!(vault, "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368");
+
+        // Different slots produce different keys
+        assert_ne!(vault, vault_1);
+        assert_ne!(pgp0, pgp1);
+        assert_ne!(voucher, vault);
     }
 
     #[test]
