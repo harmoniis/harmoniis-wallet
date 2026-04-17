@@ -45,3 +45,4 @@ bench_results/
 *.log
 *.crate
 src/.DS_Store
+src/.DS_Store
