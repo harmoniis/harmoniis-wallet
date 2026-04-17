@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.62"
+version     = "0.1.63"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -47,6 +47,7 @@ native = [
     "dep:libc",
     "dep:rayon",
     "dep:keyring",
+    "dep:rustls",
 ]
 
 # CLI binary (requires native)
@@ -122,7 +123,7 @@ rusqlite    = { version = "0.37", optional = true }
 # Networking (native only)
 reqwest     = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
 tokio       = { version = "1", features = ["full"], optional = true }
-rustls      = { version = "0.23", features = ["ring"] }
+rustls      = { version = "0.23", features = ["ring"], optional = true }
 
 # CLI (native only)
 clap        = { version = "4", features = ["derive"], optional = true }
