@@ -20,11 +20,19 @@ pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 // Webcash utilities (always available)
 pub use wallet::webcash::extract_webcash_secret;
 
+// Storage trait and types (always available)
+pub use wallet::store::{
+    HarmoniiStore, NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent,
+    PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord,
+    PaymentTransactionEventRecord, PaymentTransactionRecord, PaymentTransactionUpdate,
+    PgpIdentityRecord, PgpIdentityRow, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
+};
+pub use wallet::store_mem::MemHarmoniiStore;
+pub use wallet::browser_wallet::{self, BrowserWallet};
+
 // Webcash types from webylib (native only — webylib requires SQLite + tokio)
 #[cfg(feature = "native")]
-pub use wallet::webcash::{
-    Amount as WebcashAmount, PublicWebcash, SecretWebcash,
-};
+pub use wallet::webcash::{Amount as WebcashAmount, PublicWebcash, SecretWebcash};
 
 // ── Native-only modules and re-exports ───────────────────────────
 #[cfg(feature = "native")]
@@ -51,12 +59,10 @@ pub use voucher_wallet::{VoucherStats, VoucherWallet};
 pub use wallet::webcash::{WebcashServerClient, WebcashWallet};
 
 #[cfg(feature = "native")]
-pub use wallet::{
-    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
-    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
-    PaymentTransactionRecord, PaymentTransactionUpdate, PgpIdentityRecord, PgpIdentitySnapshot,
-    RgbWallet, WalletSlotRecord, WalletSnapshot,
-};
+pub use wallet::store_sqlite::SqliteHarmoniiStore;
+
+#[cfg(feature = "native")]
+pub use wallet::RgbWallet;
 
 // ── Optional features ────────────────────────────────────────────
 #[cfg(feature = "ark")]

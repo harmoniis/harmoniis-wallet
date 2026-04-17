@@ -429,18 +429,8 @@ pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-pub(crate) fn canonical_label(label: &str) -> Result<String> {
-    let canonical = label.trim();
-    if canonical.is_empty() {
-        return Err(Error::Other(anyhow::anyhow!("label cannot be empty")));
-    }
-    if canonical.len() > 64 {
-        return Err(Error::Other(anyhow::anyhow!(
-            "label too long (max 64 chars)"
-        )));
-    }
-    Ok(canonical.to_string())
-}
+// canonical_label is now in store.rs — imported by callers from super::store.
+pub(crate) use super::store::canonical_label;
 
 pub(crate) fn ensure_columns(
     conn: &Connection,

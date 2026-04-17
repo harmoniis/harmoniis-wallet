@@ -554,19 +554,19 @@ fn labeled_bitcoin_and_voucher_wallets_work() {
 
     // DB filenames follow convention: {label}_{family}.db
     assert_eq!(
-        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("webcash", "donation"),
+        harmoniis_wallet::wallet::labeled_wallets::wallet_db_filename("webcash", "donation"),
         "donation_webcash.db"
     );
     assert_eq!(
-        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("bitcoin", "main"),
+        harmoniis_wallet::wallet::labeled_wallets::wallet_db_filename("bitcoin", "main"),
         "main_bitcoin.db"
     );
     assert_eq!(
-        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("voucher", "cloudminer"),
+        harmoniis_wallet::wallet::labeled_wallets::wallet_db_filename("voucher", "cloudminer"),
         "cloudminer_voucher.db"
     );
     assert_eq!(
-        harmoniis_wallet::wallet::WalletCore::wallet_db_filename("rgb", "secondary"),
+        harmoniis_wallet::wallet::labeled_wallets::wallet_db_filename("rgb", "secondary"),
         "secondary_rgb.db"
     );
 }

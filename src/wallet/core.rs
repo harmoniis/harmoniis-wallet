@@ -1,8 +1,3 @@
-use serde::{Deserialize, Serialize};
-
-// ── Native implementation (SQLite-backed WalletCore) ─────────────
-use std::path::{Path, PathBuf};
-use rusqlite::{params, Connection};
 
 use crate::{
     error::{Error, Result},
@@ -11,107 +6,52 @@ use crate::{
 use super::keychain::{
     HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT, SLOT_FAMILY_VAULT,
 };
+use super::store::{canonical_label, HarmoniiStore, PgpIdentityRow};
 
-use super::schema::{
-    canonical_label, ensure_default_pgp_identity, ensure_root_and_identity_materialized,
-    metadata_value, migrate_identity_schema_if_present, migrate_rgb_state, same_path,
-    set_metadata_value, table_exists, META_KEY_MODEL_VERSION, META_RGB_PRIVATE_KEY_HEX,
-    META_ROOT_MNEMONIC, META_ROOT_PRIVATE_KEY_HEX, META_WALLET_LABEL,
-};
+#[cfg(feature = "native")]
+use std::path::Path;
+#[cfg(feature = "native")]
+use super::store_sqlite::SqliteHarmoniiStore;
 
 // Re-export submodule types for backward compatibility.
-pub use super::identities::PgpIdentityRecord;
-pub use super::payments::{
-    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
-    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
-    PaymentTransactionRecord, PaymentTransactionUpdate,
+pub use super::store::{
+    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent,
+    PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord,
+    PaymentTransactionEventRecord, PaymentTransactionRecord, PaymentTransactionUpdate,
+    PgpIdentityRecord, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
 };
-pub use super::snapshots::{PgpIdentitySnapshot, WalletSnapshot};
 
-const META_NICKNAME: &str = "nickname";
+pub(crate) const META_NICKNAME: &str = "nickname";
+pub(crate) const META_ROOT_PRIVATE_KEY_HEX: &str = "root_private_key_hex";
+pub(crate) const META_ROOT_MNEMONIC: &str = "root_mnemonic";
+pub(crate) const META_RGB_PRIVATE_KEY_HEX: &str = "rgb_private_key_hex";
+pub(crate) const META_KEY_MODEL_VERSION: &str = "key_model_version";
+pub(crate) const META_WALLET_LABEL: &str = "wallet_label";
 
-pub const MAX_PGP_KEYS: u32 = 1_000;
-const MASTER_DB_FILENAME: &str = "master.db";
-const LEGACY_RGB_DB: &str = "rgb.db";
-const LEGACY_WALLET_DB: &str = "wallet.db";
-const RGB_SHARD_DIR: &str = "identities";
-
-/// SQLite-backed Harmoniis wallet.
+/// Harmoniis wallet engine backed by [`HarmoniiStore`].
 pub struct WalletCore {
-    pub(crate) master_conn: Connection,
-    pub(crate) rgb_conn: Connection,
+    store: Box<dyn HarmoniiStore>,
 }
 
 /// Backward-compatible type alias.
 pub type RgbWallet = WalletCore;
 
-struct WalletDiskPaths {
-    base_dir: PathBuf,
-    master_path: PathBuf,
-    rgb_path: PathBuf,
-    wallet_migration_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalletSlotRecord {
-    pub family: String,
-    pub slot_index: u32,
-    pub descriptor: String,
-    pub db_rel_path: Option<String>,
-    pub label: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 impl WalletCore {
-    fn resolve_disk_paths(path: &Path) -> Result<WalletDiskPaths> {
-        let normalized = if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .is_empty()
-        {
-            PathBuf::from(MASTER_DB_FILENAME)
-        } else {
-            path.to_path_buf()
-        };
-        let file_name = normalized
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(MASTER_DB_FILENAME);
-        let base_dir = normalized
-            .parent()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let master_path = if file_name.eq_ignore_ascii_case(MASTER_DB_FILENAME) {
-            normalized.clone()
-        } else if file_name.eq_ignore_ascii_case(LEGACY_RGB_DB)
-            || file_name.eq_ignore_ascii_case("main_rgb.db")
-            || file_name.eq_ignore_ascii_case(LEGACY_WALLET_DB)
-        {
-            base_dir.join(MASTER_DB_FILENAME)
-        } else {
-            normalized.clone()
-        };
-        // Canonical RGB path: main_rgb.db.  Fall back to legacy rgb.db
-        // for existing wallets that haven't migrated yet.
-        let canonical_rgb = base_dir.join("main_rgb.db");
-        let legacy_rgb = base_dir.join(LEGACY_RGB_DB);
-        let rgb_path = if canonical_rgb.exists() {
-            canonical_rgb
-        } else if legacy_rgb.exists() {
-            legacy_rgb
-        } else {
-            canonical_rgb
-        };
-        Ok(WalletDiskPaths {
-            base_dir: base_dir.clone(),
-            master_path,
-            rgb_path,
-            wallet_migration_path: base_dir.join(LEGACY_WALLET_DB),
-        })
+    /// Construct from any `HarmoniiStore` implementation.
+    pub fn new(store: Box<dyn HarmoniiStore>) -> Self {
+        Self { store }
     }
 
+    /// Access the underlying store (e.g. for downcast).
+    pub fn store(&self) -> &dyn HarmoniiStore {
+        &*self.store
+    }
+}
+
+// ── Native constructors ─────────────────────────────────────────
+
+#[cfg(feature = "native")]
+impl WalletCore {
     fn derive_wallet_label(path: &Path) -> String {
         let stem = path
             .file_stem()
@@ -131,462 +71,11 @@ impl WalletCore {
         }
     }
 
-    fn init_master_schema(conn: &Connection, allow_generate: bool) -> Result<()> {
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode=WAL;
-            PRAGMA foreign_keys=ON;
-
-            CREATE TABLE IF NOT EXISTS wallet_metadata (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS pgp_identities (
-                label           TEXT PRIMARY KEY,
-                key_index       INTEGER NOT NULL UNIQUE,
-                private_key_hex TEXT NOT NULL,
-                public_key_hex  TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                is_active       INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS wallet_slots (
-                family      TEXT NOT NULL,
-                slot_index  INTEGER NOT NULL,
-                descriptor  TEXT NOT NULL,
-                db_rel_path TEXT,
-                label       TEXT,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL,
-                PRIMARY KEY (family, slot_index)
-            );
-
-            CREATE TABLE IF NOT EXISTS payment_attempts (
-                attempt_id        TEXT PRIMARY KEY,
-                created_at        TEXT NOT NULL,
-                updated_at        TEXT NOT NULL,
-                service_origin    TEXT NOT NULL,
-                endpoint_path     TEXT NOT NULL,
-                method            TEXT NOT NULL,
-                rail              TEXT NOT NULL,
-                action_hint       TEXT NOT NULL,
-                required_amount   TEXT NOT NULL,
-                payment_unit      TEXT NOT NULL,
-                payment_reference TEXT,
-                request_hash      TEXT NOT NULL,
-                response_status   INTEGER,
-                response_code     TEXT,
-                response_body     TEXT,
-                recovery_state    TEXT NOT NULL,
-                final_state       TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS payment_losses (
-                loss_id            TEXT PRIMARY KEY,
-                attempt_id         TEXT NOT NULL,
-                created_at         TEXT NOT NULL,
-                service_origin     TEXT NOT NULL,
-                endpoint_path      TEXT NOT NULL,
-                method             TEXT NOT NULL,
-                rail               TEXT NOT NULL,
-                amount             TEXT NOT NULL,
-                payment_reference  TEXT,
-                failure_stage      TEXT NOT NULL,
-                response_status    INTEGER,
-                response_code      TEXT,
-                response_body      TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS payment_blacklist (
-                service_origin      TEXT NOT NULL,
-                endpoint_path       TEXT NOT NULL,
-                method              TEXT NOT NULL,
-                rail                TEXT NOT NULL,
-                blacklisted_until   TEXT,
-                reason              TEXT NOT NULL,
-                triggered_by_loss_id TEXT,
-                created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL,
-                PRIMARY KEY (service_origin, endpoint_path, method, rail)
-            );
-
-            CREATE TABLE IF NOT EXISTS payment_transactions (
-                txn_id          TEXT PRIMARY KEY,
-                attempt_id      TEXT,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL,
-                occurred_at     TEXT NOT NULL,
-                direction       TEXT NOT NULL,
-                role            TEXT NOT NULL,
-                source_system   TEXT NOT NULL,
-                service_origin  TEXT,
-                frontend_kind   TEXT,
-                transport_kind  TEXT,
-                endpoint_path   TEXT,
-                method          TEXT,
-                session_id      TEXT,
-                action_kind     TEXT NOT NULL,
-                resource_ref    TEXT,
-                contract_ref    TEXT,
-                invoice_ref     TEXT,
-                challenge_id    TEXT,
-                rail            TEXT NOT NULL,
-                payment_unit    TEXT NOT NULL,
-                quoted_amount   TEXT,
-                settled_amount  TEXT,
-                fee_amount      TEXT,
-                proof_ref       TEXT,
-                proof_kind      TEXT,
-                payer_ref       TEXT,
-                payee_ref       TEXT,
-                request_hash    TEXT,
-                response_code   TEXT,
-                status          TEXT NOT NULL,
-                metadata_json   TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS payment_transaction_events (
-                event_id       TEXT PRIMARY KEY,
-                txn_id         TEXT NOT NULL,
-                created_at     TEXT NOT NULL,
-                event_type     TEXT NOT NULL,
-                status         TEXT NOT NULL,
-                actor          TEXT NOT NULL,
-                details_json   TEXT NOT NULL DEFAULT '{}'
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_payment_transactions_created_at
-                ON payment_transactions(created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_payment_transactions_status
-                ON payment_transactions(status, created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_payment_transactions_direction
-                ON payment_transactions(direction, created_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_payment_transactions_action_kind
-                ON payment_transactions(action_kind, created_at DESC);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_transactions_proof_ref
-                ON payment_transactions(direction, rail, proof_ref)
-                WHERE proof_ref IS NOT NULL AND proof_ref != '';
-            CREATE INDEX IF NOT EXISTS idx_payment_transaction_events_txn_id
-                ON payment_transaction_events(txn_id, created_at ASC);
-            ",
-        )?;
-        ensure_root_and_identity_materialized(conn, allow_generate)?;
-        ensure_default_pgp_identity(conn)?;
-        Ok(())
-    }
-
-    fn init_identity_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode=WAL;
-            PRAGMA foreign_keys=ON;
-
-            CREATE TABLE IF NOT EXISTS contracts (
-                contract_id        TEXT PRIMARY KEY,
-                contract_type      TEXT NOT NULL DEFAULT 'service',
-                status             TEXT NOT NULL DEFAULT 'issued',
-                witness_secret     TEXT,
-                witness_proof      TEXT,
-                amount_units       INTEGER NOT NULL DEFAULT 0,
-                work_spec          TEXT NOT NULL DEFAULT '',
-                buyer_fingerprint  TEXT NOT NULL DEFAULT '',
-                seller_fingerprint TEXT,
-                reference_post     TEXT,
-                delivery_deadline  TEXT,
-                role               TEXT NOT NULL DEFAULT 'buyer',
-                delivered_text     TEXT,
-                certificate_id     TEXT,
-                created_at         TEXT NOT NULL,
-                updated_at         TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS certificates (
-                certificate_id  TEXT PRIMARY KEY,
-                contract_id     TEXT,
-                witness_secret  TEXT,
-                witness_proof   TEXT,
-                created_at      TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS timeline_posts (
-                post_id      TEXT PRIMARY KEY,
-                created_at   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
-            );
-
-            CREATE TABLE IF NOT EXISTS timeline_comments (
-                comment_id    TEXT PRIMARY KEY,
-                post_id       TEXT NOT NULL DEFAULT '',
-                created_at    TEXT NOT NULL,
-                updated_at    TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
-            );
-
-            CREATE TABLE IF NOT EXISTS timeline_bids (
-                bid_post_id    TEXT PRIMARY KEY,
-                contract_id    TEXT NOT NULL DEFAULT '',
-                service_post_id TEXT NOT NULL DEFAULT '',
-                created_at     TEXT NOT NULL,
-                metadata_json  TEXT NOT NULL DEFAULT '{}'
-            );
-            ",
-        )?;
-        super::schema::migrate_identity_schema(conn)?;
-        Ok(())
-    }
-
-    pub(crate) fn with_identity_conn<T, F>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&Connection) -> Result<T>,
-    {
-        f(&self.rgb_conn)
-    }
-
-    pub(crate) fn refresh_slot_registry(&self) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let root_hex = self.derive_slot_hex("root", 0)?;
-        let rgb_hex = self.derive_slot_hex("rgb", 0)?;
-        let webcash_hex = self.derive_slot_hex("webcash", 0)?;
-        let voucher_hex = self.derive_slot_hex("voucher", 0)?;
-        let bitcoin_hex = self.derive_slot_hex("bitcoin", 0)?;
-        let vault_hex = self.derive_slot_hex(SLOT_FAMILY_VAULT, 0)?;
-
-        // Slot-0 entries for wallet families: label is always "main",
-        // db_rel_path follows the canonical {label}_{family}.db convention.
-        // root and vault slot 0 are internal (no label / no db file).
-        Self::upsert_slot_0(
-            &self.master_conn,
-            "rgb",
-            &rgb_hex,
-            Some("main_rgb.db"),
-            Some("main"),
-            &now,
-        )?;
-        Self::upsert_slot_0(
-            &self.master_conn,
-            "webcash",
-            &webcash_hex,
-            Some("main_webcash.db"),
-            Some("main"),
-            &now,
-        )?;
-        Self::upsert_slot_0(
-            &self.master_conn,
-            "bitcoin",
-            &bitcoin_hex,
-            Some("main_bitcoin.db"),
-            Some("main"),
-            &now,
-        )?;
-        Self::upsert_slot_0(
-            &self.master_conn,
-            "voucher",
-            &voucher_hex,
-            Some("main_voucher.db"),
-            Some("main"),
-            &now,
-        )?;
-        Self::upsert_slot_0(&self.master_conn, "root", &root_hex, None, None, &now)?;
-        Self::upsert_slot_0(
-            &self.master_conn,
-            SLOT_FAMILY_VAULT,
-            &vault_hex,
-            None,
-            None,
-            &now,
-        )?;
-
-        let mut vault_stmt = self.master_conn.prepare(
-            "SELECT slot_index, label, created_at
-             FROM wallet_slots
-             WHERE family = ?1 AND slot_index > 0
-             ORDER BY slot_index ASC",
-        )?;
-        let vault_rows = vault_stmt.query_map(params![SLOT_FAMILY_VAULT], |row| {
-            Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let vault_rows = vault_rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(vault_stmt);
-        for row in vault_rows {
-            let (slot_index, label, created_at) = row;
-            let public_key_hex = self
-                .derive_vault_identity_for_index(slot_index)?
-                .public_key_hex();
-            self.master_conn.execute(
-                "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
-                params![
-                    SLOT_FAMILY_VAULT,
-                    i64::from(slot_index),
-                    public_key_hex,
-                    label,
-                    created_at,
-                    now
-                ],
-            )?;
-        }
-
-        let mut stmt = self.master_conn.prepare(
-            "SELECT key_index, public_key_hex, label FROM pgp_identities ORDER BY key_index ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let key_index_i: i64 = row.get(0)?;
-            let key_index = u32::try_from(key_index_i)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, key_index_i))?;
-            let public_key_hex: String = row.get(1)?;
-            let label: String = row.get(2)?;
-            Ok((key_index, public_key_hex, label))
-        })?;
-        for row in rows {
-            let (key_index, public_key_hex, label) = row?;
-            self.master_conn.execute(
-                "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-                 VALUES ('pgp', ?1, ?2, ?3, ?4, COALESCE((SELECT created_at FROM wallet_slots WHERE family='pgp' AND slot_index=?1), ?5), ?5)",
-                params![
-                    i64::from(key_index),
-                    public_key_hex,
-                    Option::<String>::None,
-                    label,
-                    now
-                ],
-            )?;
-        }
-        Ok(())
-    }
-
-    fn import_previous_layout(paths: &WalletDiskPaths) -> Result<()> {
-        let source_path = if paths.rgb_path.exists() {
-            paths.rgb_path.clone()
-        } else if paths.wallet_migration_path.exists() {
-            paths.wallet_migration_path.clone()
-        } else {
-            return Err(Error::NotFound("no wallet data source found".to_string()));
-        };
-
-        let source_conn = Connection::open(&source_path)?;
-        migrate_identity_schema_if_present(&source_conn)?;
-
-        let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn, true)?; // import always allows key generation
-
-        if table_exists(&source_conn, "wallet_metadata")? {
-            let mut stmt = source_conn.prepare("SELECT key, value FROM wallet_metadata")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            for row in rows {
-                let (key, value) = row?;
-                master_conn.execute(
-                    "INSERT OR REPLACE INTO wallet_metadata (key, value) VALUES (?1, ?2)",
-                    params![key, value],
-                )?;
-            }
-        }
-
-        if table_exists(&source_conn, "pgp_identities")? {
-            let mut stmt = source_conn.prepare(
-                "SELECT label, key_index, private_key_hex, public_key_hex, created_at, is_active
-                 FROM pgp_identities",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })?;
-            master_conn.execute("DELETE FROM pgp_identities", [])?;
-            for row in rows {
-                let (label, key_index, private_key_hex, public_key_hex, created_at, is_active) =
-                    row?;
-                master_conn.execute(
-                    "INSERT OR REPLACE INTO pgp_identities
-                     (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        label,
-                        key_index,
-                        private_key_hex,
-                        public_key_hex,
-                        created_at,
-                        is_active
-                    ],
-                )?;
-            }
-        }
-        ensure_root_and_identity_materialized(&master_conn, true)?;
-        ensure_default_pgp_identity(&master_conn)?;
-        drop(master_conn);
-
-        let rgb_conn = Connection::open(&paths.rgb_path)?;
-        Self::init_identity_schema(&rgb_conn)?;
-        if !same_path(&source_path, &paths.rgb_path) {
-            migrate_rgb_state(&source_conn, &rgb_conn)?;
-        }
-        Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
-        Ok(())
-    }
-
-    fn merge_sharded_rgb_data(base_dir: &Path, rgb_conn: &Connection) -> Result<()> {
-        let shard_dir = base_dir.join(RGB_SHARD_DIR);
-        if !shard_dir.exists() {
-            return Ok(());
-        }
-        for entry in std::fs::read_dir(&shard_dir)
-            .map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard dir: {e}")))?
-        {
-            let entry = entry
-                .map_err(|e| Error::Other(anyhow::anyhow!("cannot read rgb shard entry: {e}")))?;
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !name.starts_with("identity-") || !name.ends_with(".db") {
-                continue;
-            }
-            let shard_conn = Connection::open(&path)?;
-            migrate_identity_schema_if_present(&shard_conn)?;
-            migrate_rgb_state(&shard_conn, rgb_conn)?;
-        }
-        Ok(())
-    }
-
-    fn open_from_disk(path: &Path, allow_create: bool) -> Result<Self> {
-        let paths = Self::resolve_disk_paths(path)?;
-        std::fs::create_dir_all(&paths.base_dir)
-            .map_err(|e| Error::Other(anyhow::anyhow!("cannot create wallet dir: {e}")))?;
-
-        if !paths.master_path.exists() {
-            if paths.rgb_path.exists() || paths.wallet_migration_path.exists() {
-                Self::import_previous_layout(&paths)?;
-            } else if !allow_create {
-                return Err(Error::NotFound(format!(
-                    "master wallet database not found at {}",
-                    paths.master_path.display()
-                )));
-            }
-        }
-
-        let master_conn = Connection::open(&paths.master_path)?;
-        Self::init_master_schema(&master_conn, allow_create)?;
-        let rgb_conn = Connection::open(&paths.rgb_path)?;
-        Self::init_identity_schema(&rgb_conn)?;
-        Self::merge_sharded_rgb_data(&paths.base_dir, &rgb_conn)?;
-        let wallet = Self {
-            master_conn,
-            rgb_conn,
-        };
+    /// Create a new wallet at the given path, generating a fresh root key.
+    pub fn create(path: &Path) -> Result<Self> {
+        let store = SqliteHarmoniiStore::create(path)?;
+        let wallet = Self::new(Box::new(store));
         wallet.refresh_slot_registry()?;
-
         if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
             let derived = Self::derive_wallet_label(path);
             wallet.set_wallet_label(&derived)?;
@@ -596,26 +85,24 @@ impl WalletCore {
         Ok(wallet)
     }
 
-    /// Create a new wallet at the given path, generating a fresh root key.
-    pub fn create(path: &Path) -> Result<Self> {
-        Self::open_from_disk(path, true)
-    }
-
     /// Open an existing wallet at the given path.
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_from_disk(path, false)
+        let store = SqliteHarmoniiStore::open(path)?;
+        let wallet = Self::new(Box::new(store));
+        wallet.refresh_slot_registry()?;
+        if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
+            let derived = Self::derive_wallet_label(path);
+            wallet.set_wallet_label(&derived)?;
+            let _ = wallet.rename_pgp_label("default", &derived);
+            wallet.refresh_slot_registry()?;
+        }
+        Ok(wallet)
     }
 
     /// Open an in-memory wallet (for tests).
     pub fn open_memory() -> Result<Self> {
-        let master_conn = Connection::open_in_memory()?;
-        Self::init_master_schema(&master_conn, true)?; // memory wallets always generate fresh keys
-        let rgb_conn = Connection::open_in_memory()?;
-        Self::init_identity_schema(&rgb_conn)?;
-        let wallet = Self {
-            master_conn,
-            rgb_conn,
-        };
+        let store = SqliteHarmoniiStore::open_memory()?;
+        let wallet = Self::new(Box::new(store));
         if wallet.wallet_label()?.as_deref().unwrap_or("default") == "default" {
             wallet.set_wallet_label("memory-wallet")?;
             let _ = wallet.rename_pgp_label("default", "memory-wallet");
@@ -623,16 +110,19 @@ impl WalletCore {
         wallet.refresh_slot_registry()?;
         Ok(wallet)
     }
+}
 
-    // ── Identity material ────────────────────────────────────────────────────
+// ── Identity material ───────────────────────────────────────────
 
+impl WalletCore {
     pub fn root_private_key_hex(&self) -> Result<String> {
-        metadata_value(&self.master_conn, META_ROOT_PRIVATE_KEY_HEX)?
+        self.store
+            .get_meta(META_ROOT_PRIVATE_KEY_HEX)?
             .ok_or_else(|| Error::Other(anyhow::anyhow!("missing master entropy hex")))
     }
 
     pub(crate) fn keychain(&self) -> Result<HdKeychain> {
-        if let Some(words) = metadata_value(&self.master_conn, META_ROOT_MNEMONIC)? {
+        if let Some(words) = self.store.get_meta(META_ROOT_MNEMONIC)? {
             return HdKeychain::from_mnemonic_words(&words);
         }
         let entropy_hex = self.root_private_key_hex()?;
@@ -640,26 +130,16 @@ impl WalletCore {
     }
 
     pub(crate) fn set_master_keychain_material(&self, keychain: &HdKeychain) -> Result<()> {
-        set_metadata_value(
-            &self.master_conn,
-            META_ROOT_PRIVATE_KEY_HEX,
-            &keychain.entropy_hex(),
-        )?;
-        set_metadata_value(
-            &self.master_conn,
-            META_ROOT_MNEMONIC,
-            &keychain.mnemonic_words(),
-        )?;
-        set_metadata_value(
-            &self.master_conn,
+        self.store
+            .set_meta(META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;
+        self.store
+            .set_meta(META_ROOT_MNEMONIC, &keychain.mnemonic_words())?;
+        self.store.set_meta(
             META_RGB_PRIVATE_KEY_HEX,
             &keychain.derive_slot_hex("rgb", 0)?,
         )?;
-        set_metadata_value(
-            &self.master_conn,
-            META_KEY_MODEL_VERSION,
-            KEY_MODEL_VERSION_V3,
-        )?;
+        self.store
+            .set_meta(META_KEY_MODEL_VERSION, KEY_MODEL_VERSION_V3)?;
         Ok(())
     }
 
@@ -688,7 +168,6 @@ impl WalletCore {
         self.derive_slot_hex(SLOT_FAMILY_VAULT, 0)
     }
 
-    /// Backward-compatible alias retained for Harmonia integration naming.
     pub fn derive_harmonia_vault_master_key_hex(&self) -> Result<String> {
         self.derive_slot_hex(SLOT_FAMILY_HARMONIA_VAULT, 0)
     }
@@ -705,9 +184,8 @@ impl WalletCore {
         self.keychain().map(|k| k.mnemonic_words())
     }
 
-    /// Export the canonical recovery phrase stored in wallet metadata.
     pub fn export_recovery_mnemonic(&self) -> Result<String> {
-        if let Some(mnemonic) = metadata_value(&self.master_conn, META_ROOT_MNEMONIC)? {
+        if let Some(mnemonic) = self.store.get_meta(META_ROOT_MNEMONIC)? {
             return Ok(mnemonic);
         }
         self.export_master_key_mnemonic()
@@ -723,19 +201,15 @@ impl WalletCore {
         let label = canonical_label(&wallet_label)?;
         let pgp0_hex = keychain.derive_slot_hex("pgp", 0)?;
         let pgp0 = Identity::from_hex(&pgp0_hex)?;
-        let tx = self.master_conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM pgp_identities", [])?;
-        tx.execute(
-            "INSERT INTO pgp_identities (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
-             VALUES (?1, 0, ?2, ?3, ?4, 1)",
-            params![
-                label,
-                pgp0_hex,
-                pgp0.public_key_hex(),
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        tx.commit()?;
+
+        self.store.replace_all_pgp(&[PgpIdentityRow {
+            label,
+            key_index: 0,
+            private_key_hex: pgp0_hex,
+            public_key_hex: pgp0.public_key_hex(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            is_active: true,
+        }])?;
         self.refresh_slot_registry()?;
         Ok(())
     }
@@ -746,18 +220,15 @@ impl WalletCore {
     }
 
     pub fn has_local_state(&self) -> Result<bool> {
-        let (contracts, certs) = self.with_identity_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT COUNT(*) FROM contracts")?;
-            let contracts: i64 = stmt.query_row([], |row| row.get(0))?;
-            let mut stmt = conn.prepare("SELECT COUNT(*) FROM certificates")?;
-            let certs: i64 = stmt.query_row([], |row| row.get(0))?;
-            Ok((contracts, certs))
-        })?;
+        let contracts = self.store.count_contracts()?;
+        let certs = self.store.count_certificates()?;
         Ok(contracts > 0 || certs > 0)
     }
+}
 
-    // ── Vault identities ────────────────────────────────────────────────────
+// ── Vault identities ────────────────────────────────────────────
 
+impl WalletCore {
     pub fn derive_vault_identity_for_index(&self, key_index: u32) -> Result<Identity> {
         if key_index == 0 {
             return Err(Error::Other(anyhow::anyhow!(
@@ -792,27 +263,13 @@ impl WalletCore {
         let identity = self.derive_vault_identity_for_index(key_index)?;
         let public_key_hex = identity.public_key_hex();
 
-        let tx = self.master_conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM wallet_slots WHERE family = ?1 AND slot_index = ?2",
-            params![SLOT_FAMILY_VAULT, i64::from(key_index)],
+        self.store.replace_slot_at(
+            SLOT_FAMILY_VAULT,
+            key_index,
+            &label,
+            &public_key_hex,
+            &chrono::Utc::now().to_rfc3339(),
         )?;
-        tx.execute(
-            "DELETE FROM wallet_slots WHERE family = ?1 AND label = ?2",
-            params![SLOT_FAMILY_VAULT, label.clone()],
-        )?;
-        tx.execute(
-            "INSERT INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?5)",
-            params![
-                SLOT_FAMILY_VAULT,
-                i64::from(key_index),
-                public_key_hex,
-                label,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        tx.commit()?;
         self.refresh_slot_registry()?;
         self.vault_identity_by_index(key_index)
     }
@@ -843,10 +300,7 @@ impl WalletCore {
     }
 
     fn next_vault_key_index(&self) -> Result<u32> {
-        let mut stmt = self
-            .master_conn
-            .prepare("SELECT COALESCE(MAX(slot_index), 0) FROM wallet_slots WHERE family = ?1")?;
-        let max_idx: i64 = stmt.query_row(params![SLOT_FAMILY_VAULT], |row| row.get(0))?;
+        let max_idx = self.store.max_slot_index(SLOT_FAMILY_VAULT)?;
         let next = max_idx.saturating_add(1);
         let next = u32::try_from(next)
             .map_err(|_| Error::Other(anyhow::anyhow!("too many vault identities in wallet")))?;
@@ -863,67 +317,43 @@ impl WalletCore {
         let mut candidate = desired.to_string();
         let mut suffix = 1u32;
         loop {
-            let mut stmt = self.master_conn.prepare(
-                "SELECT slot_index FROM wallet_slots
-                 WHERE family = ?1 AND label = ?2
-                 LIMIT 1",
-            )?;
-            let mut rows = stmt.query(params![SLOT_FAMILY_VAULT, candidate.clone()])?;
-            let Some(row) = rows.next()? else {
-                return Ok(candidate);
-            };
-            let existing_i: i64 = row.get(0)?;
-            let existing = u32::try_from(existing_i).map_err(|_| {
-                Error::Other(anyhow::anyhow!("invalid vault key index in wallet_slots"))
-            })?;
-            if existing == key_index {
-                return Ok(candidate);
+            match self
+                .store
+                .get_slot_index_by_label(SLOT_FAMILY_VAULT, &candidate)?
+            {
+                None => return Ok(candidate),
+                Some(existing) if existing == key_index => return Ok(candidate),
+                _ => {
+                    candidate = format!("{desired}-{suffix}");
+                    suffix = suffix.saturating_add(1);
+                }
             }
-            candidate = format!("{desired}-{suffix}");
-            suffix = suffix.saturating_add(1);
         }
     }
+}
 
-    /// Upsert a slot-0 entry in wallet_slots, preserving created_at.
-    fn upsert_slot_0(
-        conn: &Connection,
-        family: &str,
-        descriptor: &str,
-        db_rel_path: Option<&str>,
-        label: Option<&str>,
-        now: &str,
-    ) -> Result<()> {
-        conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots
-                (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES (?1, 0, ?2, ?3, ?4,
-                COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=0), ?5), ?5)",
-            params![family, descriptor, db_rel_path, label, now],
-        )?;
-        Ok(())
-    }
+// ── Wallet metadata ─────────────────────────────────────────────
 
-    // ── Wallet metadata ──────────────────────────────────────────────────────
-
+impl WalletCore {
     pub fn fingerprint(&self) -> Result<String> {
         Ok(self.rgb_identity()?.fingerprint())
     }
 
     pub fn nickname(&self) -> Result<Option<String>> {
-        metadata_value(&self.master_conn, META_NICKNAME)
+        self.store.get_meta(META_NICKNAME)
     }
 
     pub fn set_nickname(&self, nick: &str) -> Result<()> {
-        set_metadata_value(&self.master_conn, META_NICKNAME, nick)
+        self.store.set_meta(META_NICKNAME, nick)
     }
 
     pub fn wallet_label(&self) -> Result<Option<String>> {
-        metadata_value(&self.master_conn, META_WALLET_LABEL)
+        self.store.get_meta(META_WALLET_LABEL)
     }
 
     pub fn set_wallet_label(&self, label: &str) -> Result<()> {
         let canonical = canonical_label(label)?;
-        let out = set_metadata_value(&self.master_conn, META_WALLET_LABEL, &canonical);
+        let out = self.store.set_meta(META_WALLET_LABEL, &canonical);
         if out.is_ok() {
             let _ = self.refresh_slot_registry();
         }
@@ -931,41 +361,175 @@ impl WalletCore {
     }
 
     pub fn list_wallet_slots(&self, family: Option<&str>) -> Result<Vec<WalletSlotRecord>> {
-        let sql = if family.is_some() {
-            "SELECT family, slot_index, descriptor, db_rel_path, label, created_at, updated_at
-             FROM wallet_slots
-             WHERE family = ?1
-             ORDER BY family ASC, slot_index ASC"
-        } else {
-            "SELECT family, slot_index, descriptor, db_rel_path, label, created_at, updated_at
-             FROM wallet_slots
-             ORDER BY family ASC, slot_index ASC"
-        };
-        let mut stmt = self.master_conn.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<WalletSlotRecord> {
-            Ok(WalletSlotRecord {
-                family: row.get(0)?,
-                slot_index: row.get(1)?,
-                descriptor: row.get(2)?,
-                db_rel_path: row.get(3)?,
-                label: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+        self.store.list_wallet_slots(family)
+    }
+
+    pub(crate) fn refresh_slot_registry(&self) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let root_hex = self.derive_slot_hex("root", 0)?;
+        let rgb_hex = self.derive_slot_hex("rgb", 0)?;
+        let webcash_hex = self.derive_slot_hex("webcash", 0)?;
+        let voucher_hex = self.derive_slot_hex("voucher", 0)?;
+        let bitcoin_hex = self.derive_slot_hex("bitcoin", 0)?;
+        let vault_hex = self.derive_slot_hex(SLOT_FAMILY_VAULT, 0)?;
+
+        // Slot-0 entries for wallet families
+        let slot_0_entries: &[(&str, &str, Option<&str>, Option<&str>)] = &[
+            ("rgb", &rgb_hex, Some("main_rgb.db"), Some("main")),
+            ("webcash", &webcash_hex, Some("main_webcash.db"), Some("main")),
+            ("bitcoin", &bitcoin_hex, Some("main_bitcoin.db"), Some("main")),
+            ("voucher", &voucher_hex, Some("main_voucher.db"), Some("main")),
+            ("root", &root_hex, None, None),
+            (SLOT_FAMILY_VAULT, &vault_hex, None, None),
+        ];
+        for &(family, descriptor, db_rel_path, label) in slot_0_entries {
+            self.store.upsert_wallet_slot(&WalletSlotRecord {
+                family: family.to_string(),
+                slot_index: 0,
+                descriptor: descriptor.to_string(),
+                db_rel_path: db_rel_path.map(ToString::to_string),
+                label: label.map(ToString::to_string),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })?;
+        }
+
+        // Refresh vault identity slots above 0
+        let vault_slots = self.store.list_wallet_slots(Some(SLOT_FAMILY_VAULT))?;
+        for slot in vault_slots.iter().filter(|s| s.slot_index > 0) {
+            let public_key_hex = self
+                .derive_vault_identity_for_index(slot.slot_index)?
+                .public_key_hex();
+            self.store.upsert_wallet_slot(&WalletSlotRecord {
+                family: SLOT_FAMILY_VAULT.to_string(),
+                slot_index: slot.slot_index,
+                descriptor: public_key_hex,
+                db_rel_path: None,
+                label: slot.label.clone(),
+                created_at: slot.created_at.clone(),
+                updated_at: now.clone(),
+            })?;
+        }
+
+        // Refresh PGP identity slots from pgp_identities table
+        let pgp_rows = self.store.list_pgp_raw()?;
+        for row in &pgp_rows {
+            self.store.upsert_wallet_slot(&WalletSlotRecord {
+                family: "pgp".to_string(),
+                slot_index: row.key_index,
+                descriptor: row.public_key_hex.clone(),
+                db_rel_path: None,
+                label: Some(row.label.clone()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })?;
+        }
+        Ok(())
+    }
+}
+
+// ── Labeled wallet operations ───────────────────────────────────
+
+use super::labeled_wallets::{LabeledWallet, wallet_db_filename};
+
+impl WalletCore {
+    pub fn derive_secret_for_label(&self, family: &str, label: &str) -> Result<(String, u32)> {
+        let index = self.resolve_or_create_wallet_slot(family, label)?;
+        let secret = self.derive_slot_hex(family, index)?;
+        Ok((secret, index))
+    }
+
+    pub fn derive_webcash_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
+        self.derive_secret_for_label("webcash", label)
+    }
+
+    pub fn derive_bitcoin_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
+        self.derive_secret_for_label("bitcoin", label)
+    }
+
+    pub fn derive_voucher_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
+        self.derive_secret_for_label("voucher", label)
+    }
+
+    pub fn derive_rgb_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
+        self.derive_secret_for_label("rgb", label)
+    }
+
+    pub fn list_labeled_wallets(&self, family: &str) -> Result<Vec<LabeledWallet>> {
+        let slots = self.store.list_wallet_slots(Some(family))?;
+        Ok(slots
+            .into_iter()
+            .map(|s| {
+                let label = s.label.unwrap_or_else(|| {
+                    if s.slot_index == 0 {
+                        "main".to_string()
+                    } else {
+                        format!("{family}-{}", s.slot_index)
+                    }
+                });
+                let db_filename =
+                    s.db_rel_path
+                        .unwrap_or_else(|| wallet_db_filename(&s.family, &label));
+                LabeledWallet {
+                    family: s.family,
+                    label,
+                    slot_index: s.slot_index,
+                    db_filename,
+                    descriptor: s.descriptor,
+                }
             })
-        };
-        let rows = match family {
-            Some(name) => stmt.query_map(params![name], mapper)?,
-            None => stmt.query_map([], mapper)?,
-        };
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::Storage)
+            .collect())
+    }
+
+    fn resolve_or_create_wallet_slot(&self, family: &str, label: &str) -> Result<u32> {
+        let canonical = canonical_label(label)?;
+
+        if let Some(index) = self.store.get_slot_index_by_label(family, &canonical)? {
+            return Ok(index);
+        }
+
+        if canonical == "main" {
+            self.register_wallet_slot(family, 0, "main")?;
+            return Ok(0);
+        }
+
+        let max_idx = self.store.max_slot_index(family)?;
+        let next = (max_idx + 1).max(1) as u32;
+        if next >= super::keychain::MAX_LABELED_WALLETS {
+            return Err(Error::Other(anyhow::anyhow!(
+                "too many {family} wallets (max {})",
+                super::keychain::MAX_LABELED_WALLETS - 1
+            )));
+        }
+
+        self.register_wallet_slot(family, next, &canonical)?;
+        Ok(next)
+    }
+
+    fn register_wallet_slot(&self, family: &str, index: u32, label: &str) -> Result<()> {
+        let descriptor = self.derive_slot_hex(family, index)?;
+        let db_filename = wallet_db_filename(family, label);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.store.upsert_wallet_slot(&WalletSlotRecord {
+            family: family.to_string(),
+            slot_index: index,
+            descriptor,
+            db_rel_path: Some(db_filename),
+            label: Some(label.to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+        })?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::WalletCore;
-    use crate::wallet::payments::{NewPaymentTransaction, NewPaymentTransactionEvent, PaymentTransactionUpdate};
+    use crate::wallet::store::{
+        NewPaymentTransaction, NewPaymentTransactionEvent, PaymentTransactionUpdate,
+    };
 
     #[test]
     fn payment_transactions_round_trip_in_memory_wallet() {
@@ -1174,107 +738,5 @@ mod tests {
                 metadata_json: None,
             })
             .expect("same proof_ref on different direction should succeed");
-    }
-}
-
-// ── Labeled wallet operations (moved from labeled_wallets.rs) ────
-
-use super::labeled_wallets::{LabeledWallet, wallet_db_filename};
-
-impl WalletCore {
-    /// Generic: derive the master secret hex for any labeled wallet family.
-    pub fn derive_secret_for_label(&self, family: &str, label: &str) -> Result<(String, u32)> {
-        let index = self.resolve_or_create_wallet_slot(family, label)?;
-        let secret = self.derive_slot_hex(family, index)?;
-        Ok((secret, index))
-    }
-
-    pub fn derive_webcash_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        self.derive_secret_for_label("webcash", label)
-    }
-
-    pub fn derive_bitcoin_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        self.derive_secret_for_label("bitcoin", label)
-    }
-
-    pub fn derive_voucher_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        self.derive_secret_for_label("voucher", label)
-    }
-
-    pub fn derive_rgb_secret_for_label(&self, label: &str) -> Result<(String, u32)> {
-        self.derive_secret_for_label("rgb", label)
-    }
-
-    /// List all labeled wallets for a family.
-    pub fn list_labeled_wallets(&self, family: &str) -> Result<Vec<LabeledWallet>> {
-        let mut stmt = self.master_conn.prepare(
-            "SELECT family, slot_index, descriptor, db_rel_path, label
-             FROM wallet_slots
-             WHERE family = ?1
-             ORDER BY slot_index ASC",
-        )?;
-        let rows = stmt.query_map(params![family], |row| {
-            let family: String = row.get(0)?;
-            let slot_index: u32 = row.get(1)?;
-            let descriptor: String = row.get(2)?;
-            let db_rel_path: Option<String> = row.get(3)?;
-            let label: Option<String> = row.get(4)?;
-            let label = label.unwrap_or_else(|| {
-                if slot_index == 0 { "main".to_string() } else { format!("{family}-{slot_index}") }
-            });
-            let db_filename = db_rel_path.unwrap_or_else(|| wallet_db_filename(&family, &label));
-            Ok(LabeledWallet { family, label, slot_index, db_filename, descriptor })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::Storage)
-    }
-
-    /// Resolve an existing labeled wallet slot, or create a new one.
-    fn resolve_or_create_wallet_slot(&self, family: &str, label: &str) -> Result<u32> {
-        let canonical = super::schema::canonical_label(label)?;
-
-        let mut stmt = self.master_conn.prepare(
-            "SELECT slot_index FROM wallet_slots WHERE family = ?1 AND label = ?2 LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![family, canonical])?;
-        if let Some(row) = rows.next()? {
-            let index: u32 = row.get(0)?;
-            return Ok(index);
-        }
-        drop(rows);
-        drop(stmt);
-
-        if canonical == "main" {
-            self.register_wallet_slot(family, 0, "main")?;
-            return Ok(0);
-        }
-
-        let mut next_stmt = self.master_conn.prepare(
-            "SELECT COALESCE(MAX(slot_index), -1) FROM wallet_slots WHERE family = ?1",
-        )?;
-        let max_idx: i64 = next_stmt.query_row(params![family], |row| row.get(0))?;
-        let next = (max_idx + 1).max(1) as u32;
-        if next >= super::keychain::MAX_LABELED_WALLETS {
-            return Err(Error::Other(anyhow::anyhow!(
-                "too many {family} wallets (max {})",
-                super::keychain::MAX_LABELED_WALLETS - 1
-            )));
-        }
-
-        self.register_wallet_slot(family, next, &canonical)?;
-        Ok(next)
-    }
-
-    fn register_wallet_slot(&self, family: &str, index: u32, label: &str) -> Result<()> {
-        let descriptor = self.derive_slot_hex(family, index)?;
-        let db_filename = wallet_db_filename(family, label);
-        let now = chrono::Utc::now().to_rfc3339();
-
-        self.master_conn.execute(
-            "INSERT OR REPLACE INTO wallet_slots (family, slot_index, descriptor, db_rel_path, label, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, COALESCE((SELECT created_at FROM wallet_slots WHERE family=?1 AND slot_index=?2), ?6), ?6)",
-            params![family, i64::from(index), descriptor, db_filename, label, now],
-        )?;
-        Ok(())
     }
 }

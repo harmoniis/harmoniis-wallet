@@ -7,11 +7,15 @@
 //! - `vault` — HKDF-based vault key derivation (AEAD, signing, MQTT)
 //! - `webcash` — Webcash type re-exports from webylib
 //! - `labeled_wallets` — Labeled wallet data types
+//! - `store` — `HarmoniiStore` trait + all storage types
+//! - `store_mem` — `MemHarmoniiStore` (in-memory, JSON-serializable)
+//! - `core` — `WalletCore` struct + business logic
+//! - `identities`, `payments`, `contracts`, `snapshots` — domain methods
 //!
 //! **Native only (requires `native` feature — SQLite-backed):**
-//! - `core` — `WalletCore` struct and all wallet operations
+//! - `store_sqlite` — `SqliteHarmoniiStore` (two SQLite connections)
 //! - `schema` — Database schema and migrations
-//! - `contracts`, `identities`, `payments`, `snapshots`, `voucher`
+//! - `voucher` — Voucher wallet (separate SQLite store)
 //!
 //! **Optional protocols:**
 //! - `bitcoin` — BDK Bitcoin wallet (requires `bitcoin` feature)
@@ -22,20 +26,22 @@ pub mod keychain;
 pub mod vault;
 pub mod webcash;
 pub mod labeled_wallets;
+pub mod store;
+pub mod store_mem;
+pub mod browser_wallet;
 
-// ── Native only (SQLite-backed WalletCore) ───────────────────────
-#[cfg(feature = "native")]
+// ── Always available (business logic, uses HarmoniiStore trait) ──
 mod core;
-#[cfg(feature = "native")]
 pub mod contracts;
-#[cfg(feature = "native")]
 pub mod identities;
-#[cfg(feature = "native")]
 pub mod payments;
+pub mod snapshots;
+
+// ── Native only (SQLite-backed) ─────────────────────────────────
+#[cfg(feature = "native")]
+pub mod store_sqlite;
 #[cfg(feature = "native")]
 pub mod schema;
-#[cfg(feature = "native")]
-pub mod snapshots;
 #[cfg(feature = "native")]
 pub mod voucher;
 
@@ -45,6 +51,5 @@ pub mod ark;
 #[cfg(feature = "bitcoin")]
 pub mod bitcoin;
 
-// ── Re-exports from native core ──────────────────────────────────
-#[cfg(feature = "native")]
+// ── Re-exports from core ────────────────────────────────────────
 pub use self::core::*;
