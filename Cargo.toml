@@ -25,7 +25,7 @@ name = "harmoniis_wallet"
 [[bin]]
 name = "hrmw"
 path = "src/bin/hrmw.rs"
-required-features = ["cli"]
+required-features = ["cli", "bitcoin", "ark"]
 
 # ── Feature flags ──────────────────────────────────────────────────────────────
 [features]
@@ -35,6 +35,8 @@ default = ["native"]
 native = [
     "cli",
     "bundled-sqlite",
+    "bitcoin",
+    "ark",
     "dep:rusqlite",
     "dep:reqwest",
     "dep:tokio",
