@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use super::keychain::SLOT_FAMILY_VAULT;
+#[cfg(feature = "native")]
 use super::WalletCore;
 use crate::error::{Error, Result};
 
@@ -25,6 +26,7 @@ pub struct VaultRootMaterial {
 }
 
 impl VaultRootMaterial {
+    #[cfg(feature = "native")]
     pub fn from_wallet(wallet: &WalletCore) -> Result<Self> {
         let slot_hex = wallet.derive_vault_master_key_hex()?;
         Self::from_slot_hex(&slot_hex)

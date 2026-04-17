@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.61"
+version     = "0.1.62"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -25,46 +25,73 @@ name = "harmoniis_wallet"
 [[bin]]
 name = "hrmw"
 path = "src/bin/hrmw.rs"
+required-features = ["cli"]
 
 # ── Feature flags ──────────────────────────────────────────────────────────────
 [features]
-# Bundle SQLite from source — enables `cargo install` without system libsqlite3.
-# Disable with `default-features = false` to link against the system library instead.
-default = ["bundled-sqlite", "gpu", "cuda"]
-bundled-sqlite = ["rusqlite/bundled"]
+default = ["native"]
+
+# Native target: full functionality (SQLite, networking, CLI, mining)
+native = [
+    "cli",
+    "bundled-sqlite",
+    "dep:rusqlite",
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:dirs-next",
+    "dep:toml",
+    "dep:image",
+    "dep:signal-hook",
+    "dep:libc",
+    "dep:rayon",
+    "dep:keyring",
+]
+
+# CLI binary (requires native)
+cli = ["dep:clap"]
+
+# Bundle SQLite from source
+bundled-sqlite = ["rusqlite?/bundled"]
+
+# GPU mining
 gpu = ["dep:wgpu"]
 cuda = ["dep:cudarc"]
-# Vendor OpenSSL from source for cross-compilation targets (Android)
-# that lack system OpenSSL. iOS uses Security.framework via native-tls.
+
+# Bitcoin (BDK + Esplora)
+bitcoin = ["dep:bdk_wallet", "dep:bdk_esplora"]
+
+# ARK protocol (offchain Bitcoin via VTXOs)
+ark = ["dep:ark-client", "dep:ark-bdk-wallet", "dep:ark-core", "dep:ark-grpc"]
+
+# WASM target: pure crypto + state management, no I/O
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
+
+# Vendor OpenSSL for Android cross-compile
 vendored-openssl = ["openssl/vendored"]
 
-# DORMANT — Phase 3 security tokens (ContractBasket, Bond, RevenueShare).
-# Do NOT enable in production. Dependency order:
-#   Phase 1 (live)    — RGB21 Contract + Certificate
-#   Phase 2 (sandbox) — RGB20 Stablecash / USDH
-#   Phase 3 (dormant) — securities (this feature)
+# Dormant Phase 3 securities
 securities = []
 
-# Actix actor wrappers for wallet components.
-# Enable when using harmoniis-wallet in an actix-web backend.
+# Actix actors for backend integration
 actix-actors = ["dep:actix", "dep:actix-rt"]
 
 
 # ── Dependencies ───────────────────────────────────────────────────────────────
 [dependencies]
-# Core
+# Core (always available)
 anyhow      = "1.0"
 thiserror   = "2"
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
 
-# Cryptography
+# Cryptography (always available — all WASM-compatible)
 sha2        = { version = "0.10", features = ["compress"] }
 hkdf        = "0.12"
 hex         = "0.4"
 bip39       = "2.1"
 rand        = "0.8"
 rand_core   = "0.6"
+getrandom   = "0.2"
 zeroize     = { version = "1.8", features = ["derive"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8", "pem"] }
 curve25519-dalek = "4"
@@ -72,72 +99,77 @@ x25519-dalek = "2"
 chacha20poly1305 = "0.10"
 pkcs8       = { version = "0.10", features = ["pem"] }
 
-# Storage
-rusqlite    = { version = "0.37" }   # bundled-sqlite feature adds rusqlite/bundled
-
-# Networking (rustls: no OpenSSL dependency — cross-platform)
-reqwest     = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false }
-tokio       = { version = "1", features = ["full"] }
-
-# CLI
-clap        = { version = "4", features = ["derive"] }
-dirs-next   = "2"
-toml        = "0.8"
-
-# Time
+# Time (always available)
 chrono      = { version = "0.4", features = ["serde"] }
-webylib     = "0.2.6"
-image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-bdk_wallet  = { version = "1.2", features = ["file_store"] }
-bdk_esplora = "0.20"
 
-# ARK protocol (Arkade ASP — offchain Bitcoin via VTXOs)
-ark-client    = "0.8.0"
-ark-bdk-wallet = "0.8.0"
-ark-core      = "0.8.0"
-ark-grpc      = "0.8.0"
+# BIP32 key derivation (always available — pure crypto, compiles to WASM)
+bitcoin     = { version = "0.32", default-features = false, features = ["secp-recovery"] }
 
-# OpenSSL (only needed when vendored-openssl feature is on for Android cross-compile)
+# Webcash (always available — webylib's pure crypto compiles to WASM via Store trait)
+webylib     = "0.3.0"
+
+# Utilities (always available)
+base64      = "0.22"
+num-bigint  = "0.4"
+async-trait = "0.1"
+bytemuck    = { version = "1", features = ["derive"] }
+
+# Storage (native only)
+rusqlite    = { version = "0.37", optional = true }
+
+# Networking (native only)
+reqwest     = { version = "0.11", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
+tokio       = { version = "1", features = ["full"], optional = true }
+rustls      = { version = "0.23", features = ["ring"] }
+
+# CLI (native only)
+clap        = { version = "4", features = ["derive"], optional = true }
+dirs-next   = { version = "2", optional = true }
+toml        = { version = "0.8", optional = true }
+
+# Image (native only)
+image       = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+
+# System (native only)
+signal-hook = { version = "0.3", optional = true }
+libc        = { version = "0.2", optional = true }
+rayon       = { version = "1.10", optional = true }
+
+# Platform keystore (native only)
+keyring     = { version = "3", optional = true }
+
+# Bitcoin (optional)
+bdk_wallet  = { version = "1.2", features = ["file_store"], optional = true }
+bdk_esplora = { version = "0.20", optional = true }
+
+# ARK protocol (optional)
+ark-client    = { version = "0.8.0", optional = true }
+ark-bdk-wallet = { version = "0.8.0", optional = true }
+ark-core      = { version = "0.8.0", optional = true }
+ark-grpc      = { version = "0.8.0", optional = true }
+
+# OpenSSL (optional, for Android)
 openssl       = { version = "0.10", optional = true }
-rustls        = { version = "0.23", features = ["ring"] }
 
-# Actix actors (optional, for backend integration)
+# Actix actors (optional)
 actix       = { version = "0.13", optional = true }
 actix-rt    = { version = "2", optional = true }
 
-# Mining
+# Mining (optional)
 wgpu        = { version = "28", optional = true, features = ["spirv"] }
-rayon       = "1.10"
-base64      = "0.22"
-num-bigint  = "0.4"
-signal-hook = "0.3"
-async-trait = "0.1"
-bytemuck    = { version = "1", features = ["derive"] }
-libc        = "0.2"
-
-# CUDA mining — works on any OS with an NVIDIA driver.
-# `fallback-dynamic-loading` loads libcuda/nvcuda at runtime, so the binary
-# can be compiled without the CUDA SDK and gracefully falls back to wgpu if
-# no CUDA driver is present.
-# CUDA 12.0 API — compatible with all drivers 525+.
-# Library search finds nvrtc64_12*.dll / libnvrtc.so.12.
-# catch_unwind in CudaMiner::try_new handles missing libs gracefully.
 cudarc      = { version = "0.19.3", optional = true, default-features = false, features = [
-    "std",
-    "driver",
-    "runtime",
-    "nvrtc",
-    "fallback-dynamic-loading",
-    "cuda-12000",
+    "std", "driver", "runtime", "nvrtc", "fallback-dynamic-loading", "cuda-12000",
 ] }
+
+# WASM (optional)
+wasm-bindgen     = { version = "0.2", optional = true }
+js-sys           = { version = "0.3", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["full"] }
 
-# CLI and integration tests carry many parameters and formatted output; CI runs
-# `clippy` without `-D warnings`. These caps keep local `clippy -- -D warnings`
-# aligned with the warnings the project already accepts upstream.
 [lints.clippy]
 too_many_arguments = "allow"
 needless_return = "allow"

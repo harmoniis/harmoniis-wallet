@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use bdk_wallet::bitcoin::Network;
+use bitcoin::Network;
 
 /// Centralized configuration for harmoniis-wallet.
 ///

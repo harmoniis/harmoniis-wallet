@@ -1,16 +1,20 @@
 //! Webcash types re-exported from [`webylib`].
 //!
-//! The harmoniis-wallet crate depends on webylib internally. This module
-//! re-exports the commonly used types so that consumers (backend, agent)
-//! only need to depend on harmoniis-wallet.
+//! Pure crypto types are always available (WASM-compatible).
+//! Network/storage types require the `native` feature.
 
+// Always available — pure data types
 pub use webylib::amount::Amount;
 pub use webylib::error::Error as WebcashError;
 pub use webylib::hd::HDWallet as WebcashHDWallet;
-pub use webylib::server::ServerClient as WebcashServerClient;
-pub use webylib::wallet::{Wallet as WebcashWallet, WalletSnapshot as WebcashWalletSnapshot};
 pub use webylib::webcash::{PublicWebcash, SecretWebcash};
-pub use webylib::ChainCode as WebcashChainCode;
+pub use webylib::hd::ChainCode as WebcashChainCode;
+
+// Native only — require networking/storage
+#[cfg(feature = "native")]
+pub use webylib::server::ServerClient as WebcashServerClient;
+#[cfg(feature = "native")]
+pub use webylib::wallet::{Wallet as WebcashWallet, WalletSnapshot as WebcashWalletSnapshot};
 
 /// Extract the bearer **secret** webcash string (`e…:secret:…`) from `pay` / CLI output.
 pub fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {

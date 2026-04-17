@@ -4,8 +4,10 @@ pub enum Error {
     InvalidFormat(String),
     #[error("crypto error: {0}")]
     Crypto(String),
+    #[cfg(feature = "native")]
     #[error("database error: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "native")]
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("api error {status}: {body}")]

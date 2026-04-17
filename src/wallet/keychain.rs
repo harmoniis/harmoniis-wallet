@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use bdk_wallet::bitcoin::{
+use bitcoin::{
     bip32::{ChildNumber, DerivationPath, Xpriv},
     secp256k1::Secp256k1,
     Network,
