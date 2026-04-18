@@ -891,10 +891,10 @@ mod tests {
     }
 
     #[test]
-    fn creates_12_word_mnemonic() {
+    fn creates_24_word_mnemonic() {
         let wallet = BrowserWallet::create(None).unwrap();
         let word_count = wallet.mnemonic().split_whitespace().count();
-        assert_eq!(word_count, 12, "new wallets must use 12-word mnemonic");
+        assert_eq!(word_count, 24, "new wallets must use 24-word mnemonic");
     }
 
     #[test]

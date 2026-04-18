@@ -65,9 +65,9 @@ impl Drop for HdKeychain {
 }
 
 impl HdKeychain {
-    /// Generate a new keychain with a random 16-byte (128-bit) 12-word mnemonic.
+    /// Generate a new keychain with a random 32-byte (256-bit) 24-word mnemonic.
     pub fn generate_new() -> Result<Self> {
-        let mut entropy = vec![0u8; 16];
+        let mut entropy = vec![0u8; 32];
         OsRng.fill_bytes(&mut entropy);
         Self::from_entropy(&entropy)
     }
@@ -220,12 +220,12 @@ mod tests {
     }
 
     #[test]
-    fn generate_new_produces_12_word_mnemonic() {
+    fn generate_new_produces_24_word_mnemonic() {
         let keychain = HdKeychain::generate_new().unwrap();
         let mnemonic = keychain.mnemonic_words();
         let word_count = mnemonic.split_whitespace().count();
-        assert_eq!(word_count, 12, "must generate 12-word mnemonic (128-bit entropy)");
-        assert_eq!(keychain.entropy_hex().len(), 32, "16 bytes = 32 hex chars");
+        assert_eq!(word_count, 24, "must generate 24-word mnemonic (256-bit entropy)");
+        assert_eq!(keychain.entropy_hex().len(), 64, "32 bytes = 64 hex chars");
     }
 
     #[test]
