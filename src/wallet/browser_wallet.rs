@@ -120,6 +120,9 @@ pub struct WalletStats {
     pub unspent_webcash: usize,
     pub spent_webcash: usize,
     pub total_balance: i64,
+    pub mined_count: u64,
+    pub received_count: u64,
+    pub sent_count: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -486,6 +489,9 @@ impl BrowserWallet {
             unspent_webcash: unspent.len(),
             spent_webcash: data.spent_hashes.len(),
             total_balance: unspent.iter().map(|o| o.amount).sum(),
+            mined_count: data.depths.get("MINING").copied().unwrap_or(0),
+            received_count: data.depths.get("RECEIVE").copied().unwrap_or(0),
+            sent_count: data.depths.get("PAY").copied().unwrap_or(0),
         })
     }
 
