@@ -647,16 +647,18 @@ impl GpuMiner {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            // WebGPU: map buffers and poll until ready.
             for i in 0..batch_size {
                 self.slots[i]
                     .staging_buffer
                     .slice(..)
                     .map_async(wgpu::MapMode::Read, |_| {});
             }
-            self.device.poll(wgpu::PollType::Wait {
+            // On WebGPU, Wait blocks the JS event loop until GPU work completes.
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
                 timeout: None,
-            })?;
+            });
         }
 
         // Phase 4: read all results.
@@ -764,10 +766,10 @@ impl GpuMiner {
         #[cfg(target_arch = "wasm32")]
         {
             buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::Wait {
+            let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
                 timeout: None,
-            })?;
+            });
         }
 
         let data = buffer_slice.get_mapped_range();

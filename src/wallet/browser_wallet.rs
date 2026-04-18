@@ -1071,4 +1071,21 @@ mod tests {
         wallet.set_active("webcash", "main").unwrap();
         assert_eq!(wallet.balance().unwrap(), 100 * UNIT);
     }
+
+    #[test]
+    fn gpu_mining_work_prefix_aligned() {
+        let wallet = BrowserWallet::create(None).unwrap();
+        let work = wallet.build_gpu_mining_work(28, "195.3125").unwrap();
+        let prefix_len = work.prefix_b64.len();
+        assert_eq!(
+            prefix_len % 64, 0,
+            "base64 prefix must be a multiple of 64 bytes for SHA256 midstate, got {prefix_len}"
+        );
+        assert!(!work.secret.is_empty());
+        assert!(!work.webcash_str.is_empty());
+
+        // Verify midstate doesn't panic
+        use crate::miner::sha256::Sha256Midstate;
+        let _midstate = Sha256Midstate::from_prefix(work.prefix_b64.as_bytes());
+    }
 }
