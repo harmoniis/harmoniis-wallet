@@ -152,6 +152,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
+/// GPU mining input: midstate + metadata for reconstructing the preimage on solution.
+#[derive(Serialize, Deserialize)]
+pub struct GpuMiningWork {
+    pub secret: String,
+    pub webcash_str: String,
+    pub mining_depth: u64,
+    pub difficulty: u32,
+    /// Base64-encoded prefix (everything before the nonce).
+    pub prefix_b64: String,
+}
+
 /// Tagged-SHA256 derivation: SHA256(tag||tag||master||chain_be64||depth_be64)
 pub fn derive_output_secret(master_secret_hex: &str, chain_code: u32, depth: u64) -> Result<String> {
     let master =
@@ -634,6 +645,42 @@ impl BrowserWallet {
             webcash_str,
             difficulty,
             mining_depth: depth,
+        })
+    }
+
+    /// Build GPU mining work: derives secret, builds the base64 preimage prefix
+    /// for SHA256 midstate computation. Used by the WebGPU miner.
+    pub fn build_gpu_mining_work(&self, difficulty: u32, mining_amount: &str) -> Result<GpuMiningWork> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let data = self.active_data()?;
+        let depth = data.depths.get("MINING").copied().unwrap_or(0);
+        let secret = derive_output_secret(&data.master_secret_hex, CHAIN_MINING, depth)?;
+        let webcash_str = format!("e{}:secret:{}", mining_amount, secret);
+
+        // Build the JSON preimage matching C++ webminer format.
+        // The nonce field is padded to keep total length fixed.
+        let raw_json = format!(
+            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{webcash_str}\"], \"subsidy\": [], \"difficulty\": {difficulty}, \"nonce\":      0}}"
+        );
+
+        // Pad raw JSON to a multiple of 48 bytes → 64 base64 bytes = one SHA256 block.
+        let raw_bytes = raw_json.as_bytes();
+        let pad_len = ((raw_bytes.len() + 47) / 48) * 48;
+        let mut padded = vec![0u8; pad_len];
+        padded[..raw_bytes.len()].copy_from_slice(raw_bytes);
+
+        // Base64-encode the prefix (everything except closing "}").
+        // The last 3 raw bytes "0}}" are replaced by nonce digits + "}".
+        let prefix_raw = &padded[..pad_len - 3];
+        let prefix_b64 = STANDARD.encode(prefix_raw);
+
+        Ok(GpuMiningWork {
+            secret,
+            webcash_str,
+            mining_depth: depth,
+            difficulty,
+            prefix_b64,
         })
     }
 
