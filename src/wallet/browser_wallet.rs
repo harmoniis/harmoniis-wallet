@@ -152,14 +152,13 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
-/// GPU mining input: midstate + metadata for reconstructing the preimage on solution.
+/// GPU mining input: preimage prefix + metadata for the WebGPU compute shader.
 #[derive(Serialize, Deserialize)]
 pub struct GpuMiningWork {
     pub secret: String,
     pub webcash_str: String,
     pub mining_depth: u64,
     pub difficulty: u32,
-    /// Base64-encoded prefix (everything before the nonce).
     pub prefix_b64: String,
 }
 
