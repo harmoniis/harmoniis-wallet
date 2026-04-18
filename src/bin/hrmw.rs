@@ -1077,8 +1077,8 @@ enum WebminerCmd {
     ListDevices,
     /// Start mining (background by default, --foreground for live logs)
     Start {
-        /// Webcash server URL
-        #[arg(long, default_value = "https://webcash.org")]
+        /// Webcash server URL (default: webcash.org from webylib)
+        #[arg(long, default_value_t = webylib::NetworkMode::Production.base_url().to_string())]
         server: String,
         /// Maximum difficulty to mine at
         #[arg(long, default_value_t = 80)]
@@ -4090,7 +4090,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("On the remote machine:");
                         println!(
                             "  cd /root/hw && /root/.local/bin/hrmw webminer start -f \
-                             --accept-terms --server https://webcash.org"
+                             --accept-terms"
                         );
                         println!();
                         println!("Or rebuild after changes:");

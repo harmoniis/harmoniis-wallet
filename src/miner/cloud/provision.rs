@@ -162,7 +162,7 @@ pub async fn start_dev(
     // Fetch current difficulty for capacity-aware offer scoring.
     let difficulty = {
         use crate::miner::protocol::MiningProtocol;
-        match MiningProtocol::new("https://webcash.org") {
+        match MiningProtocol::new(webylib::NetworkMode::Production.base_url()) {
             Ok(p) => match p.get_target().await {
                 Ok(t) => {
                     println!("  Current mining difficulty: {}", t.difficulty);
@@ -321,7 +321,7 @@ pub async fn start(
         // Use difficulty from the already-fetched target if available.
         let difficulty = {
             use crate::miner::protocol::MiningProtocol;
-            match MiningProtocol::new("https://webcash.org") {
+            match MiningProtocol::new(webylib::NetworkMode::Production.base_url()) {
                 Ok(p) => p.get_target().await.ok().map(|t| t.difficulty),
                 Err(_) => None,
             }

@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.78"
+version     = "0.1.79"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -55,7 +55,7 @@ default = ["native"]
 
 # ── Layer 1: Full native wallet ───────────────────────────────
 native = [
-    "dep:webylib",
+    
     "dep:rusqlite",
     "dep:reqwest",
     "dep:tokio",
@@ -85,7 +85,7 @@ gpu-wasm = ["dep:wgpu", "wgpu?/webgpu"]
 cuda = ["dep:cudarc"]
 
 # ── WASM target ───────────────────────────────────────────────
-wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js", "webylib/wasm"]
 
 # ── Other optional features ───────────────────────────────────
 cli = ["dep:clap"]
@@ -124,7 +124,7 @@ async-trait     = "0.1"
 bytemuck        = { version = "1", features = ["derive"] }
 
 # ── Layer 1: Native wallet (optional) ────────────────────────
-webylib         = { version = "0.3.0", optional = true }
+webylib         = { version = "0.3.1" }
 rusqlite        = { version = "0.37", optional = true }
 reqwest         = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
 tokio           = { version = "1", features = ["full"], optional = true }

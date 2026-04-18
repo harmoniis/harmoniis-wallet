@@ -47,7 +47,7 @@ impl Default for WalletConfig {
             ark_asp_url: "https://arkade.computer".to_string(),
             ark_boltz_url: "https://api.boltz.exchange/v2".to_string(),
             ark_connect_timeout: Duration::from_secs(30),
-            webcash_server_url: "https://webcash.org".to_string(),
+            webcash_server_url: webylib::NetworkMode::Production.base_url().to_string(),
             s3_bucket: None,
             s3_prefix: "wallet/".to_string(),
             secret_manager_arn: None,
