@@ -39,7 +39,7 @@ pub use wallet::webcash::{Amount as WebcashAmount, PublicWebcash, SecretWebcash}
 pub mod arbiter;
 #[cfg(feature = "native")]
 pub mod marketplace;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "gpu-wasm"))]
 pub mod miner;
 
 #[cfg(feature = "native")]

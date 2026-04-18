@@ -4,27 +4,42 @@
 //! preimage prefix is padded to exactly one SHA256 block (64 bytes), the midstate
 //! is computed once, and each nonce attempt processes a single additional block.
 
+// ── Always available (WASM-safe) ────────────────────────────────
+pub mod nonce_table;
+pub mod sha256;
+
+// ── GPU mining (native Vulkan/DX12/Metal + WASM WebGPU) ────────
+#[cfg(any(feature = "gpu", feature = "gpu-wasm"))]
+pub mod gpu;
+
+// ── Native-only modules ─────────────────────────────────────────
+#[cfg(feature = "native")]
 pub mod cloud;
+#[cfg(feature = "native")]
 pub mod collect;
+#[cfg(feature = "native")]
 pub mod composite;
+#[cfg(feature = "native")]
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 #[cfg(feature = "cuda")]
 pub mod cuda_detect;
+#[cfg(feature = "native")]
 pub mod daemon;
-#[cfg(feature = "gpu")]
-pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod multi_cuda;
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "native"))]
 pub mod multi_gpu;
 #[cfg(feature = "cuda")]
 pub mod persistent_cuda;
+#[cfg(feature = "native")]
 pub mod protocol;
-pub mod sha256;
+#[cfg(feature = "native")]
 pub mod simd_cpu;
+#[cfg(feature = "native")]
 pub mod stats;
+#[cfg(feature = "native")]
 pub mod work_unit;
 
 use async_trait::async_trait;
@@ -34,8 +49,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nonce_table::NonceTable;
 use sha256::Sha256Midstate;
-use work_unit::NonceTable;
 
 /// The full nonce combination space: 1000 x 1000.
 pub const NONCE_SPACE_SIZE: u32 = 1_000_000;
@@ -43,6 +58,7 @@ pub const NONCE_SPACE_SIZE: u32 = 1_000_000;
 /// Shared cancellation flag for cooperative early exit across backends.
 pub type CancelFlag = Arc<AtomicBool>;
 
+#[cfg(feature = "native")]
 /// Backend selection preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendChoice {
@@ -54,6 +70,7 @@ pub enum BackendChoice {
     Cpu,
 }
 
+#[cfg(feature = "native")]
 impl BackendChoice {
     pub fn as_cli_str(self) -> &'static str {
         match self {
@@ -64,6 +81,7 @@ impl BackendChoice {
     }
 }
 
+#[cfg(feature = "native")]
 /// Configuration for the miner daemon.
 #[derive(Debug, Clone)]
 pub struct MinerConfig {
@@ -110,6 +128,7 @@ impl MiningChunkResult {
 }
 
 /// Trait abstracting GPU vs CPU mining backends.
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 pub trait MinerBackend: Send + Sync {
     /// Human-readable name of this backend.
@@ -191,6 +210,28 @@ pub trait MinerBackend: Send + Sync {
     }
 }
 
+/// WASM version — no Send+Sync bounds (single-threaded).
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+pub trait MinerBackend {
+    fn name(&self) -> &str;
+    fn startup_summary(&self) -> Vec<String> { Vec::new() }
+    async fn benchmark(&self) -> anyhow::Result<f64>;
+    fn max_batch_hint(&self) -> u32 { NONCE_SPACE_SIZE }
+    fn recommended_pipeline_depth(&self) -> usize { 1 }
+    async fn mine_range(
+        &self,
+        midstate: &Sha256Midstate,
+        nonce_table: &NonceTable,
+        difficulty: u32,
+        start_nonce: u32,
+        nonce_count: u32,
+        cancel: Option<CancelFlag>,
+    ) -> anyhow::Result<MiningChunkResult>;
+}
+
+// ── Everything below is native-only (threading, device enum, backend selection) ──
+#[cfg(feature = "native")]
 pub fn choose_best_result(
     a: Option<MiningResult>,
     b: Option<MiningResult>,
@@ -209,6 +250,11 @@ pub fn choose_best_result(
     }
 }
 
+// ── Native-only: device enumeration + backend selection ─────────
+// Everything below requires native features (threading, file I/O, process spawning).
+
+#[cfg(feature = "native")]
+#[cfg(feature = "native")]
 /// Split a nonce range across devices proportionally to their hash-rate weights.
 ///
 /// Shared by both `MultiGpuMiner` and `MultiCudaMiner`.
@@ -272,6 +318,7 @@ fn cuda_device_count() -> usize {
 // Unified device discovery
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "native")]
 /// What kind of GPU device this is.  CPU is not a device — it has its own
 /// `--cpu-threads` option and is never mixed with GPU mining.
 #[derive(Debug, Clone)]
@@ -288,6 +335,7 @@ pub enum DeviceKind {
     },
 }
 
+#[cfg(feature = "native")]
 /// Result of `enumerate_all_devices()`.  Carries adapter handles alongside
 /// device metadata so callers can consume adapters directly without
 /// re-enumerating (eliminates identity-matching bugs on DX12).
@@ -297,6 +345,7 @@ pub struct EnumeratedDevices {
     pub wgpu_adapters: Vec<wgpu::Adapter>,
 }
 
+#[cfg(feature = "native")]
 /// One entry in the device list = one physical GPU.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -305,6 +354,7 @@ pub struct DeviceInfo {
     pub kind: DeviceKind,
 }
 
+#[cfg(feature = "native")]
 /// Enumerate all physical GPU devices across all backends.
 ///
 /// CUDA: one ordinal = one physical GPU.
@@ -463,6 +513,7 @@ pub async fn enumerate_all_devices() -> EnumeratedDevices {
     }
 }
 
+#[cfg(feature = "native")]
 /// Create a mining backend for specific GPU device IDs.
 ///
 /// Adapters are consumed from `EnumeratedDevices` by index — no
@@ -530,6 +581,7 @@ pub async fn select_backend_for_devices(
     Ok(Box::new(composite::CompositeBackend::new(backends).await))
 }
 
+#[cfg(feature = "native")]
 /// Initialize wgpu GPU miners from enumerated devices.
 ///
 /// Adapters are consumed directly from `EnumeratedDevices::wgpu_adapters`
@@ -584,6 +636,7 @@ pub async fn init_wgpu_miners_from_devices() -> Vec<gpu::GpuMiner> {
     miners
 }
 
+#[cfg(feature = "native")]
 /// Select the best available mining backend.
 pub async fn select_backend(
     choice: BackendChoice,

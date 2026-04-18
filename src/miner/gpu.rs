@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use wgpu::util::DeviceExt;
 
 use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
-use super::work_unit::NonceTable;
+use super::nonce_table::NonceTable;
 use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE};
 
 /// Default workgroup size (must match `@workgroup_size` in shader).
@@ -35,12 +35,17 @@ const RESULT_BUFFER_SIZE: u64 = (RESULT_WORDS * 4) as u64;
 /// Platform-native compute backend. One backend per platform, no mixing.
 /// Linux = Vulkan, Windows = DX12, macOS = Metal.
 pub fn platform_backend() -> wgpu::Backends {
-    if cfg!(target_os = "windows") {
-        wgpu::Backends::DX12
-    } else if cfg!(target_os = "macos") {
-        wgpu::Backends::METAL
-    } else {
-        wgpu::Backends::VULKAN
+    #[cfg(target_arch = "wasm32")]
+    { wgpu::Backends::BROWSER_WEBGPU }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if cfg!(target_os = "windows") {
+            wgpu::Backends::DX12
+        } else if cfg!(target_os = "macos") {
+            wgpu::Backends::METAL
+        } else {
+            wgpu::Backends::VULKAN
+        }
     }
 }
 
@@ -57,7 +62,7 @@ pub fn platform_backend() -> wgpu::Backends {
 ///
 /// Returns `None` if Vulkan is unavailable (no driver) — caller falls back to
 /// DX12 as-is, no regression.
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 pub async fn enumerate_vulkan_gpus() -> Option<Vec<wgpu::Adapter>> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -116,11 +121,8 @@ impl AdapterIdentity {
 }
 
 /// Run a GPU pipeline probe for an adapter identified by vendor+device+backend.
-///
-/// This is called from the `--gpu-probe` subprocess.  It creates a device,
-/// compiles the WGSL shader, and builds the compute pipeline.  If the GPU
-/// driver segfaults (known AMD Vulkan bug on Polaris), the subprocess dies
-/// and the parent skips that adapter.
+/// Native-only: spawns subprocess to test GPU driver stability.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     let backend = platform_backend();
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -224,7 +226,8 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
 }
 
 /// Probe an adapter by spawning the current binary with `gpu-probe`.
-/// Returns `true` if the adapter is safe to use.
+/// Native-only: uses std::process::Command.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 pub(crate) fn subprocess_probe(identity: &AdapterIdentity) -> bool {
     let exe = match std::env::current_exe() {
@@ -390,8 +393,9 @@ impl GpuMiner {
             }
         };
 
-        // On Vulkan: load pre-compiled, unrolled SPIR-V (bypasses naga).
-        // On Metal/DX12: fall back to WGSL (naga translates to MSL/HLSL).
+        // Native Vulkan: load pre-compiled SPIR-V (bypasses naga).
+        // All other backends (Metal, DX12, WebGPU): use WGSL.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
         let shader_module = if info.backend == wgpu::Backend::Vulkan {
             let spirv_bytes: &[u8] = include_bytes!("shader/sha256_mine_opt.spv");
             let spirv_words: Vec<u32> = spirv_bytes
@@ -415,6 +419,11 @@ impl GpuMiner {
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
             })
         };
+        #[cfg(any(target_arch = "wasm32", not(feature = "gpu")))]
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sha256_mine"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader/sha256_mine.wgsl").into()),
+        });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("miner_bind_group_layout"),
@@ -615,27 +624,45 @@ impl GpuMiner {
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         // Map all staging buffers for reading.
-        let mut receivers = Vec::with_capacity(batch_size);
-        for i in 0..batch_size {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.slots[i]
-                .staging_buffer
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    let _ = tx.send(result);
-                });
-            receivers.push(rx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut receivers = Vec::with_capacity(batch_size);
+            for i in 0..batch_size {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.slots[i]
+                    .staging_buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
+                receivers.push(rx);
+            }
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            });
+            for (i, rx) in receivers.into_iter().enumerate() {
+                rx.await??;
+            }
         }
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            for i in 0..batch_size {
+                self.slots[i]
+                    .staging_buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, |_| {});
+            }
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })?;
+        }
 
         // Phase 4: read all results.
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(batch_size);
-        for (i, rx) in receivers.into_iter().enumerate() {
-            rx.await??;
+        for i in 0..batch_size {
             let data = self.slots[i].staging_buffer.slice(..).get_mapped_range();
             let words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
             let best_zeros = words[0];
@@ -722,15 +749,26 @@ impl GpuMiner {
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = slot.staging_buffer.slice(..);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        });
-        rx.await??;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            });
+            rx.await??;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })?;
+        }
 
         let data = buffer_slice.get_mapped_range();
         let words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);
@@ -743,7 +781,8 @@ impl GpuMiner {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MinerBackend for GpuMiner {
     fn name(&self) -> &str {
         &self.adapter_name
