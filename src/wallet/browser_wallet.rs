@@ -166,6 +166,12 @@ pub fn derive_output_secret(master_secret_hex: &str, chain_code: u32, depth: u64
     Ok(hex::encode(sha256(&input)))
 }
 
+/// Convert a 64-char hex entropy string to BIP39 mnemonic words.
+pub fn mnemonic_from_hex(hex: &str) -> Result<String> {
+    let keychain = HdKeychain::from_entropy_hex(hex)?;
+    Ok(keychain.mnemonic_words())
+}
+
 pub fn secret_to_public_hash(secret: &str) -> String {
     hex::encode(sha256(secret.as_bytes()))
 }
@@ -239,34 +245,49 @@ pub fn format_public_webcash(hash_hex: &str, amount_wats: i64) -> String {
     format!("e{}:public:{}", format_amount(amount_wats), hash_hex)
 }
 
+/// The three wallet families. Bitcoin and RGB are placeholders for now.
+pub const FAMILIES: &[&str] = &["webcash", "bitcoin", "rgb"];
+
+/// Info about a labeled wallet within a family.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WalletInfo {
+    pub family: String,
+    pub label: String,
+    pub balance: i64,
+    pub output_count: usize,
+}
+
 // ── BrowserWallet Lifecycle ─────────────────────────────────────
 
 impl BrowserWallet {
-    /// Create a new wallet from an optional mnemonic (generates one if None).
+    fn empty_family(master_secret_hex: String) -> WebcashFamily {
+        WebcashFamily {
+            master_secret_hex,
+            outputs: Vec::new(),
+            spent_hashes: Vec::new(),
+            depths: [
+                ("RECEIVE".into(), 0),
+                ("PAY".into(), 0),
+                ("CHANGE".into(), 0),
+                ("MINING".into(), 0),
+            ]
+            .into(),
+        }
+    }
+
+    /// Create a new master wallet. Initializes "main" wallet for each family.
     pub fn create(mnemonic_words: Option<&str>) -> Result<Self> {
         let keychain = match mnemonic_words {
             Some(words) => HdKeychain::from_mnemonic_words(words)?,
             None => HdKeychain::generate_new()?,
         };
         let mnemonic = keychain.mnemonic_words();
-        let webcash_secret = keychain.derive_slot_hex("webcash", 0)?;
 
         let mut wallets = HashMap::new();
-        wallets.insert(
-            "webcash:main".to_string(),
-            WebcashFamily {
-                master_secret_hex: webcash_secret,
-                outputs: Vec::new(),
-                spent_hashes: Vec::new(),
-                depths: [
-                    ("RECEIVE".into(), 0),
-                    ("PAY".into(), 0),
-                    ("CHANGE".into(), 0),
-                    ("MINING".into(), 0),
-                ]
-                .into(),
-            },
-        );
+        for family in FAMILIES {
+            let secret = keychain.derive_slot_hex(family, 0)?;
+            wallets.insert(format!("{family}:main"), Self::empty_family(secret));
+        }
 
         Ok(Self {
             mnemonic,
@@ -289,6 +310,14 @@ impl BrowserWallet {
         &self.mnemonic
     }
 
+    pub fn active_family(&self) -> &str {
+        &self.active_family
+    }
+
+    pub fn active_label(&self) -> &str {
+        &self.active_label
+    }
+
     pub fn active_network(&self) -> &str {
         &self.active_network
     }
@@ -309,6 +338,105 @@ impl BrowserWallet {
         self.wallets
             .get_mut(&key)
             .ok_or_else(|| Error::NotFound("active wallet not found".into()))
+    }
+
+    // ── Multi-wallet Management ─────────────────────────────────
+
+    /// Switch active wallet to the given family + label.
+    pub fn set_active(&mut self, family: &str, label: &str) -> Result<()> {
+        let key = format!("{family}:{label}");
+        if !self.wallets.contains_key(&key) {
+            return Err(Error::NotFound(format!("wallet '{key}' not found")));
+        }
+        self.active_family = family.to_string();
+        self.active_label = label.to_string();
+        Ok(())
+    }
+
+    /// Add a new labeled wallet within a family.
+    pub fn add_wallet(&mut self, family: &str, label: &str) -> Result<()> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(Error::InvalidFormat("label cannot be empty".into()));
+        }
+        let key = format!("{family}:{label}");
+        if self.wallets.contains_key(&key) {
+            return Err(Error::Other(anyhow::anyhow!(
+                "wallet '{key}' already exists"
+            )));
+        }
+        let slot_index = self
+            .wallets
+            .keys()
+            .filter(|k| k.starts_with(&format!("{family}:")))
+            .count() as u32;
+        let secret = self.keychain()?.derive_slot_hex(family, slot_index)?;
+        self.wallets
+            .insert(key, Self::empty_family(secret));
+        Ok(())
+    }
+
+    /// Remove a labeled wallet (cannot remove "main").
+    pub fn remove_wallet(&mut self, family: &str, label: &str) -> Result<()> {
+        if label == "main" {
+            return Err(Error::Other(anyhow::anyhow!(
+                "cannot remove the main wallet"
+            )));
+        }
+        let key = format!("{family}:{label}");
+        self.wallets
+            .remove(&key)
+            .ok_or_else(|| Error::NotFound(format!("wallet '{key}' not found")))?;
+        if self.active_family == family && self.active_label == label {
+            self.active_label = "main".to_string();
+        }
+        Ok(())
+    }
+
+    /// Rename a labeled wallet.
+    pub fn rename_wallet(&mut self, family: &str, old_label: &str, new_label: &str) -> Result<()> {
+        let new_label = new_label.trim();
+        if new_label.is_empty() {
+            return Err(Error::InvalidFormat("label cannot be empty".into()));
+        }
+        let old_key = format!("{family}:{old_label}");
+        let new_key = format!("{family}:{new_label}");
+        if self.wallets.contains_key(&new_key) {
+            return Err(Error::Other(anyhow::anyhow!(
+                "wallet '{new_key}' already exists"
+            )));
+        }
+        let data = self
+            .wallets
+            .remove(&old_key)
+            .ok_or_else(|| Error::NotFound(format!("wallet '{old_key}' not found")))?;
+        self.wallets.insert(new_key, data);
+        if self.active_family == family && self.active_label == old_label {
+            self.active_label = new_label.to_string();
+        }
+        Ok(())
+    }
+
+    /// List all labeled wallets for a family (sorted by label).
+    pub fn list_wallets(&self, family: &str) -> Vec<WalletInfo> {
+        let prefix = format!("{family}:");
+        let mut wallets: Vec<_> = self
+            .wallets
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, data)| WalletInfo {
+                family: family.to_string(),
+                label: k[prefix.len()..].to_string(),
+                balance: data.outputs.iter().filter(|o| !o.spent).map(|o| o.amount).sum(),
+                output_count: data.outputs.iter().filter(|o| !o.spent).count(),
+            })
+            .collect();
+        wallets.sort_by(|a, b| {
+            if a.label == "main" { std::cmp::Ordering::Less }
+            else if b.label == "main" { std::cmp::Ordering::Greater }
+            else { a.label.cmp(&b.label) }
+        });
+        wallets
     }
 
     // ── Key Derivation Helpers ──────────────────────────────────
@@ -799,5 +927,66 @@ mod tests {
         let batch = wallet.prepare_recover_batch("RECEIVE", 0, 5).unwrap();
         assert_eq!(batch.secrets.len(), 5);
         assert_eq!(batch.public_webcash_strings.len(), 5);
+    }
+
+    #[test]
+    fn create_initializes_all_families() {
+        let wallet = BrowserWallet::create(None).unwrap();
+        for family in FAMILIES {
+            let wallets = wallet.list_wallets(family);
+            assert_eq!(wallets.len(), 1);
+            assert_eq!(wallets[0].label, "main");
+        }
+    }
+
+    #[test]
+    fn multi_wallet_add_remove_rename() {
+        let mut wallet = BrowserWallet::create(None).unwrap();
+        wallet.add_wallet("webcash", "savings").unwrap();
+        assert_eq!(wallet.list_wallets("webcash").len(), 2);
+
+        wallet.set_active("webcash", "savings").unwrap();
+        assert_eq!(wallet.active_label(), "savings");
+
+        wallet.rename_wallet("webcash", "savings", "donations").unwrap();
+        assert_eq!(wallet.active_label(), "donations");
+        assert_eq!(wallet.list_wallets("webcash").len(), 2);
+
+        wallet.remove_wallet("webcash", "donations").unwrap();
+        assert_eq!(wallet.list_wallets("webcash").len(), 1);
+        assert_eq!(wallet.active_label(), "main"); // auto-fallback
+    }
+
+    #[test]
+    fn cannot_remove_main_wallet() {
+        let mut wallet = BrowserWallet::create(None).unwrap();
+        assert!(wallet.remove_wallet("webcash", "main").is_err());
+    }
+
+    #[test]
+    fn wallets_have_distinct_secrets() {
+        let mut wallet = BrowserWallet::create(None).unwrap();
+        wallet.add_wallet("webcash", "second").unwrap();
+        let main_secret = wallet.wallets.get("webcash:main").unwrap().master_secret_hex.clone();
+        let second_secret = wallet.wallets.get("webcash:second").unwrap().master_secret_hex.clone();
+        assert_ne!(main_secret, second_secret);
+    }
+
+    #[test]
+    fn active_wallet_isolation() {
+        let mut wallet = BrowserWallet::create(None).unwrap();
+        wallet.add_wallet("webcash", "savings").unwrap();
+
+        // Mine into main
+        wallet.set_active("webcash", "main").unwrap();
+        wallet.store_mined_output(&"a".repeat(64), 100 * UNIT).unwrap();
+
+        // Savings has zero balance
+        wallet.set_active("webcash", "savings").unwrap();
+        assert_eq!(wallet.balance().unwrap(), 0);
+
+        // Main still has balance
+        wallet.set_active("webcash", "main").unwrap();
+        assert_eq!(wallet.balance().unwrap(), 100 * UNIT);
     }
 }
