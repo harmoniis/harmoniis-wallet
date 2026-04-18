@@ -366,6 +366,7 @@ pub struct DeviceInfo {
 ///
 /// Order: CUDA devices first, then wgpu devices.
 pub async fn enumerate_all_devices() -> EnumeratedDevices {
+    #[allow(unused_mut)]
     let mut devices = Vec::new();
     #[allow(unused_mut, unused_variables)]
     let mut next_id = 0usize;

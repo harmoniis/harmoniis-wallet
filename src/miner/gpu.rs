@@ -641,7 +641,7 @@ impl GpuMiner {
                 submission_index: Some(submission),
                 timeout: None,
             });
-            for (i, rx) in receivers.into_iter().enumerate() {
+            for rx in receivers {
                 rx.await??;
             }
         }

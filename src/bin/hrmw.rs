@@ -1234,6 +1234,7 @@ fn resolved_esplora_url(network: Network, override_url: Option<String>) -> Strin
         .unwrap_or_else(|| DeterministicBitcoinWallet::default_esplora_url(network).to_string())
 }
 
+#[allow(unused_variables)]
 async fn run_webminer_benchmarks(
     cpu_threads: Option<usize>,
     cpu_target_mhs: f64,
@@ -1243,6 +1244,7 @@ async fn run_webminer_benchmarks(
     use harmoniis_wallet::miner::simd_cpu::SimdCpuMiner;
     use harmoniis_wallet::miner::MinerBackend;
 
+    #[allow(unused_assignments)]
     let mut failed = false;
     println!("Webminer benchmark plan: CPU -> GPU");
     println!("cpu_threads={:?}", cpu_threads);
@@ -1317,7 +1319,7 @@ async fn run_webminer_benchmarks(
     #[cfg(not(any(all(feature = "cuda", target_os = "linux"), feature = "gpu")))]
     {
         println!("GPU: feature-disabled [MISS]");
-        failed = true;
+        failed |= true;
     }
 
     if strict && failed {
@@ -4411,6 +4413,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── gpu-probe (internal) ────────────────────────────────────────────
+        #[allow(unused_variables)]
         Cmd::GpuProbe {
             vendor,
             device,
