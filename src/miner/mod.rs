@@ -33,13 +33,13 @@ pub mod multi_cuda;
 pub mod multi_gpu;
 #[cfg(feature = "cuda")]
 pub mod persistent_cuda;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "wasm"))]
 pub mod protocol;
 #[cfg(feature = "native")]
 pub mod simd_cpu;
 #[cfg(feature = "native")]
 pub mod stats;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "wasm"))]
 pub mod work_unit;
 
 use async_trait::async_trait;

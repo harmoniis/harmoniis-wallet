@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.82"
+version     = "0.1.83"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -58,6 +58,8 @@ native = [
     "webylib/native",
     "dep:rusqlite",
     "dep:reqwest",
+    "reqwest?/rustls-tls",
+    "reqwest?/blocking",
     "dep:tokio",
     "dep:keyring",
     "dep:rustls",
@@ -85,7 +87,7 @@ gpu-wasm = ["dep:wgpu", "wgpu?/webgpu"]
 cuda = ["dep:cudarc"]
 
 # ── WASM target ───────────────────────────────────────────────
-wasm = ["webylib/wasm", "dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
+wasm = ["webylib/wasm", "dep:reqwest", "dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
 
 # ── Other optional features ───────────────────────────────────
 cli = ["dep:clap"]
@@ -127,7 +129,7 @@ futures-channel = "0.3"
 # ── Layer 1: Native wallet (optional) ────────────────────────
 webylib         = { version = "0.3.3", default-features = false }
 rusqlite        = { version = "0.37", optional = true }
-reqwest         = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
+reqwest         = { version = "0.12", features = ["json"], default-features = false, optional = true }
 tokio           = { version = "1", features = ["full"], optional = true }
 keyring         = { version = "3", optional = true }
 rustls          = { version = "0.23", features = ["ring"], optional = true }
