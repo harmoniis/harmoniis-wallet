@@ -649,31 +649,41 @@ impl BrowserWallet {
 
     /// Build GPU mining work: derives secret, builds the base64 preimage prefix
     /// for SHA256 midstate computation. Used by the WebGPU miner.
-    pub fn build_gpu_mining_work(&self, difficulty: u32, mining_amount: &str) -> Result<GpuMiningWork> {
+    pub fn build_gpu_mining_work(&self, difficulty: u32, mining_amount: &str, subsidy_amount: &str) -> Result<GpuMiningWork> {
         use base64::{engine::general_purpose::STANDARD, Engine};
 
         let data = self.active_data()?;
         let depth = data.depths.get("MINING").copied().unwrap_or(0);
-        let secret = derive_output_secret(&data.master_secret_hex, CHAIN_MINING, depth)?;
-        let webcash_str = format!("e{}:secret:{}", mining_amount, secret);
 
-        // Build the JSON prefix matching C++ webminer format exactly.
-        // The prefix ends with "nonce:" — the nonce digits and closing brace
-        // are appended separately as base64 nonce table entries + "fQ==".
-        let raw_prefix = format!(
-            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{webcash_str}\"], \"subsidy\": [], \"difficulty\": {difficulty}, \"nonce\":"
+        let keep_secret = derive_output_secret(&data.master_secret_hex, CHAIN_MINING, depth)?;
+        let subsidy_secret = derive_output_secret(&data.master_secret_hex, CHAIN_MINING, depth + 1_000_000)?;
+        let mining_wats = parse_amount(mining_amount)?;
+        let subsidy_wats = parse_amount(subsidy_amount)?;
+        let keep_wats = mining_wats - subsidy_wats;
+
+        let keep_str = format!("e{}:secret:{}", format_amount(keep_wats), keep_secret);
+        let subsidy_str = format!("e{}:secret:{}", format_amount(subsidy_wats), subsidy_secret);
+        let timestamp = chrono::Utc::now().timestamp() as f64;
+
+        // Build JSON prefix matching native work_unit.rs exactly:
+        // Two webcash entries, subsidy array, timestamp, nonce field.
+        let mut prefix = format!(
+            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{keep_str}\", \"{subsidy_str}\"], \"subsidy\": [\"{subsidy_str}\"], \"difficulty\": {difficulty}, \"timestamp\": {timestamp}, \"nonce\": "
         );
 
-        // Pad with spaces to a multiple of 48 bytes → base64 produces 64 bytes = 1 SHA256 block.
-        let target_len = ((raw_prefix.len() + 47) / 48) * 48;
-        let mut padded = raw_prefix.into_bytes();
-        padded.resize(target_len, b' ');
+        // Pad to multiple of 48 bytes, last char '1' (matching C++ webminer)
+        let target_len = 48 * (1 + prefix.len() / 48);
+        while prefix.len() < target_len {
+            prefix.push(' ');
+        }
+        prefix.pop();
+        prefix.push('1');
 
-        let prefix_b64 = STANDARD.encode(&padded);
+        let prefix_b64 = STANDARD.encode(prefix.as_bytes());
 
         Ok(GpuMiningWork {
-            secret,
-            webcash_str,
+            secret: keep_secret,
+            webcash_str: keep_str,
             mining_depth: depth,
             difficulty,
             prefix_b64,
@@ -1075,7 +1085,7 @@ mod tests {
     #[test]
     fn gpu_mining_work_prefix_aligned() {
         let wallet = BrowserWallet::create(None).unwrap();
-        let work = wallet.build_gpu_mining_work(28, "195.3125").unwrap();
+        let work = wallet.build_gpu_mining_work(28, "195.3125", "9.765625").unwrap();
         let prefix_len = work.prefix_b64.len();
         assert_eq!(
             prefix_len % 64, 0,

@@ -647,21 +647,23 @@ impl GpuMiner {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            // WebGPU: map buffers and poll until ready.
+            // WebGPU: map_async returns a future. We must await each buffer
+            // mapping before calling get_mapped_range().
             for i in 0..batch_size {
+                let (sender, receiver) = futures_channel::oneshot::channel::<()>();
                 self.slots[i]
                     .staging_buffer
                     .slice(..)
-                    .map_async(wgpu::MapMode::Read, |_| {});
+                    .map_async(wgpu::MapMode::Read, move |_| {
+                        let _ = sender.send(());
+                    });
+                self.device.poll(wgpu::PollType::Poll);
+                let _ = receiver.await;
             }
-            // On WebGPU, Wait blocks the JS event loop until GPU work completes.
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            });
         }
 
         // Phase 4: read all results.
+        #[cfg(not(target_arch = "wasm32"))]
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
@@ -676,7 +678,10 @@ impl GpuMiner {
             results.push(MiningChunkResult {
                 result,
                 attempted: NONCE_SPACE_SIZE as u64,
+                #[cfg(not(target_arch = "wasm32"))]
                 elapsed: started.elapsed(),
+                #[cfg(target_arch = "wasm32")]
+                elapsed: std::time::Duration::ZERO,
             });
         }
         Ok(results)
@@ -765,11 +770,12 @@ impl GpuMiner {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
+            let (sender, receiver) = futures_channel::oneshot::channel::<()>();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |_| {
+                let _ = sender.send(());
             });
+            self.device.poll(wgpu::PollType::Poll);
+            let _ = receiver.await;
         }
 
         let data = buffer_slice.get_mapped_range();
@@ -847,6 +853,7 @@ impl MinerBackend for GpuMiner {
             return Ok(MiningChunkResult::empty());
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         let started = std::time::Instant::now();
         // Single large dispatch for GPU stability (especially AMD consumer GPUs).
         let result = self
@@ -856,7 +863,10 @@ impl MinerBackend for GpuMiner {
         Ok(MiningChunkResult {
             result,
             attempted: (range_end - range_start) as u64,
+            #[cfg(not(target_arch = "wasm32"))]
             elapsed: started.elapsed(),
+            #[cfg(target_arch = "wasm32")]
+            elapsed: std::time::Duration::ZERO,
         })
     }
 }

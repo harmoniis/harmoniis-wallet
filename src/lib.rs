@@ -30,7 +30,10 @@ pub use wallet::store::{
 pub use wallet::store_mem::MemHarmoniiStore;
 pub use wallet::browser_wallet::{self, BrowserWallet};
 
-// Webcash types from webylib (native only — webylib requires SQLite + tokio)
+// Re-export webylib for downstream access to protocol defs (NetworkMode, endpoints)
+pub use webylib;
+
+// Webcash types from webylib (native only — wallet/server need SQLite + tokio)
 #[cfg(feature = "native")]
 pub use wallet::webcash::{Amount as WebcashAmount, PublicWebcash, SecretWebcash};
 
