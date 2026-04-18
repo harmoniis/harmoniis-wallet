@@ -65,9 +65,9 @@ impl Drop for HdKeychain {
 }
 
 impl HdKeychain {
-    /// Generate a new keychain with a random 32-byte (256-bit) mnemonic.
+    /// Generate a new keychain with a random 16-byte (128-bit) 12-word mnemonic.
     pub fn generate_new() -> Result<Self> {
-        let mut entropy = vec![0u8; 32];
+        let mut entropy = vec![0u8; 16];
         OsRng.fill_bytes(&mut entropy);
         Self::from_entropy(&entropy)
     }
@@ -217,6 +217,25 @@ mod tests {
         assert_ne!(vault, vault_1);
         assert_ne!(pgp0, pgp1);
         assert_ne!(voucher, vault);
+    }
+
+    #[test]
+    fn generate_new_produces_12_word_mnemonic() {
+        let keychain = HdKeychain::generate_new().unwrap();
+        let mnemonic = keychain.mnemonic_words();
+        let word_count = mnemonic.split_whitespace().count();
+        assert_eq!(word_count, 12, "must generate 12-word mnemonic (128-bit entropy)");
+        assert_eq!(keychain.entropy_hex().len(), 32, "16 bytes = 32 hex chars");
+    }
+
+    #[test]
+    fn mnemonic_roundtrip_12_words() {
+        let keychain = HdKeychain::generate_new().unwrap();
+        let mnemonic = keychain.mnemonic_words();
+        let restored = HdKeychain::from_mnemonic_words(&mnemonic).unwrap();
+        assert_eq!(keychain.entropy_hex(), restored.entropy_hex());
+        assert_eq!(keychain.derive_slot_hex("webcash", 0).unwrap(),
+                   restored.derive_slot_hex("webcash", 0).unwrap());
     }
 
     #[test]

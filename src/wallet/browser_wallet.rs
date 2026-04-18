@@ -891,6 +891,39 @@ mod tests {
     }
 
     #[test]
+    fn creates_12_word_mnemonic() {
+        let wallet = BrowserWallet::create(None).unwrap();
+        let word_count = wallet.mnemonic().split_whitespace().count();
+        assert_eq!(word_count, 12, "new wallets must use 12-word mnemonic");
+    }
+
+    #[test]
+    fn recover_from_mnemonic_restores_same_keys() {
+        let wallet = BrowserWallet::create(None).unwrap();
+        let mnemonic = wallet.mnemonic().to_string();
+        let original_secret = wallet.master_secret_hex().unwrap();
+
+        // Recover from the 12-word mnemonic
+        let restored = BrowserWallet::create(Some(&mnemonic)).unwrap();
+        assert_eq!(restored.mnemonic(), mnemonic);
+        assert_eq!(restored.master_secret_hex().unwrap(), original_secret);
+        assert_eq!(restored.derive_identity_public_key().unwrap(),
+                   wallet.derive_identity_public_key().unwrap());
+    }
+
+    #[test]
+    fn recover_from_hex_via_mnemonic_from_hex() {
+        let wallet = BrowserWallet::create(None).unwrap();
+        let hex_entropy = wallet.keychain().unwrap().entropy_hex();
+
+        // Convert hex to mnemonic, then create wallet from it
+        let mnemonic = mnemonic_from_hex(&hex_entropy).unwrap();
+        let restored = BrowserWallet::create(Some(&mnemonic)).unwrap();
+        assert_eq!(restored.master_secret_hex().unwrap(),
+                   wallet.master_secret_hex().unwrap());
+    }
+
+    #[test]
     fn json_round_trip() {
         let mut wallet = BrowserWallet::create(None).unwrap();
         wallet.store_mined_output(&"c".repeat(64), 50 * UNIT).unwrap();
