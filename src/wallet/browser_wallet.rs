@@ -658,22 +658,19 @@ impl BrowserWallet {
         let secret = derive_output_secret(&data.master_secret_hex, CHAIN_MINING, depth)?;
         let webcash_str = format!("e{}:secret:{}", mining_amount, secret);
 
-        // Build the JSON preimage matching C++ webminer format.
-        // The nonce field is padded to keep total length fixed.
-        let raw_json = format!(
-            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{webcash_str}\"], \"subsidy\": [], \"difficulty\": {difficulty}, \"nonce\":      0}}"
+        // Build the JSON prefix matching C++ webminer format exactly.
+        // The prefix ends with "nonce:" — the nonce digits and closing brace
+        // are appended separately as base64 nonce table entries + "fQ==".
+        let raw_prefix = format!(
+            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{webcash_str}\"], \"subsidy\": [], \"difficulty\": {difficulty}, \"nonce\":"
         );
 
-        // Pad raw JSON to a multiple of 48 bytes → 64 base64 bytes = one SHA256 block.
-        let raw_bytes = raw_json.as_bytes();
-        let pad_len = ((raw_bytes.len() + 47) / 48) * 48;
-        let mut padded = vec![0u8; pad_len];
-        padded[..raw_bytes.len()].copy_from_slice(raw_bytes);
+        // Pad with spaces to a multiple of 48 bytes → base64 produces 64 bytes = 1 SHA256 block.
+        let target_len = ((raw_prefix.len() + 47) / 48) * 48;
+        let mut padded = raw_prefix.into_bytes();
+        padded.resize(target_len, b' ');
 
-        // Base64-encode the prefix (everything except closing "}").
-        // The last 3 raw bytes "0}}" are replaced by nonce digits + "}".
-        let prefix_raw = &padded[..pad_len - 3];
-        let prefix_b64 = STANDARD.encode(prefix_raw);
+        let prefix_b64 = STANDARD.encode(&padded);
 
         Ok(GpuMiningWork {
             secret,
