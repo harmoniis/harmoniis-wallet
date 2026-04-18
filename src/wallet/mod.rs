@@ -28,7 +28,6 @@ pub mod webcash;
 pub mod labeled_wallets;
 pub mod store;
 pub mod store_mem;
-pub mod browser_wallet;
 
 // ── Always available (business logic, uses HarmoniiStore trait) ──
 mod core;

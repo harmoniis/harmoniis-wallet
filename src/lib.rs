@@ -28,14 +28,14 @@ pub use wallet::store::{
     PgpIdentityRecord, PgpIdentityRow, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
 };
 pub use wallet::store_mem::MemHarmoniiStore;
-pub use wallet::browser_wallet::{self, BrowserWallet};
 
 // Re-export webylib for downstream access to protocol defs (NetworkMode, endpoints)
 pub use webylib;
 
-// Webcash types from webylib (native only — wallet/server need SQLite + tokio)
-#[cfg(feature = "native")]
+// Webcash types from webylib (available on all targets)
 pub use wallet::webcash::{Amount as WebcashAmount, PublicWebcash, SecretWebcash};
+#[cfg(any(feature = "native", feature = "wasm"))]
+pub use wallet::webcash::{WebcashServerClient, WebcashWallet};
 
 // ── Native-only modules and re-exports ───────────────────────────
 #[cfg(feature = "native")]
@@ -57,9 +57,6 @@ pub mod client {
 
 #[cfg(feature = "native")]
 pub use voucher_wallet::{VoucherStats, VoucherWallet};
-
-#[cfg(feature = "native")]
-pub use wallet::webcash::{WebcashServerClient, WebcashWallet};
 
 #[cfg(feature = "native")]
 pub use wallet::store_sqlite::SqliteHarmoniiStore;

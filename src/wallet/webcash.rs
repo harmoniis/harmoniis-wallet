@@ -1,21 +1,18 @@
 //! Webcash types re-exported from [`webylib`].
 //!
-//! Available only with the `native` feature (webylib requires SQLite + tokio).
-//! For WASM, use the webcash HD derivation directly from keychain + sha2.
+//! Available on all targets (native + WASM). webylib v0.3.2+ supports WASM
+//! with MemStore + reqwest browser fetch.
 
-#[cfg(feature = "native")]
 pub use webylib::amount::Amount;
-#[cfg(feature = "native")]
 pub use webylib::error::Error as WebcashError;
-#[cfg(feature = "native")]
 pub use webylib::hd::HDWallet as WebcashHDWallet;
-#[cfg(feature = "native")]
 pub use webylib::hd::ChainCode as WebcashChainCode;
-#[cfg(feature = "native")]
 pub use webylib::webcash::{PublicWebcash, SecretWebcash};
-#[cfg(feature = "native")]
+
+// Server + Wallet available when HTTP client is compiled (native or wasm)
+#[cfg(any(feature = "native", feature = "wasm"))]
 pub use webylib::server::ServerClient as WebcashServerClient;
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "wasm"))]
 pub use webylib::wallet::{Wallet as WebcashWallet, WalletSnapshot as WebcashWalletSnapshot};
 
 /// Extract the bearer **secret** webcash string (`e…:secret:…`) from `pay` / CLI output.

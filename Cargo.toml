@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.81"
+version     = "0.1.82"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -125,7 +125,7 @@ bytemuck        = { version = "1", features = ["derive"] }
 futures-channel = "0.3"
 
 # ── Layer 1: Native wallet (optional) ────────────────────────
-webylib         = { version = "0.3.2", default-features = false }
+webylib         = { version = "0.3.3", default-features = false }
 rusqlite        = { version = "0.37", optional = true }
 reqwest         = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false, optional = true }
 tokio           = { version = "1", features = ["full"], optional = true }
@@ -170,15 +170,3 @@ actix-rt        = { version = "2", optional = true }
 [dev-dependencies]
 tempfile = "3"
 tokio    = { version = "1", features = ["full"] }
-
-
-[lints.clippy]
-too_many_arguments = "allow"
-needless_return = "allow"
-field_reassign_with_default = "allow"
-if_same_then_else = "allow"
-unnecessary_lazy_evaluations = "allow"
-large_enum_variant = "allow"
-ptr_arg = "allow"
-print_literal = "allow"
-format_in_format_args = "allow"

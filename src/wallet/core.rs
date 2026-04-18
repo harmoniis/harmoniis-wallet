@@ -121,7 +121,7 @@ impl WalletCore {
             .ok_or_else(|| Error::Other(anyhow::anyhow!("missing master entropy hex")))
     }
 
-    pub(crate) fn keychain(&self) -> Result<HdKeychain> {
+    pub fn keychain(&self) -> Result<HdKeychain> {
         if let Some(words) = self.store.get_meta(META_ROOT_MNEMONIC)? {
             return HdKeychain::from_mnemonic_words(&words);
         }
@@ -129,7 +129,7 @@ impl WalletCore {
         HdKeychain::from_entropy_hex(&entropy_hex)
     }
 
-    pub(crate) fn set_master_keychain_material(&self, keychain: &HdKeychain) -> Result<()> {
+    pub fn set_master_keychain_material(&self, keychain: &HdKeychain) -> Result<()> {
         self.store
             .set_meta(META_ROOT_PRIVATE_KEY_HEX, &keychain.entropy_hex())?;
         self.store
@@ -364,7 +364,7 @@ impl WalletCore {
         self.store.list_wallet_slots(family)
     }
 
-    pub(crate) fn refresh_slot_registry(&self) -> Result<()> {
+    pub fn refresh_slot_registry(&self) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let root_hex = self.derive_slot_hex("root", 0)?;
         let rgb_hex = self.derive_slot_hex("rgb", 0)?;
