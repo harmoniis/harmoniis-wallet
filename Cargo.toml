@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.73"
+version     = "0.1.74"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -80,7 +80,7 @@ ark = ["dep:ark-client", "dep:ark-bdk-wallet", "dep:ark-core", "dep:ark-grpc"]
 
 # ── Layer 3: Mining ───────────────────────────────────────────
 gpu = ["dep:wgpu", "wgpu?/spirv"]
-gpu-wasm = ["dep:wgpu"]
+gpu-wasm = ["dep:wgpu", "wgpu?/webgpu"]
 cuda = ["dep:cudarc"]
 
 # ── WASM target ───────────────────────────────────────────────
