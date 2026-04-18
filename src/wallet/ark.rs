@@ -278,14 +278,10 @@ where
             .full_scan(request, 5, 5)
             .await
             .map_err(ark_client::Error::wallet)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         self.inner
             .write()
             .map_err(|e| ark_client::Error::consumer(format!("wallet write lock: {e}")))?
-            .apply_update_at(update, now)
+            .apply_update(update)
             .map_err(ark_client::Error::wallet)?;
         Ok(())
     }

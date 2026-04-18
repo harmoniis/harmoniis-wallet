@@ -412,7 +412,7 @@ impl DeterministicBitcoinWallet {
             if let Some(dir) = store_path.parent() {
                 std::fs::create_dir_all(dir).ok();
             }
-            let mut store = Store::open_or_create_new(b"hrmw-btc-1", &store_path)
+            let (mut store, _loaded) = Store::load_or_create(b"hrmw-btc-1", &store_path)
                 .map_err(|e| Error::Other(anyhow::anyhow!("bitcoin store open: {e}")))?;
 
             let wallet = match kind {
