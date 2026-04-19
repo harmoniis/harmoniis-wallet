@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.90"
+version = "0.1.91"
 dependencies = [
  "actix",
  "actix-rt",
@@ -1864,6 +1864,8 @@ dependencies = [
  "tokio",
  "toml",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "webylib",
  "wgpu",
  "x25519-dalek",
@@ -5085,9 +5087,9 @@ dependencies = [
 
 [[package]]
 name = "webylib"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8a7b0e69ef29104df0780075093d2221ca1ecc8854fc5231c0171d362e19017"
+checksum = "8ddf6c4bada3ff40c9a803b68a765ff3548b898146bccdd51c27c719f5a79d89"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5095,11 +5097,13 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "futures-channel",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "hex",
  "hkdf",
  "hmac",
+ "js-sys",
  "keyring",
  "log",
  "rand 0.9.4",
@@ -5113,6 +5117,9 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "zeroize",
 ]
 

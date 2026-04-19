@@ -48,6 +48,36 @@ impl WalletCore {
     }
 }
 
+// ── WASM constructors (IndexedDB) ───────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+impl WalletCore {
+    /// Load master wallet from IndexedDB. Returns None if not found.
+    pub async fn open_from_idb(network: &str, key: &str) -> Result<Option<Self>> {
+        match super::idb::load(network, key).await? {
+            Some(json) => {
+                let store = super::store_mem::MemHarmoniiStore::from_json(&json)?;
+                Ok(Some(Self::new(Box::new(store))))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Save master wallet state to IndexedDB.
+    pub async fn save_to_idb(&self, network: &str, key: &str) -> Result<()> {
+        let mem = self.store.as_any()
+            .downcast_ref::<super::store_mem::MemHarmoniiStore>()
+            .ok_or_else(|| Error::Other(anyhow::anyhow!("not a MemHarmoniiStore")))?;
+        let json = mem.to_json()?;
+        super::idb::save(network, key, &json).await
+    }
+
+    /// Delete master wallet from IndexedDB.
+    pub async fn delete_from_idb(network: &str, key: &str) -> Result<()> {
+        super::idb::delete(network, key).await
+    }
+}
+
 // ── Native constructors ─────────────────────────────────────────
 
 #[cfg(feature = "native")]

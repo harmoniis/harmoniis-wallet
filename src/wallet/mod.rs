@@ -28,6 +28,8 @@ pub mod webcash;
 pub mod labeled_wallets;
 pub mod store;
 pub mod store_mem;
+#[cfg(target_arch = "wasm32")]
+pub mod idb;
 
 // ── Always available (business logic, uses HarmoniiStore trait) ──
 mod core;

@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.90"
+version     = "0.1.91"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -87,7 +87,7 @@ gpu-wasm = ["dep:wgpu", "wgpu?/webgpu"]
 cuda = ["dep:cudarc"]
 
 # ── WASM target ───────────────────────────────────────────────
-wasm = ["webylib/wasm", "dep:reqwest", "dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
+wasm = ["webylib/wasm", "dep:reqwest", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:serde-wasm-bindgen", "getrandom/js"]
 
 # ── Other optional features ───────────────────────────────────
 cli = ["dep:clap"]
@@ -127,7 +127,7 @@ bytemuck        = { version = "1", features = ["derive"] }
 futures-channel = "0.3"
 
 # ── Layer 1: Native wallet (optional) ────────────────────────
-webylib         = { version = "0.3.5", default-features = false }
+webylib         = { version = "0.3.6", default-features = false }
 rusqlite        = { version = "0.37", optional = true }
 reqwest         = { version = "0.12", features = ["json"], default-features = false, optional = true }
 tokio           = { version = "1", features = ["full"], optional = true }
@@ -168,6 +168,9 @@ openssl         = { version = "0.10", optional = true }
 actix           = { version = "0.13", optional = true }
 actix-rt        = { version = "2", optional = true }
 
+
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["DomStringList", "Event", "EventTarget", "IdbDatabase", "IdbFactory", "IdbObjectStore", "IdbOpenDbRequest", "IdbRequest", "IdbTransaction", "IdbTransactionMode", "IdbVersionChangeEvent", "Window"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
