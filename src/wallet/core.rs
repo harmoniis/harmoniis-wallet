@@ -575,6 +575,104 @@ impl WalletCore {
     }
 }
 
+// ── Webcash slot scanning ─────────────────────────────────────────
+
+/// Result of scanning deterministic webcash slots for active wallets.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SlotScanResult {
+    /// Label -> webylib wallet state JSON for each slot with recovered outputs.
+    pub wallets: std::collections::HashMap<String, String>,
+    /// Total outputs recovered across all slots.
+    pub total_recovered: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WalletCore {
+    /// Scan deterministic webcash slots for active wallets (WASM).
+    ///
+    /// Tries slot indices 0..max_slots, derives the webcash master secret for
+    /// each, creates a webylib Wallet, and runs server recovery. Returns wallet
+    /// states for every slot that has recovered outputs or non-zero balance.
+    /// Active slots are registered in the master slot registry.
+    pub async fn scan_webcash_slots(
+        &self,
+        network: webylib::server::NetworkMode,
+        max_slots: u32,
+        gap_limit: usize,
+    ) -> Result<SlotScanResult> {
+        use super::webcash::WebcashWallet;
+
+        let mut wallets = std::collections::HashMap::new();
+        let mut total_recovered = 0usize;
+
+        for index in 0..max_slots {
+            let label = if index == 0 { "main".to_string() } else { format!("wallet-{index}") };
+            let secret = match self.derive_slot_hex("webcash", index) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let wl = WebcashWallet::new_memory(network.clone()).map_err(|e| Error::Other(e.into()))?;
+            wl.store_master_secret(&secret).await.map_err(|e| Error::Other(e.into()))?;
+            let result = wl.recover_from_wallet(gap_limit).await.map_err(|e| Error::Other(e.into()))?;
+            let balance = wl.balance_amount().await.map_err(|e| Error::Other(e.into()))?;
+
+            if result.recovered_count > 0 || balance.wats > 0 {
+                let state_json = wl.to_json().map_err(|e| Error::Other(e.into()))?;
+                wallets.insert(label.clone(), state_json);
+                total_recovered += result.recovered_count;
+
+                if index > 0 {
+                    let _ = self.register_wallet_slot("webcash", index, &label);
+                }
+            }
+        }
+
+        Ok(SlotScanResult { wallets, total_recovered })
+    }
+}
+
+#[cfg(feature = "native")]
+impl WalletCore {
+    /// Scan deterministic webcash slots for active wallets (native).
+    pub async fn scan_webcash_slots(
+        &self,
+        network: webylib::server::NetworkMode,
+        max_slots: u32,
+        gap_limit: usize,
+    ) -> Result<SlotScanResult> {
+        use super::webcash::WebcashWallet;
+
+        let mut wallets = std::collections::HashMap::new();
+        let mut total_recovered = 0usize;
+
+        for index in 0..max_slots {
+            let label = if index == 0 { "main".to_string() } else { format!("wallet-{index}") };
+            let secret = match self.derive_slot_hex("webcash", index) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let wl = WebcashWallet::open_memory_with_network(network.clone()).map_err(|e| Error::Other(e.into()))?;
+            wl.store_master_secret(&secret).await.map_err(|e| Error::Other(e.into()))?;
+            let result = wl.recover_from_wallet(gap_limit).await.map_err(|e| Error::Other(e.into()))?;
+            let balance = wl.balance_amount().await.map_err(|e| Error::Other(e.into()))?;
+
+            if result.recovered_count > 0 || balance.wats > 0 {
+                let state_json = wl.to_json().map_err(|e| Error::Other(e.into()))?;
+                wallets.insert(label.clone(), state_json);
+                total_recovered += result.recovered_count;
+
+                if index > 0 {
+                    let _ = self.register_wallet_slot("webcash", index, &label);
+                }
+            }
+        }
+
+        Ok(SlotScanResult { wallets, total_recovered })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WalletCore;
