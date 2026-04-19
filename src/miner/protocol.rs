@@ -123,10 +123,10 @@ impl MiningProtocol {
             preimage, hash_decimal
         );
 
-        let resp = self.http.post(&url)
-            .header("Content-Type", "application/json")
-            .body(body_str)
-            .send()
+        let mut req = self.http.post(&url).body(body_str);
+        #[cfg(not(target_arch = "wasm32"))]
+        { req = req.header("Content-Type", "application/json"); }
+        let resp = req.send()
             .await?;
         let status_code = resp.status();
         let body_text = resp.text().await?;
