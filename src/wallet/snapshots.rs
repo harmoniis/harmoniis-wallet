@@ -1,10 +1,28 @@
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
 use super::keychain::HdKeychain;
 use super::store::{
     canonical_label, PgpIdentityRow, PgpIdentitySnapshot, WalletSnapshot,
 };
+use super::store_mem::MemHarmoniiStore;
 use super::WalletCore;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
+
+/// Complete wallet backup: master HarmoniiStore state + all webcash wallet states.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FullBackup {
+    /// Serialised MemHarmoniiStore JSON (contains mnemonic, root key, identities,
+    /// wallet slots, payment transactions, contracts, certificates).
+    pub master_state: String,
+    /// Per-label webcash wallet states (webylib MemStore JSON).
+    /// Key = wallet label (e.g. "main", "savings", "imported-1").
+    pub webcash_wallets: HashMap<String, String>,
+    /// ISO-8601 timestamp when the backup was created.
+    pub created_at: String,
+}
 
 impl WalletCore {
     // ── Snapshot ──────────────────────────────────────────────────────────────
@@ -33,6 +51,30 @@ impl WalletCore {
             contracts: self.list_contracts()?,
             certificates: self.list_certificates()?,
         })
+    }
+
+    /// Export a complete backup containing the full master store and all webcash wallet states.
+    pub fn export_full_backup(&self, webcash_wallets: HashMap<String, String>) -> Result<String> {
+        let master_state = self.store().as_any()
+            .downcast_ref::<MemHarmoniiStore>()
+            .ok_or_else(|| Error::Other(anyhow::anyhow!("full backup requires MemHarmoniiStore")))?
+            .to_json()?;
+        let backup = FullBackup {
+            master_state,
+            webcash_wallets,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        serde_json::to_string_pretty(&backup)
+            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+    }
+
+    /// Import a full backup, returning the reconstructed master state and webcash wallet map.
+    pub fn import_full_backup(backup_json: &str) -> Result<(WalletCore, HashMap<String, String>)> {
+        let backup: FullBackup = serde_json::from_str(backup_json)
+            .map_err(|e| Error::Other(anyhow::anyhow!("invalid backup: {e}")))?;
+        let store = MemHarmoniiStore::from_json(&backup.master_state)?;
+        let core = WalletCore::new(Box::new(store));
+        Ok((core, backup.webcash_wallets))
     }
 
     pub fn import_snapshot(&self, snap: &WalletSnapshot) -> Result<()> {

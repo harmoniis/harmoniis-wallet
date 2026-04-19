@@ -28,6 +28,7 @@ pub use wallet::store::{
     PgpIdentityRecord, PgpIdentityRow, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
 };
 pub use wallet::store_mem::MemHarmoniiStore;
+pub use wallet::snapshots::FullBackup;
 
 // Re-export webylib for downstream access to protocol defs (NetworkMode, endpoints)
 pub use webylib;
