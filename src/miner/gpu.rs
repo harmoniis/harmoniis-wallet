@@ -32,6 +32,17 @@ const INPUT_WORDS: usize = 12;
 const RESULT_WORDS: usize = 3;
 const RESULT_BUFFER_SIZE: u64 = (RESULT_WORDS * 4) as u64;
 
+/// Create a wgpu Instance for the given backends.
+pub fn create_instance(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
+    })
+}
+
 /// Platform-native compute backend. One backend per platform, no mixing.
 /// Linux = Vulkan, Windows = DX12, macOS = Metal.
 pub fn platform_backend() -> wgpu::Backends {
@@ -64,10 +75,7 @@ pub fn platform_backend() -> wgpu::Backends {
 /// DX12 as-is, no regression.
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 pub async fn enumerate_vulkan_gpus() -> Option<Vec<wgpu::Adapter>> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..Default::default()
-    });
+    let instance = create_instance(wgpu::Backends::VULKAN);
     let adapters: Vec<wgpu::Adapter> = instance
         .enumerate_adapters(wgpu::Backends::VULKAN)
         .await
@@ -125,10 +133,7 @@ impl AdapterIdentity {
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     let backend = platform_backend();
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: backend,
-        ..Default::default()
-    });
+    let instance = create_instance(backend);
     let adapters = instance.enumerate_adapters(backend).await;
     let adapter = adapters
         .into_iter()
@@ -146,8 +151,8 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("probe"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            ..Default::default()
+            required_limits: wgpu::Limits::downlevel_defaults(), experimental_features: wgpu::ExperimentalFeatures::default(), memory_hints: wgpu::MemoryHints::default(), trace: wgpu::Trace::default(),
+            
         })
         .await
         .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
@@ -162,7 +167,8 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
             device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                 label: Some("probe_shader_spirv"),
                 spirv: Some(std::borrow::Cow::Owned(spirv_words)),
-                ..Default::default()
+                num_workgroups: (0, 0, 0),
+                dxil: None, metallib: None, msl: None, hlsl: None, glsl: None, wgsl: None,
             })
         }
     } else {
@@ -209,7 +215,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[&bgl],
+        bind_group_layouts: &[Some(&bgl)],
         immediate_size: 0,
     });
     // This is the call that can segfault on buggy AMD Vulkan drivers.
@@ -300,10 +306,8 @@ impl GpuMiner {
     /// Try to initialize the default high-performance adapter.
     pub async fn try_new() -> Option<Self> {
         let compute_backends = platform_backend();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: compute_backends,
-            ..Default::default()
-        });
+        let instance = create_instance(
+            compute_backends);
 
         // Fast path: ask wgpu for a high-performance adapter.
         let preferred = instance
@@ -362,7 +366,9 @@ impl GpuMiner {
                 label: Some("webminer"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
-                ..Default::default()
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::default(),
             })
             .await;
         let (device, queue) = match req_default {
@@ -376,8 +382,8 @@ impl GpuMiner {
                     .request_device(&wgpu::DeviceDescriptor {
                         label: Some("webminer-downlevel"),
                         required_features: wgpu::Features::empty(),
-                        required_limits: wgpu::Limits::downlevel_defaults(),
-                        ..Default::default()
+                        required_limits: wgpu::Limits::downlevel_defaults(), experimental_features: wgpu::ExperimentalFeatures::default(), memory_hints: wgpu::MemoryHints::default(), trace: wgpu::Trace::default(),
+                        
                     })
                     .await
                 {
@@ -410,7 +416,8 @@ impl GpuMiner {
                 device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                     label: Some("sha256_mine_spirv"),
                     spirv: Some(std::borrow::Cow::Owned(spirv_words)),
-                    ..Default::default()
+                    num_workgroups: (0, 0, 0),
+                    dxil: None, metallib: None, msl: None, hlsl: None, glsl: None, wgsl: None,
                 })
             }
         } else {
@@ -466,7 +473,7 @@ impl GpuMiner {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("miner_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -621,45 +628,29 @@ impl GpuMiner {
         }
 
         // Phase 3: ONE submit, ONE sync.
-        let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[allow(unused_variables)] let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         // Map all staging buffers for reading.
-        #[cfg(not(target_arch = "wasm32"))]
         {
             let mut receivers = Vec::with_capacity(batch_size);
             for i in 0..batch_size {
+                #[cfg(not(target_arch = "wasm32"))]
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                self.slots[i]
-                    .staging_buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        let _ = tx.send(result);
-                    });
+                #[cfg(target_arch = "wasm32")]
+                let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+                self.slots[i].staging_buffer.map_async(wgpu::MapMode::Read, 0..RESULT_BUFFER_SIZE, move |result| {
+                    let _ = tx.send(result);
+                });
                 receivers.push(rx);
             }
+            #[cfg(not(target_arch = "wasm32"))]
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
                 timeout: None,
             });
             for rx in receivers {
-                rx.await??;
+                rx.await.map_err(|_| anyhow::anyhow!("map cancelled"))??;
             }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Map all buffers, then poll(Wait) to process the GPU queue inline.
-            // On WebGPU poll(Wait) processes pending work synchronously (doesn't
-            // block the JS event loop, but does flush the GPU queue).
-            for i in 0..batch_size {
-                self.slots[i]
-                    .staging_buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, |_| {});
-            }
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            });
         }
 
         // Phase 4: read all results.
@@ -753,29 +744,24 @@ impl GpuMiner {
             0,
             RESULT_BUFFER_SIZE,
         );
-        let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[allow(unused_variables)] let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
-        let buffer_slice = slot.staging_buffer.slice(..);
-        #[cfg(not(target_arch = "wasm32"))]
         {
+            #[cfg(not(target_arch = "wasm32"))]
             let (tx, rx) = tokio::sync::oneshot::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            #[cfg(target_arch = "wasm32")]
+            let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+            slot.staging_buffer.map_async(wgpu::MapMode::Read, 0..RESULT_BUFFER_SIZE, move |result| {
                 let _ = tx.send(result);
             });
+            #[cfg(not(target_arch = "wasm32"))]
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
                 timeout: None,
             });
-            rx.await??;
+            rx.await.map_err(|_| anyhow::anyhow!("map cancelled"))??;
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            });
-        }
+        let buffer_slice = slot.staging_buffer.slice(..);
 
         let data = buffer_slice.get_mapped_range();
         let words: &[u32] = bytemuck::cast_slice(&data[..RESULT_BUFFER_SIZE as usize]);

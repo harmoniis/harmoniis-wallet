@@ -401,10 +401,7 @@ pub async fn enumerate_all_devices() -> EnumeratedDevices {
     #[cfg(feature = "gpu")]
     let wgpu_adapters = {
         let backend = gpu::platform_backend();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: backend,
-            ..Default::default()
-        });
+        let instance = gpu::create_instance(backend);
         let raw = instance.enumerate_adapters(backend).await;
         #[allow(unused_mut)]
         let mut adapters: Vec<wgpu::Adapter> = raw
