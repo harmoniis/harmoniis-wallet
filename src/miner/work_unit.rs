@@ -34,33 +34,39 @@ pub struct WorkUnit {
 }
 
 impl WorkUnit {
-    /// Build a new work unit with fresh random secrets and current parameters.
-    ///
-    /// This reproduces the C++ webminer's preimage construction exactly:
-    /// 1. Format JSON prefix with keep/subsidy secrets, difficulty, timestamp
-    /// 2. Pad to a multiple of 48 bytes (spaces, last char '1')
-    /// 3. Base64 encode (becomes 64 bytes = one SHA256 block)
-    /// 4. Compute midstate
+    /// Build a new work unit with fresh random secrets (NOT recoverable).
+    /// Use `from_secrets` for HD-derived recoverable secrets.
     pub fn new(difficulty: u32, mining_amount: Amount, subsidy_amount: Amount) -> Self {
         let mut rng = rand::thread_rng();
-
-        // Generate random 32-byte secrets
         let mut keep_sk = [0u8; 32];
         let mut subsidy_sk = [0u8; 32];
         rng.fill_bytes(&mut keep_sk);
         rng.fill_bytes(&mut subsidy_sk);
+        let keep_hex = hex::encode(keep_sk);
+        let subsidy_hex = hex::encode(subsidy_sk);
+        keep_sk.fill(0);
+        subsidy_sk.fill(0);
+        Self::from_secrets(difficulty, mining_amount, subsidy_amount, &keep_hex, &subsidy_hex)
+    }
 
+    /// Build a work unit from pre-derived secrets (HD-recoverable).
+    ///
+    /// `keep_secret_hex` and `subsidy_secret_hex` are 64-char hex strings
+    /// derived from the wallet's MINING chain via `derive_next_secret()`.
+    pub fn from_secrets(
+        difficulty: u32,
+        mining_amount: Amount,
+        subsidy_amount: Amount,
+        keep_secret_hex: &str,
+        subsidy_secret_hex: &str,
+    ) -> Self {
         let keep_amount = mining_amount - subsidy_amount;
 
-        let keep_str_full = format!("e{}:secret:{}", keep_amount, hex::encode(keep_sk));
-        let subsidy_str_full = format!("e{}:secret:{}", subsidy_amount, hex::encode(subsidy_sk));
+        let keep_str_full = format!("e{}:secret:{}", keep_amount, keep_secret_hex);
+        let subsidy_str_full = format!("e{}:secret:{}", subsidy_amount, subsidy_secret_hex);
         let keep_secret = SecretWebcash::parse(&keep_str_full).expect("valid keep secret format");
         let subsidy_secret =
             SecretWebcash::parse(&subsidy_str_full).expect("valid subsidy secret format");
-
-        // Zero out raw key bytes
-        keep_sk.fill(0);
-        subsidy_sk.fill(0);
 
         #[cfg(not(target_arch = "wasm32"))]
         let timestamp = std::time::SystemTime::now()
