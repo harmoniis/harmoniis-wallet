@@ -506,6 +506,27 @@ impl WalletCore {
         Ok(next)
     }
 
+    pub fn remove_wallet_slot(&self, family: &str, label: &str) -> Result<bool> {
+        let canonical = canonical_label(label)?;
+        if let Some(index) = self.store.get_slot_index_by_label(family, &canonical)? {
+            let now = chrono::Utc::now().to_rfc3339();
+            self.store.replace_slot_at(family, index, &canonical, "", &now)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn rename_wallet_slot(&self, family: &str, old_label: &str, new_label: &str) -> Result<()> {
+        let old_canonical = canonical_label(old_label)?;
+        let new_canonical = canonical_label(new_label)?;
+        let slots = self.store.list_wallet_slots(Some(family))?;
+        let slot = slots.iter().find(|s| s.label.as_deref() == Some(&old_canonical))
+            .ok_or_else(|| Error::Other(anyhow::anyhow!("wallet '{}' not found in family '{}'", old_label, family)))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        self.store.replace_slot_at(family, slot.slot_index, &new_canonical, &slot.descriptor, &now)
+    }
+
     fn register_wallet_slot(&self, family: &str, index: u32, label: &str) -> Result<()> {
         let descriptor = self.derive_slot_hex(family, index)?;
         let db_filename = wallet_db_filename(family, label);

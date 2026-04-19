@@ -62,10 +62,13 @@ impl WorkUnit {
         keep_sk.fill(0);
         subsidy_sk.fill(0);
 
+        #[cfg(not(target_arch = "wasm32"))]
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
+        #[cfg(target_arch = "wasm32")]
+        let timestamp = js_sys::Date::now() / 1000.0;
 
         let keep_str = keep_secret.to_string();
         let subsidy_str = subsidy_secret.to_string();
