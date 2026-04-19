@@ -621,7 +621,10 @@ impl GpuMiner {
         }
 
         // Phase 3: ONE submit, ONE sync.
+        #[cfg(not(target_arch = "wasm32"))]
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[cfg(target_arch = "wasm32")]
+        self.queue.submit(std::iter::once(encoder.finish()));
 
         // Map all staging buffers for reading.
         #[cfg(not(target_arch = "wasm32"))]
@@ -647,8 +650,6 @@ impl GpuMiner {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            // WebGPU: map_async returns a future. We must await each buffer
-            // mapping before calling get_mapped_range().
             for i in 0..batch_size {
                 let (sender, receiver) = futures_channel::oneshot::channel::<()>();
                 self.slots[i]
@@ -657,7 +658,7 @@ impl GpuMiner {
                     .map_async(wgpu::MapMode::Read, move |_| {
                         let _ = sender.send(());
                     });
-                self.device.poll(wgpu::PollType::Poll);
+                let _ = self.device.poll(wgpu::PollType::Poll);
                 let _ = receiver.await;
             }
         }
@@ -753,7 +754,10 @@ impl GpuMiner {
             0,
             RESULT_BUFFER_SIZE,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[cfg(target_arch = "wasm32")]
+        self.queue.submit(std::iter::once(encoder.finish()));
 
         let buffer_slice = slot.staging_buffer.slice(..);
         #[cfg(not(target_arch = "wasm32"))]
@@ -774,7 +778,7 @@ impl GpuMiner {
             buffer_slice.map_async(wgpu::MapMode::Read, move |_| {
                 let _ = sender.send(());
             });
-            self.device.poll(wgpu::PollType::Poll);
+            let _ = self.device.poll(wgpu::PollType::Poll);
             let _ = receiver.await;
         }
 

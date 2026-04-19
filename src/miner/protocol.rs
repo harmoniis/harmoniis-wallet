@@ -55,16 +55,15 @@ impl MiningProtocol {
 
 impl MiningProtocol {
     pub fn new(server_url: &str) -> anyhow::Result<Self> {
-        let timeout = std::time::Duration::from_secs(60);
         #[cfg(not(target_arch = "wasm32"))]
-        let builder = Client::builder().timeout(timeout);
+        let builder = Client::builder().timeout(std::time::Duration::from_secs(60));
         #[cfg(target_arch = "wasm32")]
         let builder = Client::builder();
         let http = builder.build()?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let http_blocking = reqwest::blocking::Client::builder()
-            .timeout(timeout)
+            .timeout(std::time::Duration::from_secs(60))
             .build()?;
 
         Ok(MiningProtocol {
