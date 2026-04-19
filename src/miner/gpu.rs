@@ -650,6 +650,9 @@ impl GpuMiner {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            // On WebGPU the browser drives the GPU queue. Do NOT call device.poll() —
+            // it forces the map_async callback to fire before the GPU finishes.
+            // Instead, await the callback via the browser event loop.
             for i in 0..batch_size {
                 let (sender, receiver) = futures_channel::oneshot::channel::<()>();
                 self.slots[i]
@@ -658,7 +661,6 @@ impl GpuMiner {
                     .map_async(wgpu::MapMode::Read, move |_| {
                         let _ = sender.send(());
                     });
-                let _ = self.device.poll(wgpu::PollType::Poll);
                 let _ = receiver.await;
             }
         }
@@ -778,7 +780,6 @@ impl GpuMiner {
             buffer_slice.map_async(wgpu::MapMode::Read, move |_| {
                 let _ = sender.send(());
             });
-            let _ = self.device.poll(wgpu::PollType::Poll);
             let _ = receiver.await;
         }
 
