@@ -898,6 +898,8 @@ pub struct GpuMineBatchResult {
     pub found: bool,
     pub state: String,
     pub attempted: u64,
+    pub difficulty: u32,
+    pub mining_amount: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preimage_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -906,25 +908,27 @@ pub struct GpuMineBatchResult {
     pub difficulty_achieved: Option<u32>,
 }
 
-/// Run one GPU mining batch: create WorkUnits, dispatch to GPU, on solution
-/// spawn non-blocking claim (submit report + insert HD RECEIVE secret).
+/// Run one GPU mining batch: fetch target from server, create WorkUnits,
+/// dispatch to GPU, on solution spawn non-blocking claim.
 ///
-/// The wallet state returned already has the mined secret stored (via store_directly).
-/// The claim runs in the background — when it completes the random secret is replaced
-/// with an HD RECEIVE secret on the server, but the caller doesn't need to wait.
+/// Only needs wallet state + network — fetches difficulty/amounts from the server.
 #[cfg(target_arch = "wasm32")]
 impl GpuMiner {
     pub async fn mine_and_claim(
         &self,
         wallet: &WebcashWallet,
         network: webylib::server::NetworkMode,
-        difficulty: u32,
-        mining_amount: Amount,
-        subsidy_amount: Amount,
         batch_size: usize,
     ) -> anyhow::Result<GpuMineBatchResult> {
         use super::work_unit::WorkUnit;
         use super::nonce_table::NonceTable;
+        use super::protocol::MiningProtocol;
+
+        // Fetch current target from server
+        let target = MiningProtocol::from_network(&network)?.get_target().await?;
+        let difficulty = target.difficulty;
+        let mining_amount = target.mining_amount;
+        let subsidy_amount = target.subsidy_amount;
 
         let works: Vec<WorkUnit> = (0..batch_size)
             .map(|_| WorkUnit::new(difficulty, mining_amount, subsidy_amount))
@@ -964,6 +968,8 @@ impl GpuMiner {
                     found: true,
                     state,
                     attempted: total_attempted,
+                    difficulty,
+                    mining_amount: mining_amount.to_string(),
                     preimage_b64: Some(preimage),
                     hash_hex: Some(hash_hex),
                     difficulty_achieved: Some(difficulty_achieved),
@@ -975,6 +981,8 @@ impl GpuMiner {
             found: false,
             state: wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?,
             attempted: total_attempted,
+            difficulty,
+            mining_amount: mining_amount.to_string(),
             preimage_b64: None,
             hash_hex: None,
             difficulty_achieved: None,
