@@ -950,12 +950,13 @@ impl GpuMiner {
                 // Spawn non-blocking claim: submit report + replace with HD RECEIVE secret
                 let claim_state = state.clone();
                 let claim_network = network.clone();
+                let claim_network2 = network.clone();
                 let claim_preimage = preimage.clone();
                 let claim_hash = r.hash;
                 wasm_bindgen_futures::spawn_local(async move {
                     let Ok(wl) = WebcashWallet::from_json(&claim_state, claim_network) else { return };
                     let _ = super::super::wallet::webcash::submit_and_claim_mining_solution(
-                        &wl, &claim_network, &claim_preimage, &claim_hash, &keep_str,
+                        &wl, &claim_network2, &claim_preimage, &claim_hash, &keep_str,
                     ).await;
                 });
 
