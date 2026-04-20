@@ -47,15 +47,13 @@ impl WorkUnit {
         let mut keep_sk = [0u8; 32];
         rng.fill_bytes(&mut keep_sk);
 
-        // keep_amount = mining_amount when subsidy is zero, otherwise mining - subsidy
-        let keep_amount = if subsidy_amount.is_zero() { mining_amount } else { mining_amount - subsidy_amount };
-        let keep_str_full = format!("e{}:secret:{}", keep_amount, hex::encode(keep_sk));
+        // keep_secret gets the full mining_amount (webcash.org validates sum(webcash) == mining_amount)
+        let keep_str_full = format!("e{}:secret:{}", mining_amount, hex::encode(keep_sk));
         let keep_secret = SecretWebcash::parse(&keep_str_full).expect("valid keep secret format");
         keep_sk.fill(0);
 
         // Subsidy: only generate if non-zero (matches native webylib miner)
         let subsidy_secret = if subsidy_amount.is_zero() {
-            // Dummy zero-amount secret (not included in preimage)
             SecretWebcash::parse(&format!("e0:secret:{}", hex::encode([0u8; 32]))).unwrap()
         } else {
             let mut subsidy_sk = [0u8; 32];
@@ -75,9 +73,10 @@ impl WorkUnit {
 
         let keep_str = keep_secret.to_string();
 
-        // Build the JSON prefix — match native miner format exactly:
-        // When subsidy=0: webcash has 1 entry, subsidy is empty
-        // When subsidy>0: webcash has 1 entry (keep only), subsidy has 1 entry
+        // Preimage format matching webcash.org expectations:
+        // webcash[] contains the miner's output (full mining_amount)
+        // subsidy[] contains the subsidy output (goes to Webcash LLC)
+        // webcash.org validates: sum(webcash amounts) == mining_target
         let mut prefix = if subsidy_amount.is_zero() {
             format!(
                 "{{\"webcash\":[\"{}\"],\"subsidy\":[],\"timestamp\":{},\"difficulty\":{},\"nonce\": ",
