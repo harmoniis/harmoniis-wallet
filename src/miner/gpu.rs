@@ -908,10 +908,15 @@ pub struct GpuMineBatchResult {
     pub difficulty_achieved: Option<u32>,
 }
 
-/// Run one GPU mining batch: fetch target from server, create WorkUnits,
-/// dispatch to GPU, on solution spawn non-blocking claim.
-///
-/// Only needs wallet state + network — fetches difficulty/amounts from the server.
+/// Cached mining target — refreshed every 30 seconds.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static CACHED_TARGET: std::cell::RefCell<Option<(super::protocol::TargetInfo, f64)>> = std::cell::RefCell::new(None);
+    static CACHED_NONCE_TABLE: std::cell::RefCell<Option<NonceTable>> = std::cell::RefCell::new(None);
+}
+
+/// Run one GPU mining batch. Target is cached (refreshed every 30s).
+/// On solution: spawn non-blocking claim (submit + HD insert).
 #[cfg(target_arch = "wasm32")]
 impl GpuMiner {
     pub async fn mine_and_claim(
@@ -921,11 +926,25 @@ impl GpuMiner {
         batch_size: usize,
     ) -> anyhow::Result<GpuMineBatchResult> {
         use super::work_unit::WorkUnit;
-        use super::nonce_table::NonceTable;
         use super::protocol::MiningProtocol;
 
-        // Fetch current target from server
-        let target = MiningProtocol::from_network(&network)?.get_target().await?;
+        // Fetch target with 30-second cache
+        let now = js_sys::Date::now();
+        let target = CACHED_TARGET.with(|c| {
+            let cached = c.borrow();
+            if let Some((ref t, ts)) = *cached {
+                if now - ts < 30_000.0 { return Some(t.clone()); }
+            }
+            None
+        });
+        let target = match target {
+            Some(t) => t,
+            None => {
+                let t = MiningProtocol::from_network(&network)?.get_target().await?;
+                CACHED_TARGET.with(|c| *c.borrow_mut() = Some((t.clone(), now)));
+                t
+            }
+        };
         let difficulty = target.difficulty;
         let mining_amount = target.mining_amount;
         let subsidy_amount = target.subsidy_amount;
@@ -937,11 +956,14 @@ impl GpuMiner {
         let chunks = self.mine_batch(&midstates, difficulty).await?;
         let total_attempted: u64 = chunks.iter().map(|c| c.attempted).sum();
 
-        // Check for solution
-        let nonce_table = NonceTable::new();
+        // Check for solution (nonce table cached)
+        CACHED_NONCE_TABLE.with(|c| { if c.borrow().is_none() { *c.borrow_mut() = Some(NonceTable::new()); } });
         for (chunk, work) in chunks.into_iter().zip(works.into_iter()) {
             if let Some(r) = chunk.result {
-                let preimage = work.preimage_string(&nonce_table, r.nonce1_idx, r.nonce2_idx);
+                let preimage = CACHED_NONCE_TABLE.with(|c| {
+                    let nt = c.borrow();
+                    work.preimage_string(nt.as_ref().unwrap(), r.nonce1_idx, r.nonce2_idx)
+                });
                 let hash_hex = hex::encode(r.hash);
                 let keep_str = work.keep_secret.to_string();
                 let difficulty_achieved = r.difficulty_achieved;
