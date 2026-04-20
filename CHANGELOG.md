@@ -7,7 +7,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [0.1.113] — 2026-04-21
+
+### Changed
+
+- **webylib**: Upgraded to **0.3.10** (testnet URL restored, MemStore duplicate fix, PAY chain recovery, WASM support, IndexedDB persistence).
+- **Mining**: Reverted WorkUnit to original C++ webminer preimage format for server compatibility.
+- **Mining**: Fixed mining amount — `keep_secret` receives full `mining_amount`.
+- **Mining**: Cached mining target (30s TTL) and NonceTable to fix performance regression.
+- **Mining**: `mine_and_claim` fetches target internally (no external params needed).
+- **Mining**: `GpuMiner::mine_and_claim` — complete mining batch with non-blocking claim.
+- **Mining**: Added `submit_and_claim_mining_solution` for atomic submit+claim.
+- **WASM**: Fixed Content-Type on WASM mining submission (mainnet requires no header).
+- **WASM**: Fixed WorkUnit preimage format to match native miner + server.
+- **WASM**: Restored parallel buffer mapping on WASM (was 30 MH/s, sequential killed it).
+- **WASM**: Fixed Android WebGPU buffer mapping — use `slice().map_async()`.
+- **WASM**: Fixed mining claim inline (not `spawn_local`), `batch_size` 64.
+
+### Removed
+
+- **skill.md**: Agent-specific instructions removed from repository.
 
 ## [0.1.61] — 2026-04-15
 
