@@ -15,6 +15,42 @@ pub use webylib::server::ServerClient as WebcashServerClient;
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub use webylib::wallet::{Wallet as WebcashWallet, WalletSnapshot as WebcashWalletSnapshot};
 
+// ── Mining claim: submit report + insert with HD secret ─────────
+
+/// Submit a mining report and insert the mined webcash into the wallet.
+///
+/// Reproduces the native daemon flow (daemon.rs:557-689):
+/// 1. Submit mining report to server → server creates webcash for the random secret
+/// 2. Call `wallet.insert(keep_secret)` → server `/replace` swaps random → HD RECEIVE secret
+/// 3. The HD RECEIVE secret is now stored in the wallet and is deterministically recoverable
+#[cfg(any(feature = "native", feature = "wasm"))]
+pub async fn submit_and_claim_mining_solution(
+    wallet: &WebcashWallet,
+    network: &webylib::server::NetworkMode,
+    preimage: &str,
+    hash: &[u8; 32],
+    keep_webcash_str: &str,
+) -> Result<(), webylib::error::Error> {
+    use crate::miner::protocol::MiningProtocol;
+
+    // 1. Submit the mining report
+    let protocol = MiningProtocol::from_network(network)
+        .map_err(|e| webylib::error::Error::Server { message: e.to_string() })?;
+    let report = protocol.submit_report(preimage, hash).await
+        .map_err(|e| webylib::error::Error::Server { message: e.to_string() })?;
+    if let Some(ref err) = report.error {
+        if !err.contains("Didn't use a new secret") {
+            return Err(webylib::error::Error::Server { message: err.clone() });
+        }
+    }
+
+    // 2. Insert: server /replace swaps random secret → HD RECEIVE secret
+    let keep = SecretWebcash::parse(keep_webcash_str)?;
+    wallet.insert(keep).await?;
+
+    Ok(())
+}
+
 /// Extract the bearer **secret** webcash string (`e…:secret:…`) from `pay` / CLI output.
 pub fn extract_webcash_secret(payment_output: &str) -> anyhow::Result<String> {
     let trimmed = payment_output.trim();
