@@ -638,7 +638,7 @@ impl GpuMiner {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 #[cfg(target_arch = "wasm32")]
                 let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-                self.slots[i].staging_buffer.map_async(wgpu::MapMode::Read, 0..RESULT_BUFFER_SIZE, move |result| {
+                self.slots[i].staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
                     let _ = tx.send(result);
                 });
                 receivers.push(rx);
@@ -751,7 +751,7 @@ impl GpuMiner {
             let (tx, rx) = tokio::sync::oneshot::channel();
             #[cfg(target_arch = "wasm32")]
             let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-            slot.staging_buffer.map_async(wgpu::MapMode::Read, 0..RESULT_BUFFER_SIZE, move |result| {
+            slot.staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
             });
             #[cfg(not(target_arch = "wasm32"))]
