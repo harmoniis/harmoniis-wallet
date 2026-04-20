@@ -883,3 +883,100 @@ mod tests {
         assert_eq!(id.pci_bus, "0000:01:00.0");
     }
 }
+
+// ── WASM: complete mining batch with non-blocking claim ─────────
+
+#[cfg(target_arch = "wasm32")]
+use webylib::{Amount, SecretWebcash};
+#[cfg(target_arch = "wasm32")]
+use webylib::wallet::Wallet as WebcashWallet;
+
+/// Result of one GPU mining batch.
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+pub struct GpuMineBatchResult {
+    pub found: bool,
+    pub state: String,
+    pub attempted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preimage_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub difficulty_achieved: Option<u32>,
+}
+
+/// Run one GPU mining batch: create WorkUnits, dispatch to GPU, on solution
+/// spawn non-blocking claim (submit report + insert HD RECEIVE secret).
+///
+/// The wallet state returned already has the mined secret stored (via store_directly).
+/// The claim runs in the background — when it completes the random secret is replaced
+/// with an HD RECEIVE secret on the server, but the caller doesn't need to wait.
+#[cfg(target_arch = "wasm32")]
+impl GpuMiner {
+    pub async fn mine_and_claim(
+        &self,
+        wallet: &WebcashWallet,
+        network: webylib::server::NetworkMode,
+        difficulty: u32,
+        mining_amount: Amount,
+        subsidy_amount: Amount,
+        batch_size: usize,
+    ) -> anyhow::Result<GpuMineBatchResult> {
+        use super::work_unit::WorkUnit;
+        use super::nonce_table::NonceTable;
+
+        let works: Vec<WorkUnit> = (0..batch_size)
+            .map(|_| WorkUnit::new(difficulty, mining_amount, subsidy_amount))
+            .collect();
+        let midstates: Vec<_> = works.iter().map(|w| w.midstate.clone()).collect();
+        let chunks = self.mine_batch(&midstates, difficulty).await?;
+        let total_attempted: u64 = chunks.iter().map(|c| c.attempted).sum();
+
+        // Check for solution
+        let nonce_table = NonceTable::new();
+        for (chunk, work) in chunks.into_iter().zip(works.into_iter()) {
+            if let Some(r) = chunk.result {
+                let preimage = work.preimage_string(&nonce_table, r.nonce1_idx, r.nonce2_idx);
+                let hash_hex = hex::encode(r.hash);
+                let keep_str = work.keep_secret.to_string();
+                let difficulty_achieved = r.difficulty_achieved;
+
+                // Store directly so caller's state has the secret immediately
+                wallet.store_directly(work.keep_secret).await
+                    .map_err(|e| anyhow::anyhow!("store_directly: {e}"))?;
+                let state = wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?;
+
+                // Spawn non-blocking claim: submit report + replace with HD RECEIVE secret
+                let claim_state = state.clone();
+                let claim_network = network.clone();
+                let claim_preimage = preimage.clone();
+                let claim_hash = r.hash;
+                wasm_bindgen_futures::spawn_local(async move {
+                    let Ok(wl) = WebcashWallet::from_json(&claim_state, claim_network) else { return };
+                    let _ = super::super::wallet::webcash::submit_and_claim_mining_solution(
+                        &wl, &claim_network, &claim_preimage, &claim_hash, &keep_str,
+                    ).await;
+                });
+
+                return Ok(GpuMineBatchResult {
+                    found: true,
+                    state,
+                    attempted: total_attempted,
+                    preimage_b64: Some(preimage),
+                    hash_hex: Some(hash_hex),
+                    difficulty_achieved: Some(difficulty_achieved),
+                });
+            }
+        }
+
+        Ok(GpuMineBatchResult {
+            found: false,
+            state: wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?,
+            attempted: total_attempted,
+            preimage_b64: None,
+            hash_hex: None,
+            difficulty_achieved: None,
+        })
+    }
+}
