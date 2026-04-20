@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.110"
+version = "0.1.112"
 dependencies = [
  "actix",
  "actix-rt",
@@ -5087,9 +5087,9 @@ dependencies = [
 
 [[package]]
 name = "webylib"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f593ff1ff7c9b495142f3b8332f79aba98faa70392489f41b5fa56f39f8580"
+checksum = "6e9584ebeb816246106292cc567224693d90f17a3230cb53b0d91fdceaea1746"
 dependencies = [
  "aes-gcm",
  "anyhow",
