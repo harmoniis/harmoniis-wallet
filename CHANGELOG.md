@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.114] — 2026-04-21
+
+### Fixed
+
+- **CI**: Fix webylib version parsing from Cargo.toml (handle `{ version = "..." }` format).
+- **webylib**: Bump to 0.3.11 (CI fixes: ffi/cli features imply native).
+
 ## [0.1.113] — 2026-04-21
 
 ### Changed

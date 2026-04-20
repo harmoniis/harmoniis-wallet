@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ver=$(grep -E '^webylib[[:space:]]*=' Cargo.toml | head -1 | sed -E 's/^webylib[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          ver=$(grep -E 'webylib' Cargo.toml | grep -v '#' | grep 'version' | head -1 | sed -E 's/.*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
           if [[ -z "$ver" || "$ver" == *webylib* ]]; then
             echo "Could not parse webylib version from Cargo.toml"
             exit 1
