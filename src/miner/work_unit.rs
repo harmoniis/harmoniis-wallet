@@ -44,40 +44,52 @@ impl WorkUnit {
     pub fn new(difficulty: u32, mining_amount: Amount, subsidy_amount: Amount) -> Self {
         let mut rng = rand::thread_rng();
 
-        // Generate random 32-byte secrets
         let mut keep_sk = [0u8; 32];
-        let mut subsidy_sk = [0u8; 32];
         rng.fill_bytes(&mut keep_sk);
-        rng.fill_bytes(&mut subsidy_sk);
 
-        let keep_amount = mining_amount - subsidy_amount;
-
+        // keep_amount = mining_amount when subsidy is zero, otherwise mining - subsidy
+        let keep_amount = if subsidy_amount.is_zero() { mining_amount } else { mining_amount - subsidy_amount };
         let keep_str_full = format!("e{}:secret:{}", keep_amount, hex::encode(keep_sk));
-        let subsidy_str_full = format!("e{}:secret:{}", subsidy_amount, hex::encode(subsidy_sk));
         let keep_secret = SecretWebcash::parse(&keep_str_full).expect("valid keep secret format");
-        let subsidy_secret =
-            SecretWebcash::parse(&subsidy_str_full).expect("valid subsidy secret format");
-
-        // Zero out raw key bytes
         keep_sk.fill(0);
-        subsidy_sk.fill(0);
+
+        // Subsidy: only generate if non-zero (matches native webylib miner)
+        let subsidy_secret = if subsidy_amount.is_zero() {
+            // Dummy zero-amount secret (not included in preimage)
+            SecretWebcash::parse(&format!("e0:secret:{}", hex::encode([0u8; 32]))).unwrap()
+        } else {
+            let mut subsidy_sk = [0u8; 32];
+            rng.fill_bytes(&mut subsidy_sk);
+            let s = SecretWebcash::parse(&format!("e{}:secret:{}", subsidy_amount, hex::encode(subsidy_sk))).unwrap();
+            subsidy_sk.fill(0);
+            s
+        };
 
         #[cfg(not(target_arch = "wasm32"))]
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs_f64();
+            .as_secs() as f64;
         #[cfg(target_arch = "wasm32")]
-        let timestamp = js_sys::Date::now() / 1000.0;
+        let timestamp = (js_sys::Date::now() / 1000.0).floor();
 
         let keep_str = keep_secret.to_string();
-        let subsidy_str = subsidy_secret.to_string();
 
-        // Build the JSON prefix (matching C++ webminer format exactly)
-        let mut prefix = format!(
-            "{{\"legalese\": {{\"terms\": true}}, \"webcash\": [\"{}\", \"{}\"], \"subsidy\": [\"{}\"], \"difficulty\": {}, \"timestamp\": {}, \"nonce\": ",
-            keep_str, subsidy_str, subsidy_str, difficulty, timestamp
-        );
+        // Build the JSON prefix — match native miner format exactly:
+        // When subsidy=0: webcash has 1 entry, subsidy is empty
+        // When subsidy>0: webcash has 1 entry (keep only), subsidy has 1 entry
+        let mut prefix = if subsidy_amount.is_zero() {
+            format!(
+                "{{\"webcash\":[\"{}\"],\"subsidy\":[],\"timestamp\":{},\"difficulty\":{},\"nonce\": ",
+                keep_str, timestamp as u64, difficulty
+            )
+        } else {
+            let subsidy_str = subsidy_secret.to_string();
+            format!(
+                "{{\"webcash\":[\"{}\"],\"subsidy\":[\"{}\"],\"timestamp\":{},\"difficulty\":{},\"nonce\": ",
+                keep_str, subsidy_str, timestamp as u64, difficulty
+            )
+        };
 
         // Pad to multiple of 48 bytes (space-fill, last char '1')
         let target_len = 48 * (1 + prefix.len() / 48);
