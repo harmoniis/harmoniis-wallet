@@ -632,24 +632,34 @@ impl GpuMiner {
 
         // Map all staging buffers for reading.
         {
-            let mut receivers = Vec::with_capacity(batch_size);
-            for i in 0..batch_size {
-                #[cfg(not(target_arch = "wasm32"))]
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                #[cfg(target_arch = "wasm32")]
-                let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-                self.slots[i].staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
-                    let _ = tx.send(result);
-                });
-                receivers.push(rx);
-            }
             #[cfg(not(target_arch = "wasm32"))]
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            });
-            for rx in receivers {
-                rx.await.map_err(|_| anyhow::anyhow!("map cancelled"))??;
+            {
+                let mut receivers = Vec::with_capacity(batch_size);
+                for i in 0..batch_size {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    self.slots[i].staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
+                    receivers.push(rx);
+                }
+                let _ = self.device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: None,
+                });
+                for rx in receivers {
+                    rx.await.map_err(|_| anyhow::anyhow!("map cancelled"))??;
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // WASM: map one buffer at a time to avoid overwhelming Android WebGPU
+                for i in 0..batch_size {
+                    let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+                    self.slots[i].staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
+                    rx.await.map_err(|_| anyhow::anyhow!("map cancelled"))??;
+                }
             }
         }
 
