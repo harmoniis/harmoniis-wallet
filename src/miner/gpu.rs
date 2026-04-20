@@ -968,23 +968,11 @@ impl GpuMiner {
                 let keep_str = work.keep_secret.to_string();
                 let difficulty_achieved = r.difficulty_achieved;
 
-                // Store directly so caller's state has the secret immediately
-                wallet.store_directly(work.keep_secret).await
-                    .map_err(|e| anyhow::anyhow!("store_directly: {e}"))?;
+                // Submit report + insert with HD RECEIVE secret (inline, must complete before return)
+                super::super::wallet::webcash::submit_and_claim_mining_solution(
+                    wallet, &network, &preimage, &r.hash, &keep_str,
+                ).await.map_err(|e| anyhow::anyhow!("claim failed: {e}"))?;
                 let state = wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?;
-
-                // Spawn non-blocking claim: submit report + replace with HD RECEIVE secret
-                let claim_state = state.clone();
-                let claim_network = network.clone();
-                let claim_network2 = network.clone();
-                let claim_preimage = preimage.clone();
-                let claim_hash = r.hash;
-                wasm_bindgen_futures::spawn_local(async move {
-                    let Ok(wl) = WebcashWallet::from_json(&claim_state, claim_network) else { return };
-                    let _ = super::super::wallet::webcash::submit_and_claim_mining_solution(
-                        &wl, &claim_network2, &claim_preimage, &claim_hash, &keep_str,
-                    ).await;
-                });
 
                 return Ok(GpuMineBatchResult {
                     found: true,

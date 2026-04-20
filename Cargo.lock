@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.100"
+version = "0.1.102"
 dependencies = [
  "actix",
  "actix-rt",
