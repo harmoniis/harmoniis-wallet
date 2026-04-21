@@ -391,4 +391,4 @@ jobs:
 
       - name: Publish
         if: env.CARGO_REGISTRY_TOKEN != ''
-        run: cargo publish --no-default-features --features bundled-sqlite
+        run: cargo publish --no-default-features --features bundled-sqlite --allow-dirty
