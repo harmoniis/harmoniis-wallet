@@ -495,8 +495,10 @@ pub trait HarmoniiStore {
 
     // ── Payment Transaction Events ────────────────────────────
 
-    fn insert_payment_transaction_event(&self, record: &PaymentTransactionEventRecord)
-        -> Result<()>;
+    fn insert_payment_transaction_event(
+        &self,
+        record: &PaymentTransactionEventRecord,
+    ) -> Result<()>;
 
     fn list_payment_transaction_events(
         &self,

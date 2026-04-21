@@ -100,7 +100,11 @@ impl HdKeychain {
         let seed = mnemonic.to_seed_normalized("");
         let master_xpriv = XPrv::new(&seed)
             .map_err(|e| Error::Other(anyhow::anyhow!("failed to derive BIP32 master key: {e}")))?;
-        Ok(Self { mnemonic, entropy, master_xpriv })
+        Ok(Self {
+            mnemonic,
+            entropy,
+            master_xpriv,
+        })
     }
 
     // ── Accessors ────────────────────────────────────────────────
@@ -119,9 +123,8 @@ impl HdKeychain {
     /// Returns the private key as a 64-character hex string.
     pub fn derive_slot_hex(&self, family: &str, index: u32) -> Result<String> {
         let (family_code, slot_index) = family_slot(family, index)?;
-        let derived = self.derive_hardened_path(&[
-            PURPOSE_HARMONIIS, APP_MAIN, family_code, slot_index,
-        ])?;
+        let derived =
+            self.derive_hardened_path(&[PURPOSE_HARMONIIS, APP_MAIN, family_code, slot_index])?;
         Ok(hex::encode(derived.private_key().to_bytes()))
     }
 
@@ -131,8 +134,11 @@ impl HdKeychain {
         for &idx in indices {
             let child = ChildNumber::new(idx, true)
                 .map_err(|e| Error::Other(anyhow::anyhow!("invalid child index {idx}: {e}")))?;
-            key = key.derive_child(child)
-                .map_err(|e| Error::Other(anyhow::anyhow!("BIP32 derivation failed at index {idx}: {e}")))?;
+            key = key.derive_child(child).map_err(|e| {
+                Error::Other(anyhow::anyhow!(
+                    "BIP32 derivation failed at index {idx}: {e}"
+                ))
+            })?;
         }
         Ok(key)
     }
@@ -144,7 +150,9 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
     match family {
         "root" => {
             if index != 0 {
-                return Err(Error::Other(anyhow::anyhow!("root family only supports index 0")));
+                return Err(Error::Other(anyhow::anyhow!(
+                    "root family only supports index 0"
+                )));
             }
             Ok((FAMILY_ROOT, 0))
         }
@@ -154,13 +162,18 @@ fn family_slot(family: &str, index: u32) -> Result<(u32, u32)> {
         "pgp" => validate_index(FAMILY_PGP, index, MAX_PGP_KEYS, "PGP"),
         "vault" | "harmonia-vault" => validate_index(FAMILY_VAULT, index, MAX_VAULT_KEYS, "vault"),
         "voucher" => validate_index(FAMILY_VOUCHER, index, MAX_LABELED_WALLETS, "voucher"),
-        _ => Err(Error::Other(anyhow::anyhow!("unknown key family '{family}'"))),
+        _ => Err(Error::Other(anyhow::anyhow!(
+            "unknown key family '{family}'"
+        ))),
     }
 }
 
 fn validate_index(family_code: u32, index: u32, max: u32, name: &str) -> Result<(u32, u32)> {
     if index >= max {
-        return Err(Error::Other(anyhow::anyhow!("{name} index out of range (max {})", max - 1)));
+        return Err(Error::Other(anyhow::anyhow!(
+            "{name} index out of range (max {})",
+            max - 1
+        )));
     }
     Ok((family_code, index))
 }
@@ -205,13 +218,34 @@ mod tests {
         assert_eq!(vault.len(), 64);
 
         // Known test vectors (from the known mnemonic)
-        assert_eq!(root, "21b7a946c56bc75928245d56c1057db4ad115c040748e90a0173ec5015ed7c6d");
-        assert_eq!(rgb, "cb263f34c16122d362cd1fd2732b7fa62943439b60dfc63f603d17595fdbc92e");
-        assert_eq!(webcash, "5017e94b5b8119330e9c42ace800ad1dfb93630f312c56bd3af91d10d88a8684");
-        assert_eq!(bitcoin, "f8bbbf1e2223f17a99da8b823d4cd41b764c69133385ad5b1195885ec34a191b");
-        assert_eq!(pgp0, "6d24f7bf44372fb0fe0fbc1c202198a830e26e9dcbfae40a168ea09f7ad823d0");
-        assert_eq!(pgp1, "38776f21f6c7d4a3a2c22036ff69ce15c14641950cf8eedd41ad3189e67d9890");
-        assert_eq!(vault, "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368");
+        assert_eq!(
+            root,
+            "21b7a946c56bc75928245d56c1057db4ad115c040748e90a0173ec5015ed7c6d"
+        );
+        assert_eq!(
+            rgb,
+            "cb263f34c16122d362cd1fd2732b7fa62943439b60dfc63f603d17595fdbc92e"
+        );
+        assert_eq!(
+            webcash,
+            "5017e94b5b8119330e9c42ace800ad1dfb93630f312c56bd3af91d10d88a8684"
+        );
+        assert_eq!(
+            bitcoin,
+            "f8bbbf1e2223f17a99da8b823d4cd41b764c69133385ad5b1195885ec34a191b"
+        );
+        assert_eq!(
+            pgp0,
+            "6d24f7bf44372fb0fe0fbc1c202198a830e26e9dcbfae40a168ea09f7ad823d0"
+        );
+        assert_eq!(
+            pgp1,
+            "38776f21f6c7d4a3a2c22036ff69ce15c14641950cf8eedd41ad3189e67d9890"
+        );
+        assert_eq!(
+            vault,
+            "dfbb7b8a4fc6e869a3449a580493d7b8df82926d049e9e9eaff345b274e6b368"
+        );
 
         // Different slots produce different keys
         assert_ne!(vault, vault_1);
@@ -224,7 +258,10 @@ mod tests {
         let keychain = HdKeychain::generate_new().unwrap();
         let mnemonic = keychain.mnemonic_words();
         let word_count = mnemonic.split_whitespace().count();
-        assert_eq!(word_count, 24, "must generate 24-word mnemonic (256-bit entropy)");
+        assert_eq!(
+            word_count, 24,
+            "must generate 24-word mnemonic (256-bit entropy)"
+        );
         assert_eq!(keychain.entropy_hex().len(), 64, "32 bytes = 64 hex chars");
     }
 
@@ -234,8 +271,10 @@ mod tests {
         let mnemonic = keychain.mnemonic_words();
         let restored = HdKeychain::from_mnemonic_words(&mnemonic).unwrap();
         assert_eq!(keychain.entropy_hex(), restored.entropy_hex());
-        assert_eq!(keychain.derive_slot_hex("webcash", 0).unwrap(),
-                   restored.derive_slot_hex("webcash", 0).unwrap());
+        assert_eq!(
+            keychain.derive_slot_hex("webcash", 0).unwrap(),
+            restored.derive_slot_hex("webcash", 0).unwrap()
+        );
     }
 
     #[test]

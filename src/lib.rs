@@ -12,15 +12,16 @@ pub use types::{
     Certificate, Contract, ContractStatus, ContractType, Role, StablecashProof, StablecashSecret,
     VoucherProof, VoucherSecret, WitnessProof, WitnessSecret,
 };
+pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 pub use wallet::keychain;
 pub use wallet::labeled_wallets::LabeledWallet;
 pub use wallet::vault;
-pub use vault::{VaultPublicIdentity, VaultRootMaterial};
 
 // Webcash utilities (always available)
 pub use wallet::webcash::extract_webcash_secret;
 
 // Storage trait and types (always available)
+pub use wallet::snapshots::FullBackup;
 pub use wallet::store::{
     HarmoniiStore, NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent,
     PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord,
@@ -28,7 +29,6 @@ pub use wallet::store::{
     PgpIdentityRecord, PgpIdentityRow, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
 };
 pub use wallet::store_mem::MemHarmoniiStore;
-pub use wallet::snapshots::FullBackup;
 
 // Re-export webylib for downstream access to protocol defs (NetworkMode, endpoints)
 pub use webylib;

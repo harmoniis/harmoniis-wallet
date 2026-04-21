@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::keychain::HdKeychain;
-use super::store::{
-    canonical_label, PgpIdentityRow, PgpIdentitySnapshot, WalletSnapshot,
-};
+use super::store::{canonical_label, PgpIdentityRow, PgpIdentitySnapshot, WalletSnapshot};
 use super::store_mem::MemHarmoniiStore;
 use super::WalletCore;
 use crate::error::{Error, Result};
@@ -55,7 +53,9 @@ impl WalletCore {
 
     /// Export a complete backup containing the full master store and all webcash wallet states.
     pub fn export_full_backup(&self, webcash_wallets: HashMap<String, String>) -> Result<String> {
-        let master_state = self.store().as_any()
+        let master_state = self
+            .store()
+            .as_any()
             .downcast_ref::<MemHarmoniiStore>()
             .ok_or_else(|| Error::Other(anyhow::anyhow!("full backup requires MemHarmoniiStore")))?
             .to_json()?;
@@ -64,8 +64,7 @@ impl WalletCore {
             webcash_wallets,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        serde_json::to_string_pretty(&backup)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+        serde_json::to_string_pretty(&backup).map_err(|e| Error::Other(anyhow::anyhow!(e)))
     }
 
     /// Import a full backup, returning the reconstructed master state and webcash wallet map.

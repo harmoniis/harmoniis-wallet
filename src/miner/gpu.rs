@@ -10,8 +10,8 @@
 use async_trait::async_trait;
 use wgpu::util::DeviceExt;
 
-use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
 use super::nonce_table::NonceTable;
+use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
 use super::{CancelFlag, MinerBackend, MiningChunkResult, MiningResult, NONCE_SPACE_SIZE};
 
 /// Default workgroup size (must match `@workgroup_size` in shader).
@@ -47,7 +47,9 @@ pub fn create_instance(backends: wgpu::Backends) -> wgpu::Instance {
 /// Linux = Vulkan, Windows = DX12, macOS = Metal.
 pub fn platform_backend() -> wgpu::Backends {
     #[cfg(target_arch = "wasm32")]
-    { wgpu::Backends::BROWSER_WEBGPU }
+    {
+        wgpu::Backends::BROWSER_WEBGPU
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         if cfg!(target_os = "windows") {
@@ -151,8 +153,10 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("probe"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(), experimental_features: wgpu::ExperimentalFeatures::default(), memory_hints: wgpu::MemoryHints::default(), trace: wgpu::Trace::default(),
-            
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::default(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
@@ -168,7 +172,12 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
                 label: Some("probe_shader_spirv"),
                 spirv: Some(std::borrow::Cow::Owned(spirv_words)),
                 num_workgroups: (0, 0, 0),
-                dxil: None, metallib: None, msl: None, hlsl: None, glsl: None, wgsl: None,
+                dxil: None,
+                metallib: None,
+                msl: None,
+                hlsl: None,
+                glsl: None,
+                wgsl: None,
             })
         }
     } else {
@@ -306,8 +315,7 @@ impl GpuMiner {
     /// Try to initialize the default high-performance adapter.
     pub async fn try_new() -> Option<Self> {
         let compute_backends = platform_backend();
-        let instance = create_instance(
-            compute_backends);
+        let instance = create_instance(compute_backends);
 
         // Fast path: ask wgpu for a high-performance adapter.
         let preferred = instance
@@ -382,8 +390,10 @@ impl GpuMiner {
                     .request_device(&wgpu::DeviceDescriptor {
                         label: Some("webminer-downlevel"),
                         required_features: wgpu::Features::empty(),
-                        required_limits: wgpu::Limits::downlevel_defaults(), experimental_features: wgpu::ExperimentalFeatures::default(), memory_hints: wgpu::MemoryHints::default(), trace: wgpu::Trace::default(),
-                        
+                        required_limits: wgpu::Limits::downlevel_defaults(),
+                        experimental_features: wgpu::ExperimentalFeatures::default(),
+                        memory_hints: wgpu::MemoryHints::default(),
+                        trace: wgpu::Trace::default(),
                     })
                     .await
                 {
@@ -417,7 +427,12 @@ impl GpuMiner {
                     label: Some("sha256_mine_spirv"),
                     spirv: Some(std::borrow::Cow::Owned(spirv_words)),
                     num_workgroups: (0, 0, 0),
-                    dxil: None, metallib: None, msl: None, hlsl: None, glsl: None, wgsl: None,
+                    dxil: None,
+                    metallib: None,
+                    msl: None,
+                    hlsl: None,
+                    glsl: None,
+                    wgsl: None,
                 })
             }
         } else {
@@ -628,7 +643,8 @@ impl GpuMiner {
         }
 
         // Phase 3: ONE submit, ONE sync.
-        #[allow(unused_variables)] let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[allow(unused_variables)]
+        let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         // Map all staging buffers for reading (all issued in parallel).
         {
@@ -637,10 +653,14 @@ impl GpuMiner {
                 #[cfg(not(target_arch = "wasm32"))]
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 #[cfg(target_arch = "wasm32")]
-                let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-                self.slots[i].staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
-                    let _ = tx.send(result);
-                });
+                let (tx, rx) =
+                    futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+                self.slots[i]
+                    .staging_buffer
+                    .slice(0..RESULT_BUFFER_SIZE)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
                 receivers.push(rx);
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -744,16 +764,21 @@ impl GpuMiner {
             0,
             RESULT_BUFFER_SIZE,
         );
-        #[allow(unused_variables)] let submission = self.queue.submit(std::iter::once(encoder.finish()));
+        #[allow(unused_variables)]
+        let submission = self.queue.submit(std::iter::once(encoder.finish()));
 
         {
             #[cfg(not(target_arch = "wasm32"))]
             let (tx, rx) = tokio::sync::oneshot::channel();
             #[cfg(target_arch = "wasm32")]
-            let (tx, rx) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-            slot.staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+            let (tx, rx) =
+                futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+            slot.staging_buffer.slice(0..RESULT_BUFFER_SIZE).map_async(
+                wgpu::MapMode::Read,
+                move |result| {
+                    let _ = tx.send(result);
+                },
+            );
             #[cfg(not(target_arch = "wasm32"))]
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
@@ -887,9 +912,9 @@ mod tests {
 // ── WASM: complete mining batch with non-blocking claim ─────────
 
 #[cfg(target_arch = "wasm32")]
-use webylib::{Amount, SecretWebcash};
-#[cfg(target_arch = "wasm32")]
 use webylib::wallet::Wallet as WebcashWallet;
+#[cfg(target_arch = "wasm32")]
+use webylib::{Amount, SecretWebcash};
 
 /// Result of one GPU mining batch.
 #[cfg(target_arch = "wasm32")]
@@ -925,15 +950,17 @@ impl GpuMiner {
         network: webylib::server::NetworkMode,
         batch_size: usize,
     ) -> anyhow::Result<GpuMineBatchResult> {
-        use super::work_unit::WorkUnit;
         use super::protocol::MiningProtocol;
+        use super::work_unit::WorkUnit;
 
         // Fetch target with 30-second cache
         let now = js_sys::Date::now();
         let target = CACHED_TARGET.with(|c| {
             let cached = c.borrow();
             if let Some((ref t, ts)) = *cached {
-                if now - ts < 30_000.0 { return Some(t.clone()); }
+                if now - ts < 30_000.0 {
+                    return Some(t.clone());
+                }
             }
             None
         });
@@ -957,7 +984,11 @@ impl GpuMiner {
         let total_attempted: u64 = chunks.iter().map(|c| c.attempted).sum();
 
         // Check for solution (nonce table cached)
-        CACHED_NONCE_TABLE.with(|c| { if c.borrow().is_none() { *c.borrow_mut() = Some(NonceTable::new()); } });
+        CACHED_NONCE_TABLE.with(|c| {
+            if c.borrow().is_none() {
+                *c.borrow_mut() = Some(NonceTable::new());
+            }
+        });
         for (chunk, work) in chunks.into_iter().zip(works.into_iter()) {
             if let Some(r) = chunk.result {
                 let preimage = CACHED_NONCE_TABLE.with(|c| {
@@ -971,8 +1002,12 @@ impl GpuMiner {
                 // Submit report + insert with HD RECEIVE secret (inline, must complete before return)
                 super::super::wallet::webcash::submit_and_claim_mining_solution(
                     wallet, &network, &preimage, &r.hash, &keep_str,
-                ).await.map_err(|e| anyhow::anyhow!("claim failed: {e}"))?;
-                let state = wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?;
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("claim failed: {e}"))?;
+                let state = wallet
+                    .to_json()
+                    .map_err(|e| anyhow::anyhow!("to_json: {e}"))?;
 
                 return Ok(GpuMineBatchResult {
                     found: true,
@@ -989,7 +1024,9 @@ impl GpuMiner {
 
         Ok(GpuMineBatchResult {
             found: false,
-            state: wallet.to_json().map_err(|e| anyhow::anyhow!("to_json: {e}"))?,
+            state: wallet
+                .to_json()
+                .map_err(|e| anyhow::anyhow!("to_json: {e}"))?,
             attempted: total_attempted,
             difficulty,
             mining_amount: mining_amount.to_string(),

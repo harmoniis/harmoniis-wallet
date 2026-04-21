@@ -215,10 +215,16 @@ pub trait MinerBackend: Send + Sync {
 #[async_trait(?Send)]
 pub trait MinerBackend {
     fn name(&self) -> &str;
-    fn startup_summary(&self) -> Vec<String> { Vec::new() }
+    fn startup_summary(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn benchmark(&self) -> anyhow::Result<f64>;
-    fn max_batch_hint(&self) -> u32 { NONCE_SPACE_SIZE }
-    fn recommended_pipeline_depth(&self) -> usize { 1 }
+    fn max_batch_hint(&self) -> u32 {
+        NONCE_SPACE_SIZE
+    }
+    fn recommended_pipeline_depth(&self) -> usize {
+        1
+    }
     async fn mine_range(
         &self,
         midstate: &Sha256Midstate,

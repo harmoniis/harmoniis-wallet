@@ -1,24 +1,23 @@
-
-use crate::{
-    error::{Error, Result},
-    identity::Identity,
-};
 use super::keychain::{
     HdKeychain, KEY_MODEL_VERSION_V3, MAX_VAULT_KEYS, SLOT_FAMILY_HARMONIA_VAULT, SLOT_FAMILY_VAULT,
 };
 use super::store::{canonical_label, HarmoniiStore, PgpIdentityRow};
+use crate::{
+    error::{Error, Result},
+    identity::Identity,
+};
 
 #[cfg(feature = "native")]
-use std::path::Path;
-#[cfg(feature = "native")]
 use super::store_sqlite::SqliteHarmoniiStore;
+#[cfg(feature = "native")]
+use std::path::Path;
 
 // Re-export submodule types for backward compatibility.
 pub use super::store::{
-    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent,
-    PaymentAttemptRecord, PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord,
-    PaymentTransactionEventRecord, PaymentTransactionRecord, PaymentTransactionUpdate,
-    PgpIdentityRecord, PgpIdentitySnapshot, WalletSlotRecord, WalletSnapshot,
+    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
+    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
+    PaymentTransactionRecord, PaymentTransactionUpdate, PgpIdentityRecord, PgpIdentitySnapshot,
+    WalletSlotRecord, WalletSnapshot,
 };
 
 pub(crate) const META_NICKNAME: &str = "nickname";
@@ -65,7 +64,9 @@ impl WalletCore {
 
     /// Save master wallet state to IndexedDB.
     pub async fn save_to_idb(&self, network: &str, key: &str) -> Result<()> {
-        let mem = self.store.as_any()
+        let mem = self
+            .store
+            .as_any()
             .downcast_ref::<super::store_mem::MemHarmoniiStore>()
             .ok_or_else(|| Error::Other(anyhow::anyhow!("not a MemHarmoniiStore")))?;
         let json = mem.to_json()?;
@@ -406,9 +407,24 @@ impl WalletCore {
         // Slot-0 entries for wallet families
         let slot_0_entries: &[(&str, &str, Option<&str>, Option<&str>)] = &[
             ("rgb", &rgb_hex, Some("main_rgb.db"), Some("main")),
-            ("webcash", &webcash_hex, Some("main_webcash.db"), Some("main")),
-            ("bitcoin", &bitcoin_hex, Some("main_bitcoin.db"), Some("main")),
-            ("voucher", &voucher_hex, Some("main_voucher.db"), Some("main")),
+            (
+                "webcash",
+                &webcash_hex,
+                Some("main_webcash.db"),
+                Some("main"),
+            ),
+            (
+                "bitcoin",
+                &bitcoin_hex,
+                Some("main_bitcoin.db"),
+                Some("main"),
+            ),
+            (
+                "voucher",
+                &voucher_hex,
+                Some("main_voucher.db"),
+                Some("main"),
+            ),
             ("root", &root_hex, None, None),
             (SLOT_FAMILY_VAULT, &vault_hex, None, None),
         ];
@@ -460,7 +476,7 @@ impl WalletCore {
 
 // ── Labeled wallet operations ───────────────────────────────────
 
-use super::labeled_wallets::{LabeledWallet, wallet_db_filename};
+use super::labeled_wallets::{wallet_db_filename, LabeledWallet};
 
 impl WalletCore {
     pub fn derive_secret_for_label(&self, family: &str, label: &str) -> Result<(String, u32)> {
@@ -497,9 +513,9 @@ impl WalletCore {
                         format!("{family}-{}", s.slot_index)
                     }
                 });
-                let db_filename =
-                    s.db_rel_path
-                        .unwrap_or_else(|| wallet_db_filename(&s.family, &label));
+                let db_filename = s
+                    .db_rel_path
+                    .unwrap_or_else(|| wallet_db_filename(&s.family, &label));
                 LabeledWallet {
                     family: s.family,
                     label,
@@ -540,7 +556,8 @@ impl WalletCore {
         let canonical = canonical_label(label)?;
         if let Some(index) = self.store.get_slot_index_by_label(family, &canonical)? {
             let now = chrono::Utc::now().to_rfc3339();
-            self.store.replace_slot_at(family, index, &canonical, "", &now)?;
+            self.store
+                .replace_slot_at(family, index, &canonical, "", &now)?;
             Ok(true)
         } else {
             Ok(false)
@@ -551,10 +568,24 @@ impl WalletCore {
         let old_canonical = canonical_label(old_label)?;
         let new_canonical = canonical_label(new_label)?;
         let slots = self.store.list_wallet_slots(Some(family))?;
-        let slot = slots.iter().find(|s| s.label.as_deref() == Some(&old_canonical))
-            .ok_or_else(|| Error::Other(anyhow::anyhow!("wallet '{}' not found in family '{}'", old_label, family)))?;
+        let slot = slots
+            .iter()
+            .find(|s| s.label.as_deref() == Some(&old_canonical))
+            .ok_or_else(|| {
+                Error::Other(anyhow::anyhow!(
+                    "wallet '{}' not found in family '{}'",
+                    old_label,
+                    family
+                ))
+            })?;
         let now = chrono::Utc::now().to_rfc3339();
-        self.store.replace_slot_at(family, slot.slot_index, &new_canonical, &slot.descriptor, &now)
+        self.store.replace_slot_at(
+            family,
+            slot.slot_index,
+            &new_canonical,
+            &slot.descriptor,
+            &now,
+        )
     }
 
     fn register_wallet_slot(&self, family: &str, index: u32, label: &str) -> Result<()> {
@@ -606,16 +637,29 @@ impl WalletCore {
         let mut total_recovered = 0usize;
 
         for index in 0..max_slots {
-            let label = if index == 0 { "main".to_string() } else { format!("wallet-{index}") };
+            let label = if index == 0 {
+                "main".to_string()
+            } else {
+                format!("wallet-{index}")
+            };
             let secret = match self.derive_slot_hex("webcash", index) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
 
-            let wl = WebcashWallet::new_memory(network.clone()).map_err(|e| Error::Other(e.into()))?;
-            wl.store_master_secret(&secret).await.map_err(|e| Error::Other(e.into()))?;
-            let result = wl.recover_from_wallet(gap_limit).await.map_err(|e| Error::Other(e.into()))?;
-            let balance = wl.balance_amount().await.map_err(|e| Error::Other(e.into()))?;
+            let wl =
+                WebcashWallet::new_memory(network.clone()).map_err(|e| Error::Other(e.into()))?;
+            wl.store_master_secret(&secret)
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
+            let result = wl
+                .recover_from_wallet(gap_limit)
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
+            let balance = wl
+                .balance_amount()
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
 
             if result.recovered_count > 0 || balance.wats > 0 {
                 let state_json = wl.to_json().map_err(|e| Error::Other(e.into()))?;
@@ -628,7 +672,10 @@ impl WalletCore {
             }
         }
 
-        Ok(SlotScanResult { wallets, total_recovered })
+        Ok(SlotScanResult {
+            wallets,
+            total_recovered,
+        })
     }
 }
 
@@ -647,16 +694,29 @@ impl WalletCore {
         let mut total_recovered = 0usize;
 
         for index in 0..max_slots {
-            let label = if index == 0 { "main".to_string() } else { format!("wallet-{index}") };
+            let label = if index == 0 {
+                "main".to_string()
+            } else {
+                format!("wallet-{index}")
+            };
             let secret = match self.derive_slot_hex("webcash", index) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
 
-            let wl = WebcashWallet::open_memory_with_network(network.clone()).map_err(|e| Error::Other(e.into()))?;
-            wl.store_master_secret(&secret).await.map_err(|e| Error::Other(e.into()))?;
-            let result = wl.recover_from_wallet(gap_limit).await.map_err(|e| Error::Other(e.into()))?;
-            let balance = wl.balance_amount().await.map_err(|e| Error::Other(e.into()))?;
+            let wl = WebcashWallet::open_memory_with_network(network.clone())
+                .map_err(|e| Error::Other(e.into()))?;
+            wl.store_master_secret(&secret)
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
+            let result = wl
+                .recover_from_wallet(gap_limit)
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
+            let balance = wl
+                .balance_amount()
+                .await
+                .map_err(|e| Error::Other(e.into()))?;
 
             if result.recovered_count > 0 || balance.wats > 0 {
                 let state_json = wl.to_json().map_err(|e| Error::Other(e.into()))?;
@@ -669,7 +729,10 @@ impl WalletCore {
             }
         }
 
-        Ok(SlotScanResult { wallets, total_recovered })
+        Ok(SlotScanResult {
+            wallets,
+            total_recovered,
+        })
     }
 }
 

@@ -194,7 +194,11 @@ impl HarmoniiStore for MemHarmoniiStore {
             .filter(|r| family.map_or(true, |f| r.family == f))
             .cloned()
             .collect();
-        rows.sort_by(|a, b| a.family.cmp(&b.family).then(a.slot_index.cmp(&b.slot_index)));
+        rows.sort_by(|a, b| {
+            a.family
+                .cmp(&b.family)
+                .then(a.slot_index.cmp(&b.slot_index))
+        });
         Ok(rows)
     }
 
@@ -263,10 +267,7 @@ impl HarmoniiStore for MemHarmoniiStore {
     // ── Payment Attempts ────────────────────────────────────────
 
     fn insert_payment_attempt(&self, record: &PaymentAttemptRecord) -> Result<()> {
-        self.0
-            .borrow_mut()
-            .payment_attempts
-            .push(record.clone());
+        self.0.borrow_mut().payment_attempts.push(record.clone());
         Ok(())
     }
 

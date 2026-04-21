@@ -342,7 +342,14 @@ impl SqliteHarmoniiStore {
                     "INSERT OR REPLACE INTO pgp_identities
                      (label, key_index, private_key_hex, public_key_hex, created_at, is_active)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![label, key_index, private_key_hex, public_key_hex, created_at, is_active],
+                    params![
+                        label,
+                        key_index,
+                        private_key_hex,
+                        public_key_hex,
+                        created_at,
+                        is_active
+                    ],
                 )?;
             }
         }
@@ -431,7 +438,6 @@ impl SqliteHarmoniiStore {
             rgb_conn,
         })
     }
-
 }
 
 // ── HarmoniiStore implementation ────────────────────────────────
@@ -1254,8 +1260,7 @@ impl HarmoniiStore for SqliteHarmoniiStore {
              FROM contracts ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            row_to_contract(row)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+            row_to_contract(row).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Error::Storage)
@@ -1304,9 +1309,7 @@ impl HarmoniiStore for SqliteHarmoniiStore {
     }
 
     fn count_certificates(&self) -> Result<i64> {
-        let mut stmt = self
-            .rgb_conn
-            .prepare("SELECT COUNT(*) FROM certificates")?;
+        let mut stmt = self.rgb_conn.prepare("SELECT COUNT(*) FROM certificates")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         Ok(count)
     }

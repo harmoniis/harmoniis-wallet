@@ -5,8 +5,8 @@
 
 pub use webylib::amount::Amount;
 pub use webylib::error::Error as WebcashError;
-pub use webylib::hd::HDWallet as WebcashHDWallet;
 pub use webylib::hd::ChainCode as WebcashChainCode;
+pub use webylib::hd::HDWallet as WebcashHDWallet;
 pub use webylib::webcash::{PublicWebcash, SecretWebcash};
 
 // Server + Wallet available when HTTP client is compiled (native or wasm)
@@ -34,13 +34,20 @@ pub async fn submit_and_claim_mining_solution(
     use crate::miner::protocol::MiningProtocol;
 
     // 1. Submit the mining report
-    let protocol = MiningProtocol::from_network(network)
-        .map_err(|e| webylib::error::Error::Server { message: e.to_string() })?;
-    let report = protocol.submit_report(preimage, hash).await
-        .map_err(|e| webylib::error::Error::Server { message: e.to_string() })?;
+    let protocol =
+        MiningProtocol::from_network(network).map_err(|e| webylib::error::Error::Server {
+            message: e.to_string(),
+        })?;
+    let report = protocol.submit_report(preimage, hash).await.map_err(|e| {
+        webylib::error::Error::Server {
+            message: e.to_string(),
+        }
+    })?;
     if let Some(ref err) = report.error {
         if !err.contains("Didn't use a new secret") {
-            return Err(webylib::error::Error::Server { message: err.clone() });
+            return Err(webylib::error::Error::Server {
+                message: err.clone(),
+            });
         }
     }
 

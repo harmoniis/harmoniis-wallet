@@ -1,7 +1,7 @@
 use super::store::{
-    NewPaymentAttempt, NewPaymentTransactionEvent, PaymentAttemptRecord, PaymentAttemptUpdate,
-    PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
-    PaymentTransactionRecord, PaymentTransactionUpdate, NewPaymentTransaction,
+    NewPaymentAttempt, NewPaymentTransaction, NewPaymentTransactionEvent, PaymentAttemptRecord,
+    PaymentAttemptUpdate, PaymentBlacklistRecord, PaymentLossRecord, PaymentTransactionEventRecord,
+    PaymentTransactionRecord, PaymentTransactionUpdate,
 };
 use super::WalletCore;
 use crate::crypto::generate_secret_hex;
@@ -138,9 +138,13 @@ impl WalletCore {
         loss_id: &str,
     ) -> Result<()> {
         let cutoff = (chrono::Utc::now() - chrono::TimeDelta::hours(24)).to_rfc3339();
-        let count = self
-            .store()
-            .count_recent_losses(service_origin, endpoint_path, method, rail, &cutoff)?;
+        let count = self.store().count_recent_losses(
+            service_origin,
+            endpoint_path,
+            method,
+            rail,
+            &cutoff,
+        )?;
         if count < 3 {
             return Ok(());
         }
@@ -152,17 +156,16 @@ impl WalletCore {
                 method: method.to_string(),
                 rail: rail.to_string(),
                 blacklisted_until: None,
-                reason: "service returned errors after consuming payment 3 times in the last 24 hours".to_string(),
+                reason:
+                    "service returned errors after consuming payment 3 times in the last 24 hours"
+                        .to_string(),
                 triggered_by_loss_id: Some(loss_id.to_string()),
                 created_at: now.clone(),
                 updated_at: now,
             })
     }
 
-    pub fn record_payment_transaction(
-        &self,
-        input: &NewPaymentTransaction<'_>,
-    ) -> Result<String> {
+    pub fn record_payment_transaction(&self, input: &NewPaymentTransaction<'_>) -> Result<String> {
         let txn_id = format!("txn_{}", generate_secret_hex());
         let now = chrono::Utc::now().to_rfc3339();
         self.store()

@@ -124,11 +124,15 @@ impl MiningProtocol {
         );
 
         #[cfg(not(target_arch = "wasm32"))]
-        let resp = self.http.post(&url).header("Content-Type", "application/json").body(body_str).send();
+        let resp = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send();
         #[cfg(target_arch = "wasm32")]
         let resp = self.http.post(&url).body(body_str).send();
-        let resp = resp
-            .await?;
+        let resp = resp.await?;
         let status_code = resp.status();
         let body_text = resp.text().await?;
 

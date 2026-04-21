@@ -60,19 +60,41 @@ impl WalletConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(v) = std::env::var("HARMONIIS_API_URL") { config.harmoniis_api_url = v; }
-        if let Ok(v) = std::env::var("HARMONIIS_DIRECT_URL") { config.harmoniis_direct_url = Some(v); }
-        if let Ok(v) = std::env::var("HARMONIIS_HTTP_TIMEOUT_SECS") {
-            if let Ok(secs) = v.parse::<u64>() { config.http_timeout = Duration::from_secs(secs); }
+        if let Ok(v) = std::env::var("HARMONIIS_API_URL") {
+            config.harmoniis_api_url = v;
         }
-        if let Ok(v) = std::env::var("HARMONIIS_BITCOIN_NETWORK") { config.bitcoin_network = v.to_lowercase(); }
-        if let Ok(v) = std::env::var("HARMONIIS_ESPLORA_URL") { config.esplora_url = Some(v); }
-        if let Ok(v) = std::env::var("HARMONIIS_ARK_ASP_URL") { config.ark_asp_url = v; }
-        if let Ok(v) = std::env::var("HARMONIIS_ARK_BOLTZ_URL") { config.ark_boltz_url = v; }
-        if let Ok(v) = std::env::var("HARMONIIS_WEBCASH_SERVER_URL") { config.webcash_server_url = v; }
-        if let Ok(v) = std::env::var("HRMW_WALLET_S3_BUCKET") { config.s3_bucket = Some(v); }
-        if let Ok(v) = std::env::var("HRMW_WALLET_S3_PREFIX") { config.s3_prefix = v; }
-        if let Ok(v) = std::env::var("HARMONIIS_MASTER_MNEMONIC_ARN") { config.secret_manager_arn = Some(v); }
+        if let Ok(v) = std::env::var("HARMONIIS_DIRECT_URL") {
+            config.harmoniis_direct_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_HTTP_TIMEOUT_SECS") {
+            if let Ok(secs) = v.parse::<u64>() {
+                config.http_timeout = Duration::from_secs(secs);
+            }
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_BITCOIN_NETWORK") {
+            config.bitcoin_network = v.to_lowercase();
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_ESPLORA_URL") {
+            config.esplora_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_ARK_ASP_URL") {
+            config.ark_asp_url = v;
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_ARK_BOLTZ_URL") {
+            config.ark_boltz_url = v;
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_WEBCASH_SERVER_URL") {
+            config.webcash_server_url = v;
+        }
+        if let Ok(v) = std::env::var("HRMW_WALLET_S3_BUCKET") {
+            config.s3_bucket = Some(v);
+        }
+        if let Ok(v) = std::env::var("HRMW_WALLET_S3_PREFIX") {
+            config.s3_prefix = v;
+        }
+        if let Ok(v) = std::env::var("HARMONIIS_MASTER_MNEMONIC_ARN") {
+            config.secret_manager_arn = Some(v);
+        }
 
         config
     }

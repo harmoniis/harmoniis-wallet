@@ -22,27 +22,27 @@
 //! - `ark` — ARK protocol VTXOs (requires `ark` feature)
 
 // ── Always available (pure crypto, WASM-compatible) ──────────────
+#[cfg(target_arch = "wasm32")]
+pub mod idb;
 pub mod keychain;
-pub mod vault;
-pub mod webcash;
 pub mod labeled_wallets;
 pub mod store;
 pub mod store_mem;
-#[cfg(target_arch = "wasm32")]
-pub mod idb;
+pub mod vault;
+pub mod webcash;
 
 // ── Always available (business logic, uses HarmoniiStore trait) ──
-mod core;
 pub mod contracts;
+mod core;
 pub mod identities;
 pub mod payments;
 pub mod snapshots;
 
 // ── Native only (SQLite-backed) ─────────────────────────────────
 #[cfg(feature = "native")]
-pub mod store_sqlite;
-#[cfg(feature = "native")]
 pub mod schema;
+#[cfg(feature = "native")]
+pub mod store_sqlite;
 #[cfg(feature = "native")]
 pub mod voucher;
 
