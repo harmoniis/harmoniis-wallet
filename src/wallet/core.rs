@@ -131,6 +131,7 @@ impl WalletCore {
     }
 
     /// Open an in-memory wallet (for tests).
+    #[cfg(feature = "native")]
     pub fn open_memory() -> Result<Self> {
         let store = SqliteHarmoniiStore::open_memory()?;
         let wallet = Self::new(Box::new(store));
@@ -736,7 +737,7 @@ impl WalletCore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::WalletCore;
     use crate::wallet::store::{

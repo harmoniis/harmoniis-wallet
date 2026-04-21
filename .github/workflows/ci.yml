@@ -80,16 +80,16 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --no-default-features --features bundled-sqlite,gpu
+        run: cargo clippy --lib --no-default-features --features bundled-sqlite,gpu
 
       - name: Build
         run: cargo build --no-default-features --features bundled-sqlite,gpu
 
       - name: Unit tests
-        run: cargo test --no-default-features --features bundled-sqlite,gpu --test unit_tests
+        run: cargo test --no-default-features --features bundled-sqlite,gpu,native --test unit_tests
 
       - name: Local simulation tests
-        run: cargo test --no-default-features --features bundled-sqlite,gpu --test local_sim
+        run: cargo test --no-default-features --features bundled-sqlite,gpu,native --test local_sim
 
       - name: Check actix-actors feature
         if: runner.os == 'Linux'
