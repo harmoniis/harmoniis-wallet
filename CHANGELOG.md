@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.121] — 2026-04-22
+
+### Added
+
+- **miner::snapshot**: Serialisable `MiningSessionSnapshot` for PWA background mining survival — saves/restores mining session state across page suspension (iOS) and background throttling (desktop).
+
 ## [0.1.114] — 2026-04-21
 
 ### Fixed

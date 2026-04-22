@@ -39,6 +39,8 @@ pub mod protocol;
 pub mod simd_cpu;
 #[cfg(feature = "native")]
 pub mod stats;
+#[cfg(feature = "wasm")]
+pub mod snapshot;
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub mod work_unit;
 
