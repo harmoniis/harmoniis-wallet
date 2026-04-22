@@ -37,10 +37,10 @@ pub mod persistent_cuda;
 pub mod protocol;
 #[cfg(feature = "native")]
 pub mod simd_cpu;
-#[cfg(feature = "native")]
-pub mod stats;
 #[cfg(feature = "wasm")]
 pub mod snapshot;
+#[cfg(feature = "native")]
+pub mod stats;
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub mod work_unit;
 
