@@ -87,7 +87,53 @@ hrmw webminer status                    # check miner status
 hrmw webminer stop                      # stop background miner
 ```
 
-GPU auto-detection: CUDA (NVIDIA) > Vulkan/DX12 (AMD/Intel) > CPU fallback.
+GPU auto-detection: CUDA (NVIDIA, fastest) > Vulkan/DX12/Metal via wgpu (any GPU, including NVIDIA without the CUDA toolkit) > CPU fallback.
+
+### NVIDIA CUDA — installing the toolkit on Linux
+
+The CUDA backend compiles its SHA-256 kernel at runtime via NVRTC, so it
+needs the **CUDA Toolkit** (specifically `libnvrtc.so`) on top of the
+NVIDIA driver. The driver alone (what `nvidia-smi` reports) only ships
+the CUDA *runtime* — not NVRTC. Without the toolkit, `hrmw webminer`
+falls back to wgpu (Vulkan on Linux) and still mines on your GPU, just
+without NVRTC-compiled CUDA kernels.
+
+You'll know the toolkit is missing when startup prints:
+
+```
+CUDA detect: driver reports CUDA 13.0
+CUDA detect: no NVRTC library found in any scanned directory
+CUDA detect: install CUDA 13.x toolkit from https://developer.nvidia.com/cuda-toolkit-archive
+```
+
+**Ubuntu 22.04 / 24.04** — install just the NVRTC subpackage that matches
+your driver's CUDA version (a few hundred MB instead of the full
+multi-GB toolkit):
+
+```bash
+# 1. Add NVIDIA's CUDA apt repo (one-time)
+. /etc/os-release
+distro="${ID}${VERSION_ID//./}"            # ubuntu2404, ubuntu2204, ...
+arch=$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/sbsa/')
+wget "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/${arch}/cuda-keyring_1.1-1_all.deb"
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+
+# 2. Install NVRTC matching your driver (use 13-0 for CUDA 13.x drivers,
+#    12-6 for CUDA 12.6, etc. — check `nvidia-smi` top-right CUDA Version)
+sudo apt-get install -y cuda-nvrtc-13-0
+
+# 3. Verify
+ldconfig -p | grep nvrtc                  # should list libnvrtc.so.13
+hrmw webminer bench                       # should now show CUDA initialized
+```
+
+If you prefer the full toolkit (nvcc, profilers, samples) install
+`cuda-toolkit-13-0` instead. The detector also accepts NVRTC found via
+`LD_LIBRARY_PATH`, so a manual `.run` install works too.
+
+Driver/toolkit version mismatches are warned about at startup — the
+toolkit's NVRTC must be ≤ the driver's CUDA version.
 
 ### Cloud Mining (Vast.ai)
 
