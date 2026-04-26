@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.122] — 2026-04-26
+
+### Fixed
+
+- **Mining (native Vulkan)**: `GpuMiner` now opts into `wgpu::Features::PASSTHROUGH_SHADERS` only when the adapter advertises it, and falls back to the WGSL pipeline otherwise. Fixes a wgpu 29 validation panic in `create_shader_module_passthrough` on Linux Vulkan drivers without reflection support (regression introduced when wgpu was bumped 28 → 29 in v0.1.89). The same decision is now shared between `try_from_adapter` and `probe_adapter` so the multi-GPU probe stays consistent with the production path.
+
 ## [0.1.121] — 2026-04-22
 
 ### Added

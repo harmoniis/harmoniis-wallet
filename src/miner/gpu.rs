@@ -130,6 +130,17 @@ impl AdapterIdentity {
     }
 }
 
+/// SPIR-V passthrough is a wgpu 29 opt-in feature. Use it only when the
+/// adapter advertises it on Vulkan; otherwise fall back to the WGSL path so
+/// drivers without `VK_KHR_shader_*` reflection support still mine.
+#[cfg(not(target_arch = "wasm32"))]
+fn use_spirv_passthrough(adapter: &wgpu::Adapter) -> bool {
+    adapter.get_info().backend == wgpu::Backend::Vulkan
+        && adapter
+            .features()
+            .contains(wgpu::Features::PASSTHROUGH_SHADERS)
+}
+
 /// Run a GPU pipeline probe for an adapter identified by vendor+device+backend.
 /// Native-only: spawns subprocess to test GPU driver stability.
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,12 +158,16 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
                 identity.backend,
             )
         })?;
-    let probe_info = adapter.get_info();
+    let use_spirv = use_spirv_passthrough(&adapter);
     // Probe runs in a subprocess — keep quiet.
     let (device, _queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("probe"),
-            required_features: wgpu::Features::empty(),
+            required_features: if use_spirv {
+                wgpu::Features::PASSTHROUGH_SHADERS
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: wgpu::Limits::downlevel_defaults(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
@@ -161,7 +176,7 @@ pub async fn probe_adapter(identity: &AdapterIdentity) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("device request failed: {e}"))?;
 
-    let shader = if probe_info.backend == wgpu::Backend::Vulkan {
+    let shader = if use_spirv {
         let spirv_bytes: &[u8] = include_bytes!("shader/sha256_mine_opt.spv");
         let spirv_words: Vec<u32> = spirv_bytes
             .chunks_exact(4)
@@ -369,10 +384,30 @@ impl GpuMiner {
             adapter_name, info.backend, info.vendor, info.device,
         );
 
+        #[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
+        let use_spirv = use_spirv_passthrough(&adapter);
+        #[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
+        if info.backend == wgpu::Backend::Vulkan && !use_spirv {
+            eprintln!(
+                "GPU: '{}' Vulkan adapter does not advertise PASSTHROUGH_SHADERS — \
+                 falling back to WGSL (driver missing reflection support)",
+                adapter_name
+            );
+        }
+
+        #[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
+        let required_features = if use_spirv {
+            wgpu::Features::PASSTHROUGH_SHADERS
+        } else {
+            wgpu::Features::empty()
+        };
+        #[cfg(any(target_arch = "wasm32", not(feature = "gpu")))]
+        let required_features = wgpu::Features::empty();
+
         let req_default = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("webminer"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::default(),
@@ -389,7 +424,7 @@ impl GpuMiner {
                 match adapter
                     .request_device(&wgpu::DeviceDescriptor {
                         label: Some("webminer-downlevel"),
-                        required_features: wgpu::Features::empty(),
+                        required_features,
                         required_limits: wgpu::Limits::downlevel_defaults(),
                         experimental_features: wgpu::ExperimentalFeatures::default(),
                         memory_hints: wgpu::MemoryHints::default(),
@@ -409,10 +444,11 @@ impl GpuMiner {
             }
         };
 
-        // Native Vulkan: load pre-compiled SPIR-V (bypasses naga).
-        // All other backends (Metal, DX12, WebGPU): use WGSL.
+        // Native Vulkan with PASSTHROUGH_SHADERS: load pre-compiled SPIR-V
+        // (bypasses naga). All other backends (Metal, DX12, WebGPU, Vulkan
+        // without the feature): use WGSL.
         #[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
-        let shader_module = if info.backend == wgpu::Backend::Vulkan {
+        let shader_module = if use_spirv {
             let spirv_bytes: &[u8] = include_bytes!("shader/sha256_mine_opt.spv");
             let spirv_words: Vec<u32> = spirv_bytes
                 .chunks_exact(4)
