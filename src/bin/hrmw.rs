@@ -78,6 +78,109 @@ fn open_labeled_bitcoin_wallet(
         .map_err(anyhow::Error::from)
 }
 
+/// Lazy CUDA-toolkit installer trigger. Called from `hrmw webminer start`
+/// when GPU mining is in play. On Linux with an NVIDIA driver but no
+/// `libnvrtc.so`, prompts the user (default Y) to install. On decline,
+/// double-checks (the wgpu fallback works but at lower hashrate). On
+/// non-apt distros, prints manual install steps and continues.
+///
+/// Always returns `Ok(())` — failures and refusals are non-fatal because
+/// the wgpu Vulkan/DX12 backend is a real fallback.
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+fn ensure_cuda_toolkit_if_needed(choice: CudaInstallChoice) -> anyhow::Result<()> {
+    use harmoniis_wallet::miner::cuda_install;
+    use std::io::{self, IsTerminal, Write};
+
+    if matches!(choice, CudaInstallChoice::No) {
+        return Ok(());
+    }
+
+    let Some(driver_major) = cuda_install::driver_cuda_major() else {
+        return Ok(()); // No NVIDIA driver — nothing CUDA can do here.
+    };
+    if cuda_install::nvrtc_present() {
+        return Ok(()); // Already installed.
+    }
+
+    let Some(distro) = cuda_install::detect_apt_distro() else {
+        eprintln!(
+            "NVIDIA driver detected (CUDA {driver_major}) but the CUDA toolkit \
+             is not installed. Your distro is not apt-based, so hrmw cannot \
+             install it for you — please install `cuda-nvrtc` (or the full \
+             toolkit) for CUDA {driver_major}.x from \
+             https://developer.nvidia.com/cuda-toolkit-archive"
+        );
+        eprintln!("Continuing with the wgpu Vulkan backend (slower hashrate).");
+        return Ok(());
+    };
+
+    let proceed = match choice {
+        CudaInstallChoice::Yes => true,
+        CudaInstallChoice::No => false, // unreachable due to early return
+        CudaInstallChoice::Auto => {
+            if !io::stdin().is_terminal() {
+                eprintln!(
+                    "NVIDIA driver detected (CUDA {driver_major}) but CUDA toolkit \
+                     is missing. Skipping interactive install (no TTY). Pass \
+                     --cuda-install yes to install non-interactively, or run \
+                     `hrmw webminer start` from a terminal."
+                );
+                false
+            } else {
+                eprintln!(
+                    "NVIDIA driver detected (CUDA {driver_major}) but the CUDA toolkit \
+                     is missing — the CUDA mining backend cannot run without it.\n\
+                     hrmw can install it for you from NVIDIA's official apt repo \
+                     (~300 MB, requires sudo)."
+                );
+                eprint!("Install the CUDA toolkit now? [Y/n] ");
+                io::stderr().flush().ok();
+                let mut buf = String::new();
+                io::stdin().read_line(&mut buf)?;
+                let first = buf.trim().to_ascii_lowercase();
+                if first.is_empty() || first == "y" || first == "yes" {
+                    true
+                } else {
+                    // Double-check — fallback works but is slower.
+                    eprintln!(
+                        "Without the CUDA toolkit, hrmw will fall back to the wgpu \
+                         Vulkan backend. Mining will still work, but hashrate will \
+                         be significantly lower than CUDA."
+                    );
+                    eprint!("Are you sure you want to skip the CUDA install? [y/N] ");
+                    io::stderr().flush().ok();
+                    let mut confirm = String::new();
+                    io::stdin().read_line(&mut confirm)?;
+                    let c = confirm.trim().to_ascii_lowercase();
+                    !(c == "y" || c == "yes")
+                }
+            }
+        }
+    };
+
+    if !proceed {
+        eprintln!("Continuing with the wgpu Vulkan backend.");
+        return Ok(());
+    }
+
+    eprintln!(
+        "Installing CUDA NVRTC for driver CUDA {driver_major} on {}{}...",
+        distro.id, distro.version_id
+    );
+    match cuda_install::install_nvrtc(&distro, driver_major) {
+        Ok(()) => eprintln!("CUDA toolkit installed — CUDA backend will be used."),
+        Err(e) => eprintln!("CUDA install failed: {e}\nContinuing with the wgpu Vulkan backend."),
+    }
+    Ok(())
+}
+
+/// No-op on non-Linux or builds without the cuda feature — the prompt is
+/// irrelevant because the cudarc-backed CUDA miner isn't compiled in.
+#[cfg(not(all(feature = "cuda", target_os = "linux")))]
+fn ensure_cuda_toolkit_if_needed(_choice: CudaInstallChoice) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// If `--accept-terms` was not passed on the CLI, prompt the user interactively.
 /// Returns `true` if terms were accepted, or an error if declined.
 fn prompt_accept_terms_if_needed(flag: bool) -> anyhow::Result<bool> {
@@ -1054,6 +1157,16 @@ enum CertCmd {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CudaInstallChoice {
+    /// Prompt before installing if NVRTC is missing (default).
+    Auto,
+    /// Install without prompting (non-interactive).
+    Yes,
+    /// Never install — fall back to wgpu silently.
+    No,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum WebminerBackendArg {
     Auto,
     Gpu,
@@ -1107,6 +1220,11 @@ enum WebminerCmd {
         /// Webcash wallet path (defaults to sibling webcash wallet path)
         #[arg(long, name = "webcash-wallet")]
         webcash_wallet: Option<PathBuf>,
+        /// Auto-install the CUDA toolkit if a NVIDIA driver is detected
+        /// but NVRTC is missing. Values: auto (prompt, default), yes
+        /// (install without prompting), no (skip install, fall back to wgpu).
+        #[arg(long, value_enum, default_value_t = CudaInstallChoice::Auto)]
+        cuda_install: CudaInstallChoice,
     },
     /// Stop the running miner
     Stop,
@@ -3933,9 +4051,13 @@ async fn main() -> anyhow::Result<()> {
             foreground,
             wallet: run_wallet,
             webcash_wallet,
+            cuda_install,
         }) => {
             use harmoniis_wallet::miner::{daemon, BackendChoice, MinerConfig};
             let accept_terms = prompt_accept_terms_if_needed(accept_terms)?;
+            if !cpu_only {
+                ensure_cuda_toolkit_if_needed(cuda_install)?;
+            }
             let run_wallet = run_wallet.unwrap_or_else(|| wallet_path.clone());
             let run_webcash_wallet = webcash_wallet
                 .unwrap_or_else(|| labeled_wallet_display_path(&run_wallet, "webcash", None));

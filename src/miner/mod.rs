@@ -26,6 +26,8 @@ pub mod cuda;
 #[cfg(feature = "cuda")]
 pub mod cuda_detect;
 #[cfg(feature = "native")]
+pub mod cuda_install;
+#[cfg(feature = "native")]
 pub mod daemon;
 #[cfg(feature = "cuda")]
 pub mod multi_cuda;

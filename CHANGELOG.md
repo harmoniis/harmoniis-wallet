@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.123] — 2026-04-26
+
+### Added
+
+- **Mining (Linux)**: `hrmw webminer start` now detects when the NVIDIA driver is present but the CUDA toolkit is missing (no `libnvrtc.so`) and offers to install it from NVIDIA's official apt repo. Two-tier confirmation (default Y, then explicit "are you sure?" if declined) avoids surprise sudo and keeps the wgpu Vulkan fallback as the safe path. Apt-based distros (Ubuntu/Debian and derivatives) are auto-installed; other distros print manual install instructions and continue. New `--cuda-install <auto|yes|no>` flag for non-interactive control. The cloud-provision SSH path now shares the same `nvrtc_install_command` so local and remote installers stay in sync (`miner::cuda_install`).
+
 ## [0.1.122] — 2026-04-26
 
 ### Fixed
