@@ -42,6 +42,25 @@ impl WorkUnit {
     /// 3. Base64 encode (becomes 64 bytes = one SHA256 block)
     /// 4. Compute midstate
     pub fn new(difficulty: u32, mining_amount: Amount, subsidy_amount: Amount) -> Self {
+        Self::new_with_timestamp(difficulty, mining_amount, subsidy_amount, None)
+    }
+
+    /// Like `new` but lets the caller forward-date the embedded preimage
+    /// timestamp. Used by the adaptive reporter to absorb queue pressure
+    /// inside the server's ±2h timestamp window: when many solutions are
+    /// queued, the next batch gets `timestamp = now + offset` so that by
+    /// the time the reporter submits them, the embedded timestamp is still
+    /// within the server's acceptance band. Caller is responsible for
+    /// keeping the offset within ~+115 min (= ~+2h forward bound minus
+    /// a 5-min safety margin from maaku's reference server).
+    ///
+    /// Pass `None` to use wall-clock now (the default behavior of `new`).
+    pub fn new_with_timestamp(
+        difficulty: u32,
+        mining_amount: Amount,
+        subsidy_amount: Amount,
+        timestamp_override: Option<f64>,
+    ) -> Self {
         let mut rng = rand::thread_rng();
 
         // Generate random 32-byte secrets
@@ -62,13 +81,22 @@ impl WorkUnit {
         keep_sk.fill(0);
         subsidy_sk.fill(0);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        #[cfg(target_arch = "wasm32")]
-        let timestamp = js_sys::Date::now() / 1000.0;
+        let timestamp = match timestamp_override {
+            Some(ts) => ts,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64()
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    js_sys::Date::now() / 1000.0
+                }
+            }
+        };
 
         let keep_str = keep_secret.to_string();
         let subsidy_str = subsidy_secret.to_string();

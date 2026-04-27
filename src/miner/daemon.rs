@@ -520,7 +520,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Single reporter client — the webcash.org server processes mining reports
     // sequentially (~6s each, single-threaded Tornado). Multiple connections
     // provide zero throughput benefit and add threads that steal CPU from mining.
-    let num_clients: usize = 1;
+    let _num_clients: usize = 1;
     let reporter_client = Arc::new(
         reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -555,6 +555,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     let drain_accepted = Arc::new(AtomicUsize::new(0));
     let drain_skipped = Arc::new(AtomicUsize::new(0));
     let drain_failed = Arc::new(AtomicUsize::new(0));
+    // EWMA of recent accept latency in milliseconds. Seeded at 8000ms (the
+    // documented healthy steady-state from SESSION-HANDLER), updated by the
+    // reporter on each accept. Used by the mining loop to size the
+    // forward-dated timestamp offset proportional to projected queue wait.
+    let measured_accept_ms = Arc::new(std::sync::atomic::AtomicU64::new(8000));
 
     // Background wallet insertion — separate OS thread inserts keeps into wallet
     // via /api/v1/replace immediately after each report. Runs sequentially,
@@ -610,6 +615,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_drain_accepted = drain_accepted.clone();
         let sub_drain_skipped = drain_skipped.clone();
         let sub_drain_failed = drain_failed.clone();
+        let sub_measured_accept_ms = measured_accept_ms.clone();
 
         std::thread::Builder::new()
             .name("reporter".into())
@@ -686,6 +692,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             let ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
                             sub_drain_accepted.fetch_add(1, Ordering::Relaxed);
+                            // EWMA(accept_ms): 25% weight on the new sample.
+                            let prev = sub_measured_accept_ms.load(Ordering::Relaxed);
+                            let next = ((prev as u128 * 3 + ms as u128) / 4) as u64;
+                            sub_measured_accept_ms.store(next, Ordering::Relaxed);
                             eprintln!("[reporter] accepted in {ms}ms");
 
                             if let Some(new_diff) = resp.difficulty_target {
@@ -807,6 +817,58 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
 
         // Use pre-built batch from previous cycle if available and difficulty
         // hasn't changed, otherwise create fresh with rayon parallelism.
+        // ── Adaptive forward-dating ─────────────────────────────────────
+        // The preimage timestamp is locked into the SHA256 input at WorkUnit
+        // creation. To absorb queue pressure inside the server's ±2h timestamp
+        // window (per maaku/webminer server.cc:1314-1319), we forward-date
+        // each new batch by the projected wait time of solutions reaching the
+        // reporter — but ONLY when mining outpaces reporting. With ETA per
+        // solution ≥ accept latency, the queue stays naturally bounded and
+        // forward-dating is unnecessary; we keep the embedded timestamp at
+        // wall-clock now (no behavior change vs pre-0.1.125).
+        //
+        // Offset cap: 115 minutes — just under the +2h forward bound, ~5 min
+        // safety margin. Combined with the symmetric backward window, this
+        // gives a 230-minute total in-flight validity from mining to submit.
+        const MAX_FORWARD_OFFSET_SECS: f64 = 115.0 * 60.0;
+        const THROTTLE_TRIGGER_PCT: f64 = 0.95;
+        let qd = queue_depth.load(Ordering::Relaxed) as f64;
+        let accept_secs = (measured_accept_ms.load(Ordering::Relaxed) as f64) / 1000.0;
+        let snapshot_for_eta = tracker.snapshot();
+        let hash_rate_hs = snapshot_for_eta.hash_rate_mhs * 1_000_000.0;
+        let mining_eta_secs = if hash_rate_hs > 1.0 && target.difficulty > 0 {
+            2.0_f64.powi(target.difficulty as i32) / hash_rate_hs
+        } else {
+            f64::INFINITY
+        };
+        // Only forward-date when mining outpaces reporting — the regime where
+        // the queue would otherwise grow unbounded. At ETA ≥ accept latency,
+        // the system is at or below balance and `now` is fine.
+        let imbalanced = mining_eta_secs < accept_secs;
+        let projected_wait_secs = if imbalanced { qd * accept_secs } else { 0.0 };
+        let actual_offset_secs = projected_wait_secs.min(MAX_FORWARD_OFFSET_SECS);
+        let throttle_deficit_secs =
+            (projected_wait_secs - MAX_FORWARD_OFFSET_SECS).max(0.0);
+
+        // GPU throttle (energy saver, last resort). When projected wait
+        // exceeds 95% of cap, sleep up to one accept cycle so the queue can
+        // drain before we mine more solutions we cannot redeem in time.
+        if projected_wait_secs > MAX_FORWARD_OFFSET_SECS * THROTTLE_TRIGGER_PCT {
+            let sleep_secs = throttle_deficit_secs.min(accept_secs).max(1.0);
+            eprintln!(
+                "[throttle] queue={} offset_cap_reached, sleeping {:.1}s (accept_ewma={:.1}s, eta={:.1}s)",
+                qd as usize, sleep_secs, accept_secs, mining_eta_secs
+            );
+            tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_secs)).await;
+            continue;
+        }
+
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + actual_offset_secs;
+
         let work_units = match pending_work_units.take() {
             Some(pending) if !pending.is_empty() && pending[0].difficulty == target.difficulty => {
                 pending
@@ -816,11 +878,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 let a = target.mining_amount;
                 let s = target.subsidy_amount;
                 let n = pipeline_depth;
+                let ts = timestamp_secs;
                 tokio::task::spawn_blocking(move || {
                     use rayon::prelude::*;
                     (0..n)
                         .into_par_iter()
-                        .map(|_| WorkUnit::new(d, a, s))
+                        .map(|_| WorkUnit::new_with_timestamp(d, a, s, Some(ts)))
                         .collect()
                 })
                 .await?
@@ -837,11 +900,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let next_a = target.mining_amount;
         let next_s = target.subsidy_amount;
         let next_n = pipeline_depth;
+        let next_ts = timestamp_secs;
         let next_batch_handle = tokio::task::spawn_blocking(move || {
             use rayon::prelude::*;
             (0..next_n)
                 .into_par_iter()
-                .map(|_| WorkUnit::new(next_d, next_a, next_s))
+                .map(|_| WorkUnit::new_with_timestamp(next_d, next_a, next_s, Some(next_ts)))
                 .collect::<Vec<_>>()
         });
 
@@ -875,8 +939,11 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             };
             let p_zero_pct = (-expected_solutions).exp() * 100.0;
             let qd = queue_depth.load(Ordering::Relaxed);
+            let offset_min = actual_offset_secs / 60.0;
+            let accept_ewma_s =
+                (measured_accept_ms.load(Ordering::Relaxed) as f64) / 1000.0;
             println!(
-                "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% (mine={}μs cycle={}μs)",
+                "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% offset={:.1}min accept_ewma={:.1}s (mine={}μs cycle={}μs)",
                 stats::format_hash_rate(hps),
                 target.difficulty,
                 snapshot.solutions_accepted,
@@ -885,11 +952,17 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 stats::estimate_time(hps, target.difficulty),
                 expected_solutions,
                 p_zero_pct,
+                offset_min,
+                accept_ewma_s,
                 mine_us,
                 cycle_us,
             );
-            if qd > num_clients * 2 {
-                eprintln!("⚠ Queue depth {qd} — reporters falling behind");
+            if offset_min > MAX_FORWARD_OFFSET_SECS / 60.0 * 0.8 {
+                eprintln!(
+                    "⚠ Forward offset at {:.0}% of {:.0}-min cap — GPU throttle imminent",
+                    offset_min / (MAX_FORWARD_OFFSET_SECS / 60.0) * 100.0,
+                    MAX_FORWARD_OFFSET_SECS / 60.0
+                );
             }
             last_stats_print = std::time::Instant::now();
         }

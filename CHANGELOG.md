@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.125] — 2026-04-27
+
+### Added
+
+- **Mining (native) — adaptive forward-dated timestamps**: each new WorkUnit now carries `timestamp = now + actual_offset`, where `actual_offset = min(queue_depth × measured_accept_ewma, 115 min)`. This embeds a future-dated timestamp into the SHA256 preimage so that solutions remain inside the server's ±2h acceptance window even after sitting in a deep reporter queue. Combined with the symmetric backward window, the in-flight validity budget is up to 230 minutes from mining time. Lets the GPU run at full speed while the single reporter (or a future multi-client pool) drains the queue at its own pace, instead of producing solutions that age out before they can be reported.
+- **GPU throttle (energy saver)**: when projected queue wait exceeds 95% of the 115-min cap, the mining loop sleeps for one accept cycle (`accept_ewma_s`) before building the next batch. Self-correcting — throttle dissolves automatically as the queue drains. Saves cloud power on solutions we know we cannot redeem in time.
+- **Stats line gains `offset=NN.Nmin` and `accept_ewma=Ns`** so the operator can see forward-dating and reporter latency in real time. Warning prints when offset reaches 80% of cap.
+
+### Fixed
+
+- `WorkUnit::new` retains its existing 3-arg signature (delegates to the new `WorkUnit::new_with_timestamp(... None)`); no breaking change for tests, simd_cpu, or the WASM mining path.
+
 ## [0.1.124] — 2026-04-27
 
 ### Fixed
