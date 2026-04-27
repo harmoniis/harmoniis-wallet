@@ -4396,9 +4396,7 @@ async fn main() -> anyhow::Result<()> {
                         if pending > 0 {
                             println!();
                             if let Err(e) = provision::ensure_collect_daemon(pending) {
-                                eprintln!(
-                                    "Warning: failed to ensure collect daemon: {e}"
-                                );
+                                eprintln!("Warning: failed to ensure collect daemon: {e}");
                             }
                         }
                     }
@@ -4490,9 +4488,7 @@ async fn main() -> anyhow::Result<()> {
                             if pending > 0 {
                                 println!();
                                 if let Err(e) = provision::ensure_collect_daemon(pending) {
-                                    eprintln!(
-                                        "Warning: failed to ensure collect daemon: {e}"
-                                    );
+                                    eprintln!("Warning: failed to ensure collect daemon: {e}");
                                 }
                             }
                         }

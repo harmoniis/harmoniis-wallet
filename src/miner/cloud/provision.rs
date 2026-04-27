@@ -771,11 +771,7 @@ pub fn collect_pid_file() -> std::path::PathBuf {
 /// returns `None` and sweeps the stale PID file.
 pub fn live_collect_daemon_pid() -> Option<u32> {
     let pf = collect_pid_file();
-    let pid: u32 = std::fs::read_to_string(&pf)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let pid: u32 = std::fs::read_to_string(&pf).ok()?.trim().parse().ok()?;
     // `kill -0 <pid>` returns 0 if the process exists and we own it.
     // `pgrep -af` confirms the PID matches an `hrmw` process (not some
     // unrelated PID that recycled after our daemon exited).

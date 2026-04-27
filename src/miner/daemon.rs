@@ -862,8 +862,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let imbalanced = mining_eta_secs < accept_secs;
         let projected_wait_secs = if imbalanced { qd * accept_secs } else { 0.0 };
         let actual_offset_secs = projected_wait_secs.min(MAX_FORWARD_OFFSET_SECS);
-        let throttle_deficit_secs =
-            (projected_wait_secs - MAX_FORWARD_OFFSET_SECS).max(0.0);
+        let throttle_deficit_secs = (projected_wait_secs - MAX_FORWARD_OFFSET_SECS).max(0.0);
 
         // GPU throttle (energy saver, last resort). When projected wait
         // exceeds 95% of cap, sleep up to one accept cycle so the queue can
@@ -955,8 +954,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             let p_zero_pct = (-expected_solutions).exp() * 100.0;
             let qd = queue_depth.load(Ordering::Relaxed);
             let offset_min = actual_offset_secs / 60.0;
-            let accept_ewma_s =
-                (measured_accept_ms.load(Ordering::Relaxed) as f64) / 1000.0;
+            let accept_ewma_s = (measured_accept_ms.load(Ordering::Relaxed) as f64) / 1000.0;
             println!(
                 "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% offset={:.1}min accept_ewma={:.1}s (mine={}μs cycle={}μs)",
                 stats::format_hash_rate(hps),
@@ -1052,12 +1050,15 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             eprintln!("⚠ Drain timeout (600s) — {remaining} solutions LOST (server too slow)");
             break;
         }
-        let drained_accepted =
-            drain_accepted.load(Ordering::Relaxed).saturating_sub(baseline_accepted);
-        let drained_skipped =
-            drain_skipped.load(Ordering::Relaxed).saturating_sub(baseline_skipped);
-        let drained_failed =
-            drain_failed.load(Ordering::Relaxed).saturating_sub(baseline_failed);
+        let drained_accepted = drain_accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(baseline_accepted);
+        let drained_skipped = drain_skipped
+            .load(Ordering::Relaxed)
+            .saturating_sub(baseline_skipped);
+        let drained_failed = drain_failed
+            .load(Ordering::Relaxed)
+            .saturating_sub(baseline_failed);
         println!(
             "  Draining: {remaining} remaining ({drained_accepted} accepted, {drained_skipped} skipped past-target, {drained_failed} other failures)"
         );

@@ -1051,7 +1051,8 @@ impl GpuMiner {
                     .map(|t| t.difficulty)
                     .unwrap_or(difficulty);
                 if let Some(t) = live_target.as_ref() {
-                    CACHED_TARGET.with(|c| *c.borrow_mut() = Some((t.clone(), js_sys::Date::now())));
+                    CACHED_TARGET
+                        .with(|c| *c.borrow_mut() = Some((t.clone(), js_sys::Date::now())));
                 }
                 if difficulty_achieved < current_diff {
                     web_sys::console::warn_1(
