@@ -1177,8 +1177,14 @@ async fn install_dev_remote(
         ssh_key,
         host,
         port,
+        // Build with the cuda feature on top of default `native` so the dev
+        // binary matches release CI's `native,cuda` matrix and can drive the
+        // NVIDIA backend on the cloud GPU. Without `--features cuda`, the
+        // `cuda` feature gates in `enumerate_all_devices()` compile out and
+        // hrmw silently reports "No mining devices found" even though the
+        // driver and libnvrtc are present.
         "source ~/.cargo/env && cd /root/hw && \
-         CC=gcc-10 CXX=g++-10 cargo build --release 2>&1 | tail -5",
+         CC=gcc-10 CXX=g++-10 cargo build --release --features cuda 2>&1 | tail -5",
     )
     .map_err(|e| anyhow::anyhow!("Cargo build failed: {e}"))?;
 
