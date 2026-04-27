@@ -54,12 +54,34 @@ impl Offer {
         per_gpu * self.num_gpus as f64
     }
 
-    /// Webcash.org processes mining reports sequentially at ~6s each
+    /// Webcash.org processes mining reports sequentially at ~6 s each
     /// (single-threaded Tornado). Multiple connections cascade-queue.
     const REPORT_SECONDS: f64 = 6.0;
 
+    /// Forward-dated timestamps (v0.1.125+) absorb up to this many seconds of
+    /// queued work in the server's ±2 h timestamp window — must match
+    /// `MAX_FORWARD_OFFSET_SECS` in `miner::daemon`. Solutions mined within
+    /// the burst window keep valid timestamps for the full ~230-min in-flight
+    /// validity from mining time.
+    const FORWARD_OFFSET_SECONDS: f64 = 115.0 * 60.0;
+
+    /// Typical cloud burst window before the operator destroys the instance
+    /// and lets the local collect daemon drain the queue at home cost. With
+    /// the forward-dating cap above, useful mining rate = sustained server
+    /// rate + (buffer / burst_window). Shorter bursts allow faster GPUs.
+    /// 10 min lines up with observed setup-build-mine-destroy cycle on
+    /// Vast.ai (~5 min provision + ~5 min effective mining + ~30 s teardown).
+    const TYPICAL_BURST_MINUTES: f64 = 10.0;
+
     pub fn max_solutions_per_sec() -> f64 {
-        1.0 / Self::REPORT_SECONDS
+        // Sustained throughput (server caps long-running mining)
+        let sustained = 1.0 / Self::REPORT_SECONDS;
+        // Burst headroom: forward-dating buffer divided over the burst window
+        // is the extra rate a cloud session can produce in-flight before the
+        // adaptive throttle engages.
+        let burst = (Self::FORWARD_OFFSET_SECONDS / Self::REPORT_SECONDS)
+            / (Self::TYPICAL_BURST_MINUTES * 60.0);
+        sustained + burst
     }
 
     pub fn max_useful_hashrate_ghs(difficulty: u32) -> f64 {

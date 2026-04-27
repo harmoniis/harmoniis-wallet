@@ -28,7 +28,7 @@ pub fn print_offers_table_with_difficulty(offers: &[super::vast::Offer], difficu
         let max_bw = Offer::max_useful_mem_bw(d);
         let max_ghs = Offer::max_useful_hashrate_ghs(d);
         println!(
-            "  Difficulty={d} → max useful: {:.0} GB/s mem_bw ({:.1} GH/s, {:.2} sol/s)",
+            "  Difficulty={d} → max useful: {:.0} GB/s mem_bw ({:.1} GH/s, {:.2} sol/s, w/ 115-min forward-date buffer over 10-min burst)",
             max_bw,
             max_ghs,
             Offer::max_solutions_per_sec()
@@ -797,26 +797,28 @@ pub fn print_local_collect_status() {
     println!("Local replay (drain-from-disk):");
     if let Some(pid) = &daemon_pid {
         println!("  Daemon:     RUNNING (PID {pid})");
-    } else if pending_total > keeps_total {
+    } else if pending_total > 0 {
         println!(
-            "  Daemon:     not running — `hrmw webminer collect` to drain {} unsubmitted",
-            pending_total.saturating_sub(keeps_total)
+            "  Daemon:     not running — `hrmw webminer collect` to drain {pending_total} queued"
         );
     } else {
         println!("  Daemon:     not running (queue drained)");
     }
-    let remaining = pending_total.saturating_sub(keeps_total);
+    println!("  Queue:      {pending_total} solutions in pending_solutions.log");
     println!(
-        "  Pending:    {pending_total} solutions logged, {keeps_total} accepted, {remaining} remaining, {orphans_total} orphans"
+        "  Lifetime:   {keeps_total} keeps accepted, {orphans_total} orphans (across all sessions)"
     );
-    if remaining > 0 {
-        let eta_secs = remaining as u64 * 30; // ~30 s/accept observed steady-state
+    // ETA assumes worst case: every queued line is fresh and gets submitted.
+    // Stale-skip and keeps-dedupe will both shorten the actual drain — this
+    // is an upper bound at the documented healthy server pace (~30 s/accept).
+    if pending_total > 0 {
+        let eta_secs = pending_total as u64 * 30;
         let h = eta_secs / 3600;
         let m = (eta_secs % 3600) / 60;
         if h > 0 {
-            println!("  ETA:        ~{h}h {m}m at 30s/accept");
+            println!("  ETA:        ≤{h}h {m}m at 30 s/accept (less if many already in keeps log)");
         } else {
-            println!("  ETA:        ~{m}m at 30s/accept");
+            println!("  ETA:        ≤{m}m at 30 s/accept (less if many already in keeps log)");
         }
     }
 }

@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.127] — 2026-04-27
+
+### Changed
+
+- **Cloud offer rating now factors in the 115-min forward-dating buffer.** `Offer::max_solutions_per_sec()` previously returned only the sustained server rate (`1/6 s ≈ 0.167 sol/s`, capping useful capacity at ~11.5 GH/s at difficulty 36) — which filtered out 4× and 10× 4090 instances as "wasted capacity" even though forward-dating + adaptive throttle (v0.1.125) lets a cloud burst absorb up to 1150 in-flight solutions before throttling. New formula adds a burst term: `sustained + buffer/burst_window` where `burst_window = 10 min` (the typical Vast.ai provision-mine-destroy cycle), giving a max useful of ~143 GH/s at difficulty 36. 4× 4090 (~54 GH/s) and 10× 4090 (~135 GH/s) now both rank correctly; only ≥16× class instances are filtered as truly oversized.
+- **`hrmw webminer cloud status` local-replay block is more honest:** drops the misleading "remaining = pending − keeps" calculation (the keeps log is lifetime across all sessions, pending is per-session, so subtracting saturated to 0). New display shows raw `Queue` and `Lifetime` counters separately, with an upper-bound ETA marked as such.
+
 ## [0.1.126] — 2026-04-27
 
 ### Fixed
