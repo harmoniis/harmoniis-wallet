@@ -1035,6 +1035,45 @@ impl GpuMiner {
                 let keep_str = work.keep_secret.to_string();
                 let difficulty_achieved = r.difficulty_achieved;
 
+                // Pre-submit staleness gate: re-fetch the live target. Browser
+                // mining is slow enough that the difficulty target may have
+                // adjusted between work-unit creation and solution discovery,
+                // and the preimage's committed `difficulty` field is locked
+                // into the SHA256 input. The server rejects under the
+                // "Bad timestamp" wording when committed < current; checking
+                // up-front saves the ~7-27s round-trip on a doomed report.
+                let live_target = MiningProtocol::from_network(&network)?
+                    .get_target()
+                    .await
+                    .ok();
+                let current_diff = live_target
+                    .as_ref()
+                    .map(|t| t.difficulty)
+                    .unwrap_or(difficulty);
+                if let Some(t) = live_target.as_ref() {
+                    CACHED_TARGET.with(|c| *c.borrow_mut() = Some((t.clone(), js_sys::Date::now())));
+                }
+                if difficulty_achieved < current_diff {
+                    web_sys::console::warn_1(
+                        &format!(
+                            "[mining] skipping stale (achieved {} < {})",
+                            difficulty_achieved, current_diff
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+                if work.difficulty < current_diff {
+                    web_sys::console::warn_1(
+                        &format!(
+                            "[mining] skipping stale (committed {} < {})",
+                            work.difficulty, current_diff
+                        )
+                        .into(),
+                    );
+                    continue;
+                }
+
                 // Submit report + insert with HD RECEIVE secret (inline, must complete before return)
                 super::super::wallet::webcash::submit_and_claim_mining_solution(
                     wallet, &network, &preimage, &r.hash, &keep_str,

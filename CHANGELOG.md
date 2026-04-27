@@ -7,6 +7,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.124] — 2026-04-27
+
+### Fixed
+
+- **Mining (native)**: pre-submission staleness gate on the committed difficulty embedded in the preimage. The reporter now checks `wu.difficulty < current_target` alongside the existing `difficulty_achieved < current_target` check; stale solutions are written to `miner_orphans.log` in microseconds instead of paying ~27s per server rejection. Previously, a single difficulty bump (e.g. 35 → 36) during a long mining session permanently invalidated every queued WorkUnit built before the bump; failed reports cost ~4× more than accepted ones (server runs full PoW verification *before* checking committed difficulty), so the queue would snowball and reports would surface as `HTTP 400 "Bad timestamp"` at 27s each. After the fix, the cascade math inverts and any transient stall self-corrects.
+- **Mining (WASM)**: same staleness gate before `submit_and_claim_mining_solution` — `gpu.rs::mine_and_claim` re-fetches the live target right before submit and skips solutions whose committed or achieved difficulty no longer meets the current target. Browser mining is slow enough that the target may adjust between work-unit creation and solution discovery.
+- **Cloud provisioning**: `--env dev` and `--env user` SSH flows now bootstrap NVIDIA's CUDA apt repo before installing `cuda-nvrtc-*`. Fresh cloud images (vast.ai / runpod RTX 4080S/4090) ship with the driver but no apt source for the package, so the previous fallback chain silently failed and `hrmw webminer list-devices` reported "No mining devices found." New shared `cuda_install::nvrtc_remote_install_script` detects the Ubuntu release, installs the keyring deb idempotently, then runs the existing nvrtc fallback chain.
+
+### Changed
+
+- **Drain UX**: Ctrl+C during mining now reports honest counters — `Draining: N remaining (X accepted, Y skipped past-target, Z other failures)` — instead of the misleading `~remaining × 6s` constant. With the staleness gate in place, drain typically completes in seconds rather than approaching the 600s timeout.
+- **Orphan log**: each line gains a trailing `\tcommitted=<value>` field so the embedded preimage difficulty is visible without base64-decoding the preimage.
+
 ## [0.1.123] — 2026-04-26
 
 ### Added

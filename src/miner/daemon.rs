@@ -542,9 +542,19 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         hash: [u8; 32],
         keep_secret: String,
         difficulty_achieved: u32,
+        // The difficulty value embedded in the preimage JSON at WorkUnit
+        // creation time. Locked into the SHA256 input — cannot be refreshed
+        // post-mining. The server rejects when `committed_difficulty <
+        // current_target` (under the "Bad timestamp" wording), so the
+        // reporter must short-circuit instead of paying ~27s per remote
+        // rejection.
+        committed_difficulty: u32,
     }
     let (solution_tx, solution_rx) = std::sync::mpsc::channel::<SolutionMsg>();
     let queue_depth = Arc::new(AtomicUsize::new(0));
+    let drain_accepted = Arc::new(AtomicUsize::new(0));
+    let drain_skipped = Arc::new(AtomicUsize::new(0));
+    let drain_failed = Arc::new(AtomicUsize::new(0));
 
     // Background wallet insertion — separate OS thread inserts keeps into wallet
     // via /api/v1/replace immediately after each report. Runs sequentially,
@@ -597,6 +607,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         let sub_shared_target = shared_target.clone();
         let sub_queue_depth = queue_depth.clone();
         let sub_wallet_tx = wallet_tx.clone();
+        let sub_drain_accepted = drain_accepted.clone();
+        let sub_drain_skipped = drain_skipped.clone();
+        let sub_drain_failed = drain_failed.clone();
 
         std::thread::Builder::new()
             .name("reporter".into())
@@ -605,15 +618,61 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 while let Ok(msg) = solution_rx.recv() {
                     sub_queue_depth.fetch_sub(1, Ordering::Relaxed);
 
-                    {
-                        let current_diff = sub_shared_target.read().unwrap().difficulty;
-                        if msg.difficulty_achieved < current_diff {
-                            eprintln!(
-                                "[reporter] skipping stale (diff {} < {})",
-                                msg.difficulty_achieved, current_diff
-                            );
-                            continue;
-                        }
+                    let current_diff = sub_shared_target.read().unwrap().difficulty;
+                    // (1) hash leading-zero count too low for current target.
+                    if msg.difficulty_achieved < current_diff {
+                        eprintln!(
+                            "[reporter] skipping stale (achieved {} < {})",
+                            msg.difficulty_achieved, current_diff
+                        );
+                        sub_drain_skipped.fetch_add(1, Ordering::Relaxed);
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(orphan_log_path())
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                writeln!(
+                                    f,
+                                    "{}\t0x{}\t{}\tdifficulty={}\tcommitted={}",
+                                    msg.preimage,
+                                    hex::encode(msg.hash),
+                                    msg.keep_secret,
+                                    msg.difficulty_achieved,
+                                    msg.committed_difficulty
+                                )
+                            });
+                        continue;
+                    }
+                    // (2) preimage's committed difficulty value pre-dates the
+                    // current target. The hash itself may be strong enough,
+                    // but the server rejects on `committed < current` — and
+                    // the value is part of the SHA256 input, so we cannot
+                    // re-stamp it. Skip in microseconds instead of paying
+                    // ~27s per server rejection.
+                    if msg.committed_difficulty < current_diff {
+                        eprintln!(
+                            "[reporter] skipping stale (committed {} < {})",
+                            msg.committed_difficulty, current_diff
+                        );
+                        sub_drain_skipped.fetch_add(1, Ordering::Relaxed);
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(orphan_log_path())
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                writeln!(
+                                    f,
+                                    "{}\t0x{}\t{}\tdifficulty={}\tcommitted={}",
+                                    msg.preimage,
+                                    hex::encode(msg.hash),
+                                    msg.keep_secret,
+                                    msg.difficulty_achieved,
+                                    msg.committed_difficulty
+                                )
+                            });
+                        continue;
                     }
 
                     let t0 = std::time::Instant::now();
@@ -626,6 +685,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                         Ok(resp) => {
                             let ms = t0.elapsed().as_millis();
                             sub_tracker.record_accepted();
+                            sub_drain_accepted.fetch_add(1, Ordering::Relaxed);
                             eprintln!("[reporter] accepted in {ms}ms");
 
                             if let Some(new_diff) = resp.difficulty_target {
@@ -656,6 +716,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                             let ms = t0.elapsed().as_millis();
                             let err = e.to_string();
                             if err.contains("Didn't use a new secret") {
+                                sub_drain_accepted.fetch_add(1, Ordering::Relaxed);
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -667,6 +728,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                 let _ = sub_wallet_tx.send(msg.keep_secret.clone());
                             } else {
                                 eprintln!("[reporter] FAILED in {ms}ms: {err}");
+                                sub_drain_failed.fetch_add(1, Ordering::Relaxed);
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -675,11 +737,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                         use std::io::Write;
                                         writeln!(
                                             f,
-                                            "{}\t0x{}\t{}\tdifficulty={}",
+                                            "{}\t0x{}\t{}\tdifficulty={}\tcommitted={}",
                                             msg.preimage,
                                             hex::encode(msg.hash),
                                             msg.keep_secret,
-                                            msg.difficulty_achieved
+                                            msg.difficulty_achieved,
+                                            msg.committed_difficulty
                                         )
                                     });
                             }
@@ -868,6 +931,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                     hash: solution.hash,
                     keep_secret: wu.keep_secret.to_string(),
                     difficulty_achieved: solution.difficulty_achieved,
+                    committed_difficulty: wu.difficulty,
                 });
             }
         }
@@ -877,15 +941,19 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // solutions, then join all threads. Monitor drain progress every second.
     let pending = queue_depth.load(Ordering::Relaxed);
     let snapshot = tracker.snapshot();
-    println!("Miner shutting down — draining {pending} pending solutions...");
+    println!(
+        "Miner shutting down — draining {pending} pending (stale skip in μs, fresh ~6s each, 600s drain timeout)"
+    );
     println!(
         "  Session totals: found={} accepted={} pending={}",
         snapshot.solutions_found, snapshot.solutions_accepted, pending
     );
+    let baseline_accepted = drain_accepted.load(Ordering::Relaxed);
+    let baseline_skipped = drain_skipped.load(Ordering::Relaxed);
+    let baseline_failed = drain_failed.load(Ordering::Relaxed);
     let drain_start = std::time::Instant::now();
     drop(solution_tx); // Signal EOF — threads will drain remaining and exit.
 
-    // Monitor drain progress. Server processes ~1 report / 6s sequentially.
     let drain_timeout = std::time::Duration::from_secs(600);
     loop {
         let remaining = queue_depth.load(Ordering::Relaxed);
@@ -896,8 +964,15 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             eprintln!("⚠ Drain timeout (600s) — {remaining} solutions LOST (server too slow)");
             break;
         }
-        let est_secs = (remaining as f64 * 6.0).ceil() as u64;
-        println!("  Draining: {remaining} remaining (~{est_secs}s)");
+        let drained_accepted =
+            drain_accepted.load(Ordering::Relaxed).saturating_sub(baseline_accepted);
+        let drained_skipped =
+            drain_skipped.load(Ordering::Relaxed).saturating_sub(baseline_skipped);
+        let drained_failed =
+            drain_failed.load(Ordering::Relaxed).saturating_sub(baseline_failed);
+        println!(
+            "  Draining: {remaining} remaining ({drained_accepted} accepted, {drained_skipped} skipped past-target, {drained_failed} other failures)"
+        );
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
 

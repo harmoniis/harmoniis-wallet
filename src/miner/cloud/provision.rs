@@ -1047,13 +1047,13 @@ async fn install_hrmw_remote(
     }
 
     // Ensure NVRTC is available (needed for CUDA kernel compilation at runtime).
-    // UBUNTU24 template has libcuda but not libnvrtc. Same install command
-    // string as the local `hrmw webminer start` lazy installer.
+    // UBUNTU24 template has libcuda but not libnvrtc, AND no NVIDIA apt repo.
+    // The remote script bootstraps the apt repo first, then installs nvrtc.
     let nvrtc_check =
         ssh::exec(ssh_key, host, port, "ldconfig -p | grep libnvrtc").unwrap_or_default();
     if nvrtc_check.is_empty() {
         println!("  Installing CUDA NVRTC...");
-        let cmd = crate::miner::cuda_install::nvrtc_install_command(13);
+        let cmd = crate::miner::cuda_install::nvrtc_remote_install_script(13);
         ssh::exec(ssh_key, host, port, &cmd).ok();
     }
 
@@ -1140,24 +1140,14 @@ async fn install_dev_remote(
     .map_err(|e| anyhow::anyhow!("Build tools install failed: {e}"))?;
 
     // Ensure NVRTC is available (needed for CUDA kernel compilation).
+    // The remote script bootstraps NVIDIA's apt repo if missing — fresh
+    // cloud images ship with the driver but no apt source for cuda-nvrtc-*.
     let nvrtc_check =
         ssh::exec(ssh_key, host, port, "ldconfig -p | grep libnvrtc").unwrap_or_default();
     if nvrtc_check.is_empty() {
         println!("  Installing CUDA NVRTC...");
-        ssh::exec(
-            ssh_key,
-            host,
-            port,
-            concat!(
-                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq ",
-                "cuda-nvrtc-13-0 2>/dev/null || ",
-                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-6 2>/dev/null || ",
-                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-4 2>/dev/null || ",
-                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq cuda-nvrtc-12-0 2>/dev/null || ",
-                "DEBIAN_FRONTEND=noninteractive apt-get install -yqq libnvrtc12 2>/dev/null || true",
-            ),
-        )
-        .ok();
+        let cmd = crate::miner::cuda_install::nvrtc_remote_install_script(13);
+        ssh::exec(ssh_key, host, port, &cmd).ok();
     }
 
     // Step 2: Install Rust toolchain.

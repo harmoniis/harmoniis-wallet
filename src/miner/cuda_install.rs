@@ -155,6 +155,42 @@ pub fn nvrtc_install_command(driver_major: u32) -> String {
     )
 }
 
+/// Self-contained bash script for installing NVRTC on a remote Ubuntu host
+/// over SSH. Unlike [`nvrtc_install_command`], this also bootstraps NVIDIA's
+/// CUDA apt repository if missing — fresh cloud instances ship with the
+/// NVIDIA driver but no apt source for `cuda-nvrtc-*` packages, so the
+/// fallback chain in [`nvrtc_install_command`] alone silently fails (every
+/// `apt-get install` returns "package not found", final `|| true` swallows
+/// the failure, and `hrmw webminer list-devices` later reports "No mining
+/// devices found" — observed on RTX 4080S vast.ai / runpod images).
+///
+/// The script detects the Ubuntu release on the remote and picks the
+/// matching repo segment (ubuntu2404 / ubuntu2204 / ubuntu2004), then
+/// installs the keyring deb only if not already present (idempotent), and
+/// finally runs the same fallback chain.
+pub fn nvrtc_remote_install_script(driver_major: u32) -> String {
+    let install_tail = nvrtc_install_command(driver_major);
+    format!(
+        "set -e; \
+         if [ ! -f /usr/share/keyrings/cuda-archive-keyring.gpg ] && \
+            ! ls /etc/apt/sources.list.d/ 2>/dev/null | grep -q cuda; then \
+           tmp=$(mktemp -d); \
+           release=$(lsb_release -rs 2>/dev/null | tr -d .); \
+           case \"$release\" in \
+             24*) seg=ubuntu2404 ;; \
+             22*) seg=ubuntu2204 ;; \
+             20*) seg=ubuntu2004 ;; \
+             *) seg=ubuntu2204 ;; \
+           esac; \
+           curl -fsSL --retry 3 -o \"$tmp/cuda-keyring.deb\" \
+             \"https://developer.download.nvidia.com/compute/cuda/repos/${{seg}}/x86_64/cuda-keyring_1.1-1_all.deb\"; \
+           dpkg -i \"$tmp/cuda-keyring.deb\"; \
+           rm -rf \"$tmp\"; \
+         fi; \
+         {install_tail}"
+    )
+}
+
 /// Add NVIDIA's CUDA apt repo (idempotent — skips if the keyring file
 /// already exists) and install the NVRTC package matching the driver.
 ///
