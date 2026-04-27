@@ -643,10 +643,15 @@ pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) ->
 
 // ── Shared: append remote log files to local with deduplication ────────────
 
-const REMOTE_LOG_FILES: [&str; 3] = [
+const REMOTE_LOG_FILES: [&str; 4] = [
     "/root/.harmoniis/wallet/miner_pending_solutions.log",
     "/root/.harmoniis/wallet/miner_pending_keeps.log",
     "/root/.harmoniis/wallet/miner_overflow_solutions.log",
+    // Orphans (server-rejected or stale-skipped) preserve the audit trail
+    // for diagnostics. Without this, cloud-destroy throws away the record
+    // of every solution that hit a 504/5xx or was past-target — and the
+    // operator can't tell whether a session was healthy or degraded.
+    "/root/.harmoniis/wallet/miner_orphans.log",
 ];
 
 /// Append remote solution/keep files to local copies.
@@ -749,6 +754,80 @@ pub async fn destroy_all() -> Result<()> {
     Ok(())
 }
 
+/// PID file recording the currently-running local collect daemon, if any.
+/// Used to prevent multiple daemons racing on the same `pending_solutions.log`
+/// when an operator runs several `cloud stop` / `cloud destroy` calls in a
+/// short window.
+pub fn collect_pid_file() -> std::path::PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_default()
+        .join(".harmoniis")
+        .join("wallet")
+        .join("collect.pid")
+}
+
+/// Returns `Some(pid)` if a collect daemon is currently alive (PID file
+/// present AND the recorded PID is a running `hrmw` process). Otherwise
+/// returns `None` and sweeps the stale PID file.
+pub fn live_collect_daemon_pid() -> Option<u32> {
+    let pf = collect_pid_file();
+    let pid: u32 = std::fs::read_to_string(&pf)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    // `kill -0 <pid>` returns 0 if the process exists and we own it.
+    // `pgrep -af` confirms the PID matches an `hrmw` process (not some
+    // unrelated PID that recycled after our daemon exited).
+    let alive = std::process::Command::new("pgrep")
+        .args(["-af", "hrmw webminer collect"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.split_whitespace().next() == Some(&pid.to_string()))
+        })
+        .unwrap_or(false);
+    if alive {
+        Some(pid)
+    } else {
+        let _ = std::fs::remove_file(&pf);
+        None
+    }
+}
+
+/// Spawn the local collect daemon **only if one isn't already running**.
+/// Caller passes how many entries were just queued so we can decide whether
+/// the start is necessary at all (no point spawning if the queue is empty).
+///
+/// Single source of truth for the daemon-spawn logic — replaces the
+/// duplicated inline spawn blocks in `CloudCmd::Stop` and `CloudCmd::Destroy`
+/// that previously created a new process every time, leading to N-way races
+/// between siblings on the same `pending_solutions.log`.
+pub fn ensure_collect_daemon(pending: usize) -> anyhow::Result<()> {
+    if pending == 0 {
+        return Ok(());
+    }
+    if let Some(pid) = live_collect_daemon_pid() {
+        println!(
+            "{pending} uncollected solutions found — collect daemon already running (PID {pid}), not spawning a duplicate."
+        );
+        return Ok(());
+    }
+    println!("{pending} uncollected solutions found — starting collect daemon...");
+    let exe = std::env::current_exe()?;
+    let child = std::process::Command::new(exe)
+        .args(["webminer", "collect"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    let _ = std::fs::write(collect_pid_file(), pid.to_string());
+    println!("Collect daemon started (PID {pid}).");
+    Ok(())
+}
+
 /// Print local collect-daemon status: PID, total queued solutions, count
 /// already accepted (or duplicates skipped), remaining to drain, and the
 /// approximate ETA at the documented healthy server pace (~30 s / accept).
@@ -777,17 +856,7 @@ pub fn print_local_collect_status() {
     let keeps_total = count_lines(&keeps_path);
     let orphans_total = count_lines(&orphans_path);
 
-    let daemon_pid = match std::process::Command::new("pgrep")
-        .args(["-f", "hrmw webminer collect"])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        _ => None,
-    };
+    let daemon_pid = live_collect_daemon_pid().map(|p| p.to_string());
 
     if pending_total == 0 && daemon_pid.is_none() {
         return;

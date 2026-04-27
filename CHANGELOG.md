@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.128] — 2026-04-27
+
+### Fixed
+
+- **Collect retry now persists `keep_secret` to the keeps log when the server returns "Didn't use a new secret".** Without this, a cloud session whose reports got nginx 504s (which the server still committed server-side) showed up as a perpetual round-trip: every `cloud stop` re-downloaded the same `pending_solutions.log` entries to local, every collect-daemon re-submitted them, the server re-confirmed "already accepted", but the local keeps log never grew — so the next dedup pass never recognized them, and after `if a > 0 { write(&pending, "") }` the file got cleared with no audit trail. Looked exactly like "706 solutions vanished into thin air" even though the webcash had been recovered server-side via HD walk. The fix appends `entry.keep_secret` to `pending_keep_log_path()` in the duplicate-accepted branch of `retry_pending_solutions_inner`, closing the accounting loop.
+- **`append_remote_logs` now downloads `miner_orphans.log` too.** Previously only `pending_solutions.log`, `pending_keeps.log`, and `overflow_solutions.log` came down from the cloud at stop/destroy — every server-rejected or stale-skipped record was left on the (about-to-be-destroyed) instance. Operator now retains the diagnostic trail across sessions.
+- **Collect daemon is now a singleton.** A chain of `cloud stop` followed by `cloud destroy` (or several rapid stops) used to spawn a fresh daemon every time, leaving N processes racing on the same `pending_solutions.log` file (observed: 5 simultaneous daemons after a single test session). New `provision::ensure_collect_daemon()` checks `~/.harmoniis/wallet/collect.pid` for a live `hrmw webminer collect` process before spawning; if one already exists it prints `collect daemon already running (PID X), not spawning a duplicate` and returns. Both `CloudCmd::Stop` and `CloudCmd::Destroy` now route through this single function.
+
 ## [0.1.127] — 2026-04-27
 
 ### Changed

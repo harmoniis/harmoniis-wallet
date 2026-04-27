@@ -204,6 +204,21 @@ fn retry_pending_solutions_inner(
                         let msg = e.to_string();
                         if msg.contains("Didn't use a new secret") {
                             already.fetch_add(1, Ordering::Relaxed);
+                            // Server confirms this keep_secret was already
+                            // accepted on a prior submission (often from a
+                            // cloud session where a 504 timeout made the
+                            // client think it failed even though the server
+                            // committed it). Persist it to the keeps log so
+                            // future dedup recognizes it locally and we
+                            // don't round-trip the server again next run.
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&*keeps_path)
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(f, "{}", entry.keep_secret)
+                                });
                             if verbose {
                                 println!("  [{n}/{total}] Already accepted");
                             }
