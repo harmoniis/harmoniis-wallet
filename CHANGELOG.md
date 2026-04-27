@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.126] — 2026-04-27
+
+### Fixed
+
+- **`cloud stop` no longer waits 10 minutes draining on the cloud.** The previous flow SIGINT'd the miner and polled with `pgrep -f 'webminer start'` for up to 600 s, but SSH wraps that in a `bash -c` whose own argv contains `webminer start` — so pgrep always matched its own wrapper, the polling loop never saw the miner exit, and every `cloud stop` ran the full 10-minute timeout regardless of actual queue depth. New flow: download solution files → `pkill -INT -f /root/.local/bin/hrmw` → 5 s grace → `pkill -KILL` → re-snapshot → return. The post-shutdown queue is replayed locally by the existing collect daemon, where it costs nothing instead of $1+/hr of cloud time. (Saves ~$0.18 per stop on a $0.10/hr instance, ~$2/stop on a 4× 4090 saturated session.)
+- **`pkill` matches the binary path** (`/root/.local/bin/hrmw`) instead of the substring `webminer start`. The bash wrapper holding the kill command argv contains `webminer` but not the absolute hrmw path, so the kill no longer self-matches.
+
+### Added
+
+- **`hrmw webminer cloud status` shows the local collect daemon** at the end of its output: PID (or "not running" with the command to start it), total queued solutions, accepted count, remaining count, orphans count, and an ETA at the documented healthy server pace (~30 s/accept). Operator can now see at a glance how the in-flight rescue is progressing without having to inspect logs by hand.
+- **`hrmw webminer cloud destroy` now auto-spawns the collect daemon** for any uncollected solutions in `miner_pending_solutions.log`, matching the behavior of `cloud stop`. Both rescue paths now finish the same way: instance gone, charges stopped, local replay running.
+
 ## [0.1.125] — 2026-04-27
 
 ### Added

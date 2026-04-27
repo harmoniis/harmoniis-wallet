@@ -577,78 +577,67 @@ pub async fn check_live_status(
 /// 4. Download again — catches solutions written between step 1 and shutdown
 ///
 /// No retry here — `hrmw webminer collect` handles server submission.
-/// No recovery here — caller handles `recover + transfer`.
+/// No recovery here — caller handles `recover + transfer` and (optionally) a
+/// local collect daemon to drain `miner_pending_solutions.log` at the user's
+/// home rate, free of cloud cost.
+///
+/// Design: download files → SIGINT briefly → SIGKILL → final snapshot. We
+/// **deliberately do not wait for cloud-side drain**. With forward-dated
+/// timestamps (v0.1.125+), every queued solution stays valid in the server's
+/// ±2h window for up to 230 minutes from mining time, so local replay can
+/// drain hundreds of solutions over hours at no cloud cost. The previous
+/// 600-second drain-on-cloud loop wasted ~$0.18 per stop on cheap instances
+/// and 2+ hours of cloud cost on saturated 4× 4090 sessions.
 pub async fn stop(state: &InstanceState, ssh_key: &ed25519_dalek::SigningKey) -> Result<()> {
     println!(
         "Stopping instance {} ({}x {})...",
         state.instance_id, state.num_gpus, state.gpu_name
     );
 
-    // Step 1: Snapshot solution files while miner is still running.
+    // Step 1: Snapshot solution files while miner is still running. This
+    // captures the in-flight queue — every line here will be replayed locally.
     println!("  Downloading solution files...");
-    append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
+    let n0 = append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
+    if n0 > 0 {
+        println!("  ({n0} new lines synced)");
+    }
 
-    // Step 2: SIGINT — miner enters graceful shutdown, drains pending solutions.
-    // The miner keeps reporter threads alive to drain the queue, with progress
-    // logging. It times out after 600s and writes remaining to overflow file.
+    // Step 2: SIGINT — give the miner a brief moment to flush in-memory state
+    // to disk. We then SIGKILL unconditionally; we do not block waiting for a
+    // cloud-side drain (that work happens locally now).
+    //
+    // pkill matches against the binary's absolute path so the kill command's
+    // own bash wrapper (which would otherwise contain "webminer start" in
+    // argv) does NOT match itself — this was a long-standing bug that made
+    // the polling loop never see the miner exit.
     let _ = ssh::exec(
         ssh_key,
         &state.ssh_host,
         state.ssh_port,
-        "kill -INT $(pgrep -f 'webminer start') 2>/dev/null || true",
+        "pkill -INT -f /root/.local/bin/hrmw 2>/dev/null || true",
     );
+    println!("  Waiting 5s for clean shutdown signal...");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    // Step 3: Wait for miner to exit. The drain can take minutes depending on
-    // how many solutions are queued. Monitor miner.log for progress.
-    println!("  Waiting for solution drain (up to 10 min)...");
-    let drain_max_polls = 150; // 150 × 4s = 600s = 10 min
-    for i in 0..drain_max_polls {
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        let status = ssh::exec(
-            ssh_key,
-            &state.ssh_host,
-            state.ssh_port,
-            "pgrep -f 'webminer start' > /dev/null 2>&1 && echo R || echo S",
-        )
-        .unwrap_or_default();
-        if status.contains('S') {
-            println!("  Miner exited cleanly.");
-            break;
-        }
-        // Show drain progress from miner.log
-        if i % 5 == 4 {
-            let tail = ssh::exec(
-                ssh_key,
-                &state.ssh_host,
-                state.ssh_port,
-                "tail -3 /root/miner.log 2>/dev/null | grep -i drain || true",
-            )
-            .unwrap_or_default();
-            if !tail.trim().is_empty() {
-                for line in tail.trim().lines() {
-                    println!("  {line}");
-                }
-            }
-        }
-        if i == drain_max_polls - 1 {
-            eprintln!(
-                "  Drain exceeded 10 min — force killing. Remaining solutions in overflow file."
-            );
-            let _ = ssh::exec(
-                ssh_key,
-                &state.ssh_host,
-                state.ssh_port,
-                "kill -9 $(pgrep -f 'webminer start') 2>/dev/null || true",
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
+    // Step 3: SIGKILL anything still alive. Idempotent — succeeds even if the
+    // SIGINT already terminated the process.
+    let _ = ssh::exec(
+        ssh_key,
+        &state.ssh_host,
+        state.ssh_port,
+        "pkill -KILL -f /root/.local/bin/hrmw 2>/dev/null || true",
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Step 4: Re-snapshot to capture anything written between SIGINT and
+    // SIGKILL (e.g. accepts that landed during the 5s grace window).
+    println!("  Downloading solution files (post-shutdown)...");
+    let n1 = append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
+    if n1 > 0 {
+        println!("  ({n1} new lines synced)");
     }
 
-    // Step 4: Download solution files after drain is complete.
-    println!("  Downloading solution files (post-drain)...");
-    append_remote_logs(ssh_key, &state.ssh_host, state.ssh_port);
-
-    println!("  Instance {} stopped.", state.instance_id);
+    println!("  Miner exited on instance {}.", state.instance_id);
     Ok(())
 }
 
@@ -758,6 +747,78 @@ pub async fn destroy_all() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Print local collect-daemon status: PID, total queued solutions, count
+/// already accepted (or duplicates skipped), remaining to drain, and the
+/// approximate ETA at the documented healthy server pace (~30 s / accept).
+///
+/// Called at the end of `cloud status` so the operator sees the local replay
+/// progress alongside any active cloud instances.
+pub fn print_local_collect_status() {
+    let local_dir = dirs_next::home_dir()
+        .unwrap_or_default()
+        .join(".harmoniis")
+        .join("wallet");
+
+    let pending_path = local_dir.join("miner_pending_solutions.log");
+    let keeps_path = local_dir.join("miner_pending_keeps.log");
+    let orphans_path = local_dir.join("miner_orphans.log");
+
+    let count_lines = |p: &std::path::Path| -> usize {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    };
+
+    let pending_total = count_lines(&pending_path);
+    let keeps_total = count_lines(&keeps_path);
+    let orphans_total = count_lines(&orphans_path);
+
+    let daemon_pid = match std::process::Command::new("pgrep")
+        .args(["-f", "hrmw webminer collect"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    };
+
+    if pending_total == 0 && daemon_pid.is_none() {
+        return;
+    }
+
+    println!();
+    println!("Local replay (drain-from-disk):");
+    if let Some(pid) = &daemon_pid {
+        println!("  Daemon:     RUNNING (PID {pid})");
+    } else if pending_total > keeps_total {
+        println!(
+            "  Daemon:     not running — `hrmw webminer collect` to drain {} unsubmitted",
+            pending_total.saturating_sub(keeps_total)
+        );
+    } else {
+        println!("  Daemon:     not running (queue drained)");
+    }
+    let remaining = pending_total.saturating_sub(keeps_total);
+    println!(
+        "  Pending:    {pending_total} solutions logged, {keeps_total} accepted, {remaining} remaining, {orphans_total} orphans"
+    );
+    if remaining > 0 {
+        let eta_secs = remaining as u64 * 30; // ~30 s/accept observed steady-state
+        let h = eta_secs / 3600;
+        let m = (eta_secs % 3600) / 60;
+        if h > 0 {
+            println!("  ETA:        ~{h}h {m}m at 30s/accept");
+        } else {
+            println!("  ETA:        ~{m}m at 30s/accept");
+        }
+    }
 }
 
 /// Show remote miner status.

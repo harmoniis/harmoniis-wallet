@@ -4482,6 +4482,41 @@ async fn main() -> anyhow::Result<()> {
                             println!("Transferred: {total_transferred} webcash");
                             println!("Main wallet: {main_balance}");
                         }
+
+                        // Auto-collect uncollected solutions in daemon mode —
+                        // drains the in-flight queue downloaded from the
+                        // (now-destroyed) cloud instance at home rate, no
+                        // cloud cost. Identical block to CloudCmd::Stop.
+                        let solutions_path =
+                            harmoniis_wallet::miner::daemon::pending_solutions_path();
+                        if solutions_path.exists() {
+                            let pending = std::fs::read_to_string(&solutions_path)
+                                .unwrap_or_default()
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .count();
+                            if pending > 0 {
+                                println!();
+                                println!("{pending} uncollected solutions found — starting collect daemon...");
+                                let exe = std::env::current_exe()
+                                    .context("cannot find own executable")?;
+                                match std::process::Command::new(exe)
+                                    .args(["webminer", "collect"])
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn()
+                                {
+                                    Ok(child) => println!(
+                                        "Collect daemon started (PID {}).",
+                                        child.id()
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "Warning: failed to start collect daemon: {e}"
+                                    ),
+                                }
+                            }
+                        }
                     }
                 }
                 CloudCmd::Status { instance } => {
@@ -4502,6 +4537,9 @@ async fn main() -> anyhow::Result<()> {
                             provision::status(state, &ssh_key).await?;
                         }
                     }
+                    // Show local collect-daemon progress (drains the queue
+                    // downloaded from cloud instances at home rate, no cost).
+                    provision::print_local_collect_status();
                 }
                 CloudCmd::Info { label } => {
                     let instances = cloud_config::load_instances()?;
