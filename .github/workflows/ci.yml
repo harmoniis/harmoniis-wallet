@@ -138,9 +138,17 @@ jobs:
             sudo pkg install -y curl bash ca_root_nss
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
             . "$HOME/.cargo/env"
+            # Minimal-feature smoke build — catches gating regressions
+            # when someone turns features off. Same as ubuntu/macos/windows
+            # build step.
             cargo build --release --no-default-features --features bundled-sqlite
-            cargo test --release --no-default-features --features bundled-sqlite --test unit_tests
-            cargo test --release --no-default-features --features bundled-sqlite --test local_sim
+            # Tests use default features (= native), matching what the
+            # other test OSes do. The unit tests in tests/unit/wallet.rs
+            # exercise SQLite-backed RgbWallet methods (open_memory /
+            # create / open) that only exist under the `native` feature
+            # — running them under bundled-sqlite-only fails to compile.
+            cargo test --release --test unit_tests
+            cargo test --release --test local_sim
 
   msrv:
     name: MSRV (1.86)
