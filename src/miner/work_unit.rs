@@ -81,21 +81,14 @@ impl WorkUnit {
         keep_sk.fill(0);
         subsidy_sk.fill(0);
 
+        // Server-anchored "now": once a target poll or a successful
+        // report observes the server's `Date:` header, this lifts the
+        // local clock into the server's ±2 h window even on machines
+        // whose RTC has drifted. Falls back to the bare local clock
+        // until the first observation lands. See miner::clock_skew.
         let timestamp = match timestamp_override {
             Some(ts) => ts,
-            None => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs_f64()
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    js_sys::Date::now() / 1000.0
-                }
-            }
+            None => super::clock_skew::server_now_secs_f64(),
         };
 
         let keep_str = keep_secret.to_string();

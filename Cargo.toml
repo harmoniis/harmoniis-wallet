@@ -1,6 +1,6 @@
 [package]
 name        = "harmoniis-wallet"
-version     = "0.1.128"
+version     = "0.1.129"
 edition     = "2021"
 rust-version = "1.86"
 description = "Smart-contract wallet for the Harmoniis marketplace for agents and robots (RGB contracts, Witness-backed bearer state, Webcash fees)"
@@ -125,6 +125,7 @@ num-bigint      = "0.4"
 async-trait     = "0.1"
 bytemuck        = { version = "1", features = ["derive"] }
 futures-channel = "0.3"
+httpdate        = "1"
 
 # ── Layer 1: Native wallet (optional) ────────────────────────
 webylib         = { version = "0.3.12", default-features = false }

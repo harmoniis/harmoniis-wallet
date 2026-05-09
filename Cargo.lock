@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "harmoniis-wallet"
-version = "0.1.128"
+version = "0.1.129"
 dependencies = [
  "actix",
  "actix-rt",
@@ -1840,6 +1840,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hkdf",
+ "httpdate",
  "image",
  "js-sys",
  "k256",

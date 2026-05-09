@@ -7,6 +7,34 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.129] — 2026-05-09
+
+### Fixed
+
+- **Mining (native + WASM): preimage timestamp is now server-anchored, eliminating "Bad timestamp" rejections caused by a wrong local system clock.** The webcash server (maaku reference, `server.cc:1314-1319`) accepts mining solutions whose embedded preimage timestamp is within ±2 h of the server's own clock; that timestamp is locked into the SHA256 input at WorkUnit creation, so once a solution is mined it cannot be re-stamped. v0.1.128 sourced the timestamp from a bare `SystemTime::now()`, which meant any user whose RTC had drifted (dead CMOS battery, missing NTP sync, wrong timezone applied as UTC) saw every fresh solution rejected with HTTP 400 `{"error":"Bad timestamp"}` — exactly what `ChristSimd` reported on 2026-05-08. New `miner::clock_skew` module owns one process-global atomic measuring `server_unix - local_unix`; `protocol::get_target` and `protocol::submit_report*` parse the response `Date:` header and feed it through `observe()`, and `WorkUnit::new` plus the daemon's forward-dating math now read `clock_skew::server_now_secs_f64()` (one relaxed atomic load — zero overhead on the mining hot path). The skew is seeded by the existing initial `get_target()` at daemon startup, so the very first batch already lands inside the server's window even on a machine with a 5-hour clock skew.
+- **Reporter "Bad timestamp" log line now explains *why*.** Previously the operator saw an opaque `[reporter] FAILED in 4137ms: mining report rejected (HTTP 400 Bad Request): {...}`; now the reporter decodes the embedded preimage timestamp, compares it against the anchored server time, and prints `[reporter] FAILED in Xms: Bad timestamp (preimage_ts=…, server_now≈…, delta=±Xh, clock_skew=±Xs). Solution lost — see ~/.harmoniis/wallet/miner_orphans.log for diagnosis.` Bad-timestamp orphans get a `reason=bad_timestamp` tag in the log so the trail is traceable across sessions.
+- **`retry_pending_solutions` distinguishes stale-replay from genuine failures.** If a `pending_solutions.log` survives a SIGKILL and is collected more than 2 h later, every entry's embedded timestamp is now outside the server window — no amount of retry will recover them. The retry path now recognises the `Bad timestamp` reply, routes those entries to `miner_orphans.log` with `reason=stale_replay`, clears them from the pending log, and surfaces them as a separate `Stale (>2h)` counter on `hrmw webminer collect` so operators stop seeing perpetual `Failed: N` numbers that no future retry can fix.
+
+### Added
+
+- **`hrmw webminer doctor`** (new subcommand). Runs one HTTP GET against `/api/v1/target`, prints the server URL, network round-trip, server time (from the `Date:` header), local time, and the resulting clock skew with a verdict:
+  ```
+  server:      https://webcash.org
+  rtt:         142 ms (GET /api/v1/target)
+  target:      difficulty=36 epoch=2 mining_amount=200000.0
+  local time:  2026-05-09T13:18:00Z (unix=1778677080)
+  server time: 2026-05-09T13:18:00Z (unix=1778677080)
+  clock skew:  +0s  ✓ within ±2h server window
+  ```
+  Skew ≥ 2 h prints concrete platform-specific NTP-sync instructions (macOS / Linux / Windows) and exits 2; skew between 30 min and 2 h prints a soft warning. The diagnostic is the first thing to run when a user reports "Bad timestamp".
+- **Stats line gains `clock_skew=±Xs`** so operators see the anchor health on every status print, alongside the existing `offset=NN.Nmin` and `accept_ewma=Ns` fields.
+- **Loud startup warning** when `|clock_skew| ≥ 30 min` after the initial target fetch — names the actual offset and gives the NTP-sync hint without forcing the user to run `doctor` separately.
+
+### Notes
+
+- Mining throughput is unchanged. The skew read on the hot path is a single `AtomicI64::load(Relaxed)` (~1 ns) plus one `f64` add, invisible vs the SHA256 midstate work; no new HTTP requests, no new locks, and the mining loop never blocks waiting for the server clock.
+- The fix is backwards compatible with the existing pending log format. Pending entries written by ≤ v0.1.128 still parse; if their embedded timestamp has aged past 2 h they now go to `miner_orphans.log` with `reason=stale_replay` instead of looping forever.
+
 ## [0.1.128] — 2026-04-27
 
 ### Fixed

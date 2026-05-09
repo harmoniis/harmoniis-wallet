@@ -1251,6 +1251,20 @@ enum WebminerCmd {
         #[arg(short = 'd', long)]
         daemon: bool,
     },
+    /// Diagnose miner connectivity and clock skew vs the webcash server.
+    ///
+    /// The mining preimage embeds a timestamp into the SHA256 input;
+    /// the server (maaku reference) only accepts solutions whose
+    /// timestamp is within ±2 h of its own clock. If your machine's
+    /// clock is more than ~2 h off, every freshly-mined solution gets
+    /// rejected with HTTP 400 "Bad timestamp". This command queries
+    /// the server, compares its `Date:` header against your local
+    /// clock, and prints the verdict.
+    Doctor {
+        /// Webcash server URL (default: webcash.org from webylib)
+        #[arg(long, default_value_t = webylib::NetworkMode::Production.base_url().to_string())]
+        server: String,
+    },
     /// Cloud mining on Vast.ai GPU instances
     Cloud {
         #[command(subcommand)]
@@ -1350,6 +1364,91 @@ fn format_btc_from_sats(sats: u64) -> String {
 fn resolved_esplora_url(network: Network, override_url: Option<String>) -> String {
     override_url
         .unwrap_or_else(|| DeterministicBitcoinWallet::default_esplora_url(network).to_string())
+}
+
+async fn run_webminer_doctor(server_url: &str) -> anyhow::Result<()> {
+    use harmoniis_wallet::miner::clock_skew;
+    use harmoniis_wallet::miner::protocol::MiningProtocol;
+
+    let server_url = server_url.trim_end_matches('/');
+    println!("server:      {server_url}");
+
+    let proto = MiningProtocol::new(server_url)
+        .with_context(|| format!("failed to build HTTP client for {server_url}"))?;
+
+    let started = std::time::Instant::now();
+    let target = proto
+        .get_target()
+        .await
+        .with_context(|| format!("failed to fetch /api/v1/target from {server_url}"))?;
+    let rtt_ms = started.elapsed().as_millis();
+    println!("rtt:         {rtt_ms} ms (GET /api/v1/target)");
+    println!(
+        "target:      difficulty={} epoch={} mining_amount={}",
+        target.difficulty, target.epoch, target.mining_amount
+    );
+
+    let local = std::time::SystemTime::now();
+    let local_unix = local
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    println!("local time:  {} (unix={local_unix})", format_iso8601(local));
+
+    match target.server_time {
+        Some(server_t) => {
+            let server_unix = server_t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            println!(
+                "server time: {} (unix={server_unix})",
+                format_iso8601(server_t)
+            );
+            let skew = clock_skew::current_skew_secs();
+            let pretty = clock_skew::format_skew(skew);
+            let abs = skew.unsigned_abs();
+            let two_h = 2 * 60 * 60;
+            let thirty_min = 30 * 60;
+            if abs >= two_h as u64 {
+                println!("clock skew:  {pretty}  ✗ OUTSIDE the server's ±2h window");
+                println!();
+                println!("Mining will fail with HTTP 400 \"Bad timestamp\" on every");
+                println!("solution. Sync your system clock:");
+                println!();
+                println!("  macOS:   System Settings → General → Date & Time");
+                println!("           → Set time and date automatically");
+                println!("  Linux:   sudo timedatectl set-ntp true");
+                println!("           (or: sudo ntpdate pool.ntp.org)");
+                println!("  Windows: Settings → Time & language → Date & time");
+                println!("           → Set time automatically: ON");
+                println!();
+                println!("v0.1.129+ anchors mining timestamps to the server clock,");
+                println!("so the miner still works — but please fix your clock anyway.");
+                std::process::exit(2);
+            } else if abs >= thirty_min as u64 {
+                println!("clock skew:  {pretty}  ⚠ within ±2h but >30min — sync NTP");
+            } else {
+                println!("clock skew:  {pretty}  ✓ within ±2h server window");
+            }
+        }
+        None => {
+            println!("server time: <not provided — server omitted Date: header>");
+            println!("clock skew:  unknown (cannot anchor preimage timestamp)");
+            println!();
+            println!("Mining will fall back to your local system clock for the");
+            println!("preimage timestamp. If you see HTTP 400 \"Bad timestamp\"");
+            println!("rejections, your local clock is the cause — sync NTP.");
+        }
+    }
+
+    Ok(())
+}
+
+fn format_iso8601(t: std::time::SystemTime) -> String {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    let dt: DateTime<Utc> = t.into();
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[allow(unused_variables)]
@@ -4117,6 +4216,9 @@ async fn main() -> anyhow::Result<()> {
             println!("Pending solutions: {}", r.pending);
             println!("Already accepted:  {}", r.already_accepted);
             println!("Submitted:         {}", r.submitted);
+            if r.stale_replay > 0 {
+                println!("Stale (>2h):       {}", r.stale_replay);
+            }
             println!("Failed:            {}", r.failed);
             if r.pending == 0 {
                 println!("Nothing to collect.");
@@ -4124,6 +4226,9 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 println!("Run `hrmw webcash recover` to pick up newly accepted webcash.");
             }
+        }
+        Cmd::Webminer(WebminerCmd::Doctor { server }) => {
+            run_webminer_doctor(&server).await?;
         }
         Cmd::Webminer(WebminerCmd::ReportWorker {
             server,

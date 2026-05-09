@@ -5,6 +5,8 @@
 //! is computed once, and each nonce attempt processes a single additional block.
 
 // ── Always available (WASM-safe) ────────────────────────────────
+#[cfg(any(feature = "native", feature = "wasm"))]
+pub mod clock_skew;
 pub mod nonce_table;
 pub mod sha256;
 

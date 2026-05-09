@@ -48,45 +48,117 @@ pub fn pending_solutions_path() -> PathBuf {
     default_wallet_root().join("miner_pending_solutions.log")
 }
 
+/// Decode the preimage's embedded `"timestamp": <number>` field.
+///
+/// The preimage is the base64 of a JSON prefix ending in
+/// `... "timestamp": <f64>, "nonce": ...`. We base64-decode (just
+/// once, on the rare error path) and regex-extract. Returns `None`
+/// if anything along the way fails — the caller falls back to a
+/// generic "Bad timestamp" log line.
+pub(crate) fn extract_preimage_timestamp(preimage_b64: &str) -> Option<f64> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    // Mining preimages can include trailing nonce+suffix bytes; only
+    // the prefix block is base64 of the JSON. Decode the longest
+    // prefix that's a multiple of 4 bytes — if some trailing chars
+    // are non-base64 (the suffix) the decode will fail, in which case
+    // we fall through and try the leading 64-char prefix block.
+    let candidate = if preimage_b64.len() >= 64 {
+        &preimage_b64[..(preimage_b64.len() / 4) * 4]
+    } else {
+        preimage_b64
+    };
+    let bytes = STANDARD
+        .decode(candidate)
+        .or_else(|_| STANDARD.decode(&preimage_b64[..64.min(preimage_b64.len())]))
+        .ok()?;
+    let s = std::str::from_utf8(&bytes).ok()?;
+    let key = "\"timestamp\":";
+    let idx = s.find(key)?;
+    let rest = s[idx + key.len()..].trim_start();
+    let end = rest
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e'))
+        .map(|(i, _)| i)
+        .unwrap_or(rest.len());
+    rest[..end].parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod extract_ts_tests {
+    use super::*;
+
+    #[test]
+    fn parses_real_preimage() {
+        use crate::miner::work_unit::WorkUnit;
+        use webylib::Amount;
+        let wu = WorkUnit::new(
+            28,
+            Amount::from_wats(20_000_000_000_000),
+            Amount::from_wats(1_000_000_000_000),
+        );
+        // The miner stores the FULL base64 preimage (prefix block(s) +
+        // nonces + suffix) in the persistence/orphan logs; we
+        // reconstruct that here so the parser is exercised on the same
+        // shape it sees in production.
+        let table = crate::miner::work_unit::NonceTable::new();
+        let preimage = wu.preimage_string(&table, 0, 0);
+        let parsed = extract_preimage_timestamp(&preimage)
+            .expect("should extract timestamp from valid preimage");
+        assert!(
+            (parsed - wu.timestamp).abs() < 1.0,
+            "expected {}, got {parsed}",
+            wu.timestamp
+        );
+    }
+}
+
 /// Overflow solutions — solutions that could not be submitted during burst
 /// drain on shutdown. Can be retried with `hrmw webminer collect`.
 pub fn overflow_solutions_path() -> PathBuf {
     default_wallet_root().join("miner_overflow_solutions.log")
 }
 
-/// Retry unsubmitted solutions from miner_pending_solutions.log.
+/// Outcome of a retry pass over `miner_pending_solutions.log`.
 ///
-/// Reads the file, checks each against miner_pending_keeps.log (already accepted),
-/// submits unsubmitted ones to the server, and inserts accepted keeps into the wallet.
-/// Returns (submitted, already_accepted, failed).
+/// Reads the file, checks each against `miner_pending_keeps.log`
+/// (already accepted), submits unsubmitted ones to the server, and
+/// inserts accepted keeps into the wallet.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetryOutcome {
+    pub submitted: usize,
+    pub already_accepted: usize,
+    /// Solutions whose embedded preimage timestamp landed outside the
+    /// server's ±2 h window — typically a `pending_solutions.log`
+    /// replayed long after the miner died, or a session whose local
+    /// clock was wrong at mining time. These cannot be redeemed.
+    pub stale_replay: usize,
+    pub failed: usize,
+}
+
 /// Retry unsubmitted solutions from miner_pending_solutions.log.
 /// Uses 4 parallel threads for faster submission (~28 solutions/min vs 7/min).
-/// Returns (submitted, already_accepted, failed).
-pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<(usize, usize, usize)> {
+pub fn retry_pending_solutions(server_url: &str) -> anyhow::Result<RetryOutcome> {
     retry_pending_solutions_inner(server_url, false)
 }
 
 /// Like `retry_pending_solutions` but prints per-solution feedback to stdout.
-pub fn retry_pending_solutions_verbose(server_url: &str) -> anyhow::Result<(usize, usize, usize)> {
+pub fn retry_pending_solutions_verbose(server_url: &str) -> anyhow::Result<RetryOutcome> {
     retry_pending_solutions_inner(server_url, true)
 }
 
-fn retry_pending_solutions_inner(
-    server_url: &str,
-    verbose: bool,
-) -> anyhow::Result<(usize, usize, usize)> {
+fn retry_pending_solutions_inner(server_url: &str, verbose: bool) -> anyhow::Result<RetryOutcome> {
     use super::protocol::MiningProtocol;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let solutions_path = pending_solutions_path();
     if !solutions_path.exists() {
-        return Ok((0, 0, 0));
+        return Ok(RetryOutcome::default());
     }
 
     let solutions_text = std::fs::read_to_string(&solutions_path)?;
     if solutions_text.trim().is_empty() {
-        return Ok((0, 0, 0));
+        return Ok(RetryOutcome::default());
     }
 
     // Load already-accepted keep secrets to skip them.
@@ -143,7 +215,12 @@ fn retry_pending_solutions_inner(
         if pre_already > 0 {
             let _ = std::fs::write(&solutions_path, "");
         }
-        return Ok((0, pre_already, 0));
+        return Ok(RetryOutcome {
+            submitted: 0,
+            already_accepted: pre_already,
+            stale_replay: 0,
+            failed: 0,
+        });
     }
 
     let total = entries.len();
@@ -159,6 +236,9 @@ fn retry_pending_solutions_inner(
     let keeps_path = Arc::new(keeps_path);
     let server_url = server_url.to_string();
 
+    let stale_replay = Arc::new(AtomicUsize::new(0));
+    let orphan_path = Arc::new(orphan_log_path());
+
     let mut handles = Vec::new();
     let chunk_size = total.div_ceil(RETRY_THREADS);
 
@@ -172,8 +252,10 @@ fn retry_pending_solutions_inner(
         let submitted = submitted.clone();
         let already = already.clone();
         let failed = failed.clone();
+        let stale_replay = stale_replay.clone();
         let progress = progress.clone();
         let keeps_path = keeps_path.clone();
+        let orphan_path = orphan_path.clone();
         let server_url = server_url.clone();
 
         handles.push(std::thread::spawn(move || {
@@ -222,6 +304,34 @@ fn retry_pending_solutions_inner(
                             if verbose {
                                 println!("  [{n}/{total}] Already accepted");
                             }
+                        } else if msg.contains("Bad timestamp") {
+                            // The preimage was mined more than ~2 h ago
+                            // (or the mining-time clock differed >2 h
+                            // from the server) — it cannot be re-mined,
+                            // re-stamped, or recovered. Move it to the
+                            // orphan log with a `stale_replay` reason
+                            // so the operator has the diagnostic trail
+                            // and stop counting it as a hard failure.
+                            stale_replay.fetch_add(1, Ordering::Relaxed);
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&*orphan_path)
+                                .and_then(|mut f| {
+                                    use std::io::Write;
+                                    writeln!(
+                                        f,
+                                        "{}\t0x{}\t{}\treason=stale_replay",
+                                        entry.preimage,
+                                        hex::encode(entry.hash),
+                                        entry.keep_secret
+                                    )
+                                });
+                            if verbose {
+                                println!(
+                                    "  [{n}/{total}] Stale (timestamp outside server ±2h window) — moved to orphans"
+                                );
+                            }
                         } else {
                             failed.fetch_add(1, Ordering::Relaxed);
                             if verbose {
@@ -240,13 +350,29 @@ fn retry_pending_solutions_inner(
 
     let s = submitted.load(Ordering::Relaxed);
     let a = already.load(Ordering::Relaxed);
+    let r = stale_replay.load(Ordering::Relaxed);
     let f = failed.load(Ordering::Relaxed);
 
-    if s > 0 || a > 0 {
+    // Stale-replay entries are unrecoverable — remove them from the
+    // pending log so they don't get re-tried forever. Genuine failures
+    // are kept for the next attempt.
+    if s > 0 || a > 0 || r > 0 {
         let _ = std::fs::write(&solutions_path, "");
     }
+    if r > 0 && verbose {
+        println!(
+            "  ({r} solution(s) had timestamps outside the server's ±2h window — \
+             these were mined too long ago to redeem and were moved to {})",
+            orphan_path.display()
+        );
+    }
 
-    Ok((s, a, f))
+    Ok(RetryOutcome {
+        submitted: s,
+        already_accepted: a,
+        stale_replay: r,
+        failed: f,
+    })
 }
 
 /// Check if a miner process is already running.
@@ -506,7 +632,10 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
     // Initialize nonce table (shared across all work units)
     let nonce_table = NonceTable::new();
 
-    // Fetch initial target
+    // Fetch initial target. `get_target()` also seeds `clock_skew` from
+    // the response `Date:` header, so by the time we build the first
+    // WorkUnit the embedded preimage timestamp is anchored to server
+    // time — the user's local clock no longer has to be correct.
     println!("Fetching mining target...");
     let mut target = protocol.get_target().await?;
     tracker.set_difficulty(target.difficulty);
@@ -514,6 +643,36 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
         "  difficulty={} mining_amount={} subsidy={} epoch={}",
         target.difficulty, target.mining_amount, target.subsidy_amount, target.epoch
     );
+
+    // Loud warning when local clock is far off the server. Mining still
+    // works (we anchor the preimage timestamp), but the user almost
+    // certainly wants to fix their NTP or RTC — and it explains why a
+    // user on v0.1.128 or earlier saw every fresh solution rejected as
+    // "Bad timestamp" before this anchor was added.
+    {
+        let skew = super::clock_skew::current_skew_secs();
+        if super::clock_skew::has_observed() {
+            if skew.abs() >= 30 * 60 {
+                eprintln!(
+                    "⚠ Local clock is {} vs server. Mining will work (timestamps \
+                     anchored to server), but please sync your system clock — Date \
+                     & Time → Set automatically, or `sudo ntpdate pool.ntp.org`.",
+                    super::clock_skew::format_skew(skew),
+                );
+            } else if skew.abs() >= 30 {
+                println!(
+                    "Clock skew vs server: {} (within ±2h window)",
+                    super::clock_skew::format_skew(skew)
+                );
+            }
+        } else {
+            eprintln!(
+                "Note: server did not return a Date header — preimage timestamps \
+                 will use the local clock. If solutions get rejected as \
+                 \"Bad timestamp\", run `hrmw webminer doctor` to verify."
+            );
+        }
+    }
 
     let mut last_stats_print = std::time::Instant::now();
     let target_refresh_interval = std::time::Duration::from_secs(15);
@@ -751,6 +910,59 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                                         writeln!(f, "{}", msg.keep_secret)
                                     });
                                 let _ = sub_wallet_tx.send(msg.keep_secret.clone());
+                            } else if err.contains("Bad timestamp") {
+                                // The committed-difficulty branch above
+                                // already short-circuits before submit,
+                                // so a server-side "Bad timestamp" here
+                                // means the embedded preimage timestamp
+                                // is outside the server's ±2 h window.
+                                // Decode it and tell the user *why* —
+                                // either the local clock was off when
+                                // this was mined (skew not yet seeded
+                                // on first boot), or the solution sat
+                                // in the queue past the 2 h cap.
+                                let ts = extract_preimage_timestamp(&msg.preimage);
+                                let server_now = super::clock_skew::server_now_secs_f64();
+                                let skew = super::clock_skew::current_skew_secs();
+                                match ts {
+                                    Some(t) => {
+                                        let delta = (t - server_now) as i64;
+                                        eprintln!(
+                                            "[reporter] FAILED in {ms}ms: Bad timestamp \
+                                             (preimage_ts={t:.0}, server_now≈{server_now:.0}, \
+                                             delta={}, clock_skew={}). \
+                                             Solution lost — see {} for diagnosis.",
+                                            super::clock_skew::format_skew(delta),
+                                            super::clock_skew::format_skew(skew),
+                                            orphan_log_path().display(),
+                                        );
+                                    }
+                                    None => {
+                                        eprintln!(
+                                            "[reporter] FAILED in {ms}ms: Bad timestamp \
+                                             (could not parse preimage; clock_skew={}). \
+                                             Run `hrmw webminer doctor` to verify clock.",
+                                            super::clock_skew::format_skew(skew),
+                                        );
+                                    }
+                                }
+                                sub_drain_failed.fetch_add(1, Ordering::Relaxed);
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(orphan_log_path())
+                                    .and_then(|mut f| {
+                                        use std::io::Write;
+                                        writeln!(
+                                            f,
+                                            "{}\t0x{}\t{}\tdifficulty={}\tcommitted={}\treason=bad_timestamp",
+                                            msg.preimage,
+                                            hex::encode(msg.hash),
+                                            msg.keep_secret,
+                                            msg.difficulty_achieved,
+                                            msg.committed_difficulty
+                                        )
+                                    });
                             } else {
                                 eprintln!("[reporter] FAILED in {ms}ms: {err}");
                                 sub_drain_failed.fetch_add(1, Ordering::Relaxed);
@@ -877,11 +1089,12 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             continue;
         }
 
-        let timestamp_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64()
-            + actual_offset_secs;
+        // Server-anchored "now" + forward-dating offset. Reading the
+        // skew is a single relaxed atomic load (lock-free, ~1ns), so
+        // this stays zero-cost on the mining hot path. The skew is
+        // refreshed by the target poll task and the reporter thread —
+        // never by the mining loop.
+        let timestamp_secs = super::clock_skew::server_now_secs_f64() + actual_offset_secs;
 
         let work_units = match pending_work_units.take() {
             Some(pending) if !pending.is_empty() && pending[0].difficulty == target.difficulty => {
@@ -955,8 +1168,9 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
             let qd = queue_depth.load(Ordering::Relaxed);
             let offset_min = actual_offset_secs / 60.0;
             let accept_ewma_s = (measured_accept_ms.load(Ordering::Relaxed) as f64) / 1000.0;
+            let skew_label = super::clock_skew::format_skew(super::clock_skew::current_skew_secs());
             println!(
-                "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% offset={:.1}min accept_ewma={:.1}s (mine={}μs cycle={}μs)",
+                "speed={} difficulty={} solutions={}/{} pending={} eta={} expected={:.2} p0={:.2}% offset={:.1}min accept_ewma={:.1}s clock_skew={} (mine={}μs cycle={}μs)",
                 stats::format_hash_rate(hps),
                 target.difficulty,
                 snapshot.solutions_accepted,
@@ -967,6 +1181,7 @@ pub async fn run_mining_loop(config: MinerConfig) -> anyhow::Result<()> {
                 p_zero_pct,
                 offset_min,
                 accept_ewma_s,
+                skew_label,
                 mine_us,
                 cycle_us,
             );

@@ -16,6 +16,11 @@ pub struct CollectResult {
     pub pending: usize,
     pub already_accepted: usize,
     pub submitted: usize,
+    /// Solutions whose embedded preimage timestamp was outside the
+    /// server's ±2 h window — typically a `pending_solutions.log`
+    /// replayed long after the original mining session. They cannot
+    /// be redeemed and were moved to the orphan log.
+    pub stale_replay: usize,
     pub failed: usize,
 }
 
@@ -71,11 +76,12 @@ pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
             pending: 0,
             already_accepted: already_known,
             submitted: 0,
+            stale_replay: 0,
             failed: 0,
         });
     }
 
-    let (submitted, already, failed) = if verbose {
+    let outcome = if verbose {
         daemon::retry_pending_solutions_verbose(server_url)?
     } else {
         daemon::retry_pending_solutions(server_url)?
@@ -83,9 +89,10 @@ pub fn run(server_url: &str, verbose: bool) -> anyhow::Result<CollectResult> {
 
     Ok(CollectResult {
         pending,
-        already_accepted: already,
-        submitted,
-        failed,
+        already_accepted: outcome.already_accepted,
+        submitted: outcome.submitted,
+        stale_replay: outcome.stale_replay,
+        failed: outcome.failed,
     })
 }
 

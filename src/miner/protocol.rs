@@ -6,6 +6,7 @@
 
 use reqwest::Client;
 use serde::Deserialize;
+use std::time::SystemTime;
 use webylib::Amount;
 
 /// Mining target information from the server.
@@ -16,6 +17,9 @@ pub struct TargetInfo {
     pub mining_amount: Amount,
     pub subsidy_amount: Amount,
     pub ratio: f64,
+    /// Server time parsed from the HTTP `Date:` response header. `None`
+    /// when the server is behind a proxy that strips it (defensive).
+    pub server_time: Option<SystemTime>,
 }
 
 /// Response from `/api/v1/target`.
@@ -37,6 +41,18 @@ pub struct MiningReportResponse {
     pub difficulty_target: Option<u32>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Server time parsed from the response `Date:` header (set by
+    /// `submit_report*` after deserialization; not part of the JSON
+    /// payload).
+    #[serde(skip)]
+    pub server_time: Option<SystemTime>,
+}
+
+/// Try to parse the `Date:` header from a response into `SystemTime`.
+/// Returns `None` if the header is missing or malformed.
+fn parse_date_header(headers: &reqwest::header::HeaderMap) -> Option<SystemTime> {
+    let raw = headers.get(reqwest::header::DATE)?.to_str().ok()?;
+    httpdate::parse_http_date(raw).ok()
 }
 
 /// Mining protocol client.
@@ -82,25 +98,35 @@ impl MiningProtocol {
     /// Fetch current mining target from the server.
     pub async fn get_target(&self) -> anyhow::Result<TargetInfo> {
         let url = format!("{}/api/v1/target", self.server_url);
-        let resp: TargetResponse = self.http.get(&url).send().await?.json().await?;
+        let resp = self.http.get(&url).send().await?;
+        let server_time = parse_date_header(resp.headers());
+        let parsed: TargetResponse = resp.json().await?;
 
-        let mining_amount: Amount = resp.mining_amount.parse().map_err(|e| {
-            anyhow::anyhow!("invalid mining_amount '{}': {}", resp.mining_amount, e)
+        let mining_amount: Amount = parsed.mining_amount.parse().map_err(|e| {
+            anyhow::anyhow!("invalid mining_amount '{}': {}", parsed.mining_amount, e)
         })?;
-        let subsidy_amount: Amount = resp.mining_subsidy_amount.parse().map_err(|e| {
+        let subsidy_amount: Amount = parsed.mining_subsidy_amount.parse().map_err(|e| {
             anyhow::anyhow!(
                 "invalid mining_subsidy_amount '{}': {}",
-                resp.mining_subsidy_amount,
+                parsed.mining_subsidy_amount,
                 e
             )
         })?;
 
+        // Feed the global skew anchor when available.
+        if let Some(t) = server_time {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                let _ = super::clock_skew::observe_and_warn(d.as_secs_f64());
+            }
+        }
+
         Ok(TargetInfo {
-            difficulty: resp.difficulty_target_bits,
-            epoch: resp.epoch,
+            difficulty: parsed.difficulty_target_bits,
+            epoch: parsed.epoch,
             mining_amount,
             subsidy_amount,
-            ratio: resp.ratio,
+            ratio: parsed.ratio,
+            server_time,
         })
     }
 
@@ -134,14 +160,26 @@ impl MiningProtocol {
         let resp = self.http.post(&url).body(body_str).send();
         let resp = resp.await?;
         let status_code = resp.status();
+        let server_time = parse_date_header(resp.headers());
         let body_text = resp.text().await?;
 
-        let parsed: MiningReportResponse =
+        let mut parsed: MiningReportResponse =
             serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
                 status: None,
                 difficulty_target: None,
                 error: Some(body_text.clone()),
+                server_time: None,
             });
+        parsed.server_time = server_time;
+
+        // Anchor skew on every successful response — submissions land
+        // every 6-30s under normal load, much more often than the 15s
+        // target poll, so this keeps the skew tight.
+        if let Some(t) = server_time {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                let _ = super::clock_skew::observe_and_warn(d.as_secs_f64());
+            }
+        }
 
         if let Some(ref err) = parsed.error {
             if err.contains("Didn't use a new secret") {
@@ -195,14 +233,23 @@ impl MiningProtocol {
             .send()?;
 
         let status_code = resp.status();
+        let server_time = parse_date_header(resp.headers());
         let body_text = resp.text()?;
 
-        let parsed: MiningReportResponse =
+        let mut parsed: MiningReportResponse =
             serde_json::from_str(&body_text).unwrap_or(MiningReportResponse {
                 status: None,
                 difficulty_target: None,
                 error: Some(body_text.clone()),
+                server_time: None,
             });
+        parsed.server_time = server_time;
+
+        if let Some(t) = server_time {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                let _ = super::clock_skew::observe_and_warn(d.as_secs_f64());
+            }
+        }
 
         if let Some(ref err) = parsed.error {
             if err.contains("Didn't use a new secret") {
