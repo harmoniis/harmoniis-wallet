@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
-use cudarc::nvrtc::compile_ptx;
+use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use std::sync::{Arc, Mutex};
 
 use super::sha256::{leading_zero_bits_words, state_words_to_bytes, Sha256Midstate};
@@ -33,8 +33,22 @@ pub struct CudaMiner {
 
 impl CudaMiner {
     pub async fn try_new(ordinal: usize) -> Option<Self> {
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cap = captured.clone();
         let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            let loc = info
+                .location()
+                .map(|l| format!(" at {}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            *cap.lock().unwrap() = Some(format!("{msg}{loc}"));
+        }));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Self::try_new_inner(ordinal)
         }));
@@ -42,7 +56,17 @@ impl CudaMiner {
         match result {
             Ok(opt) => opt,
             Err(_) => {
-                eprintln!("CUDA[{ordinal}]: initialization panicked (driver issue)");
+                let detail = captured
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "no panic message captured".to_string());
+                eprintln!("CUDA[{ordinal}]: initialization panicked: {detail}");
+                eprintln!(
+                    "CUDA[{ordinal}]: this usually means the CUDA driver/toolkit \
+                     is missing required symbols. Check `nvidia-smi` and your CUDA \
+                     toolkit version. Falling back to wgpu."
+                );
                 None
             }
         }
@@ -65,11 +89,24 @@ impl CudaMiner {
             }
         };
 
-        eprintln!("CUDA[{ordinal}]: compiling PTX for {device_name}...");
-        let ptx = match compile_ptx(include_str!("shader/sha256_mine.cu")) {
+        let (cc_major, cc_minor) = match ctx.compute_capability() {
+            Ok(cc) => cc,
+            Err(e) => {
+                eprintln!("CUDA[{ordinal}]: compute_capability query failed: {e}");
+                return None;
+            }
+        };
+        let arch: &'static str =
+            Box::leak(format!("sm_{cc_major}{cc_minor}").into_boxed_str());
+        eprintln!("CUDA[{ordinal}]: compiling PTX for {device_name} (arch={arch})...");
+        let opts = CompileOptions {
+            arch: Some(arch),
+            ..Default::default()
+        };
+        let ptx = match compile_ptx_with_opts(include_str!("shader/sha256_mine.cu"), opts) {
             Ok(ptx) => ptx,
             Err(e) => {
-                eprintln!("CUDA[{ordinal}]: PTX compilation failed: {e}");
+                eprintln!("CUDA[{ordinal}]: PTX compilation failed for {arch}: {e}");
                 return None;
             }
         };

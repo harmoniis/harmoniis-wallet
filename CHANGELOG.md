@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.130] — 2026-05-10
+
+### Fixed
+
+- **CUDA backend now compiles PTX for the GPU's actual compute capability.** v0.1.129 invoked `cudarc::nvrtc::compile_ptx()` with no `-arch` flag, so NVRTC fell back to a default architecture that did not match Turing (sm_75 — RTX 20 series), Ampere (sm_86 — RTX 30 series), or Ada (sm_89 — RTX 40 series); on those GPUs the loader panicked deep in cudarc and the user saw `CUDA[0]: initialization panicked (driver issue)` despite a fully installed toolkit (reported by `DesCartes` on RTX 2070 / Win11 26200). `CudaMiner::try_new_inner` now calls `ctx.compute_capability() -> (i32, i32)` and passes `CompileOptions { arch: Some("sm_<MAJ><MIN>"), .. }` to `compile_ptx_with_opts`, which forwards `--gpu-architecture=sm_XX` to NVRTC. Same change applied to `PersistentCudaMiner`. Log line now reads `CUDA[0]: compiling PTX for NVIDIA GeForce RTX 2070 (arch=sm_75)...`.
+- **CUDA panic catch-all now surfaces the real error.** The old hook installed `Box::new(|_| {})`, discarding the panic message before printing the catch-all `(driver issue)` string — the operator never saw what NVRTC or cudarc actually returned. New hook captures the panic payload (and its source location) into an `Arc<Mutex<Option<String>>>`, then prints `CUDA[0]: initialization panicked: <real message> at <file>:<line>` followed by a one-line hint pointing at `nvidia-smi` and the toolkit version.
+- **`hrmw webminer start` (no `-f`) is no longer broken.** The daemon parent re-execed `webminer run …`, but the `run` subcommand was removed in commit `8116476` (Apr 2026, "merge 'run' into 'start -f'") — only `src/bin/hrmw.rs` was updated, `daemon::start` was missed. Result: parent printed `Miner started (PID: X)`, child died immediately with `error: unrecognized subcommand 'run'` in `miner.log`. Spawn args are now `webminer start -f …` with all existing flags preserved.
+- **`--cuda-install yes` no longer silently no-ops on Windows / macOS.** The non-Linux stub was `fn(_) -> Ok(())`. When the user explicitly passes `Yes`, Windows now prints `--cuda-install yes is Linux-only. On Windows, install the CUDA toolkit manually: winget install Nvidia.CUDA, then re-run with --backend gpu.`; macOS prints a CUDA-not-supported message; other platforms fall through to a generic manual-install hint. `Auto`/`No` remain silent (unchanged behaviour).
+
+### Changed
+
+- `--cuda-install` help text now states the Linux-apt-only restriction and points Windows users at `winget install Nvidia.CUDA`, so `hrmw webminer start --help` matches reality.
+
+### Notes
+
+- Bug-set reported by `DesCartes` on 2026-05-10 (Windows 11 26200, RTX 2070, driver 596.36, CUDA toolkit 13.2). All three independent failures (CUDA arch, daemon `run`, `--cuda-install` no-op) fixed in this release.
+
 ## [0.1.129] — 2026-05-09
 
 ### Fixed

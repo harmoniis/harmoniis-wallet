@@ -433,7 +433,8 @@ pub fn start(config: &MinerConfig) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("webminer")
-        .arg("run")
+        .arg("start")
+        .arg("-f")
         .arg("--server")
         .arg(&config.server_url)
         .arg("--backend")

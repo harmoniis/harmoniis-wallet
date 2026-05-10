@@ -174,10 +174,30 @@ fn ensure_cuda_toolkit_if_needed(choice: CudaInstallChoice) -> anyhow::Result<()
     Ok(())
 }
 
-/// No-op on non-Linux or builds without the cuda feature — the prompt is
-/// irrelevant because the cudarc-backed CUDA miner isn't compiled in.
+/// On non-Linux platforms (or builds without the cuda feature) we cannot run
+/// the apt-based installer, but if the user explicitly passed `--cuda-install
+/// yes` they should be told what to do instead of silently no-op'ing.
 #[cfg(not(all(feature = "cuda", target_os = "linux")))]
-fn ensure_cuda_toolkit_if_needed(_choice: CudaInstallChoice) -> anyhow::Result<()> {
+fn ensure_cuda_toolkit_if_needed(choice: CudaInstallChoice) -> anyhow::Result<()> {
+    if matches!(choice, CudaInstallChoice::Yes) {
+        #[cfg(target_os = "windows")]
+        eprintln!(
+            "--cuda-install yes is Linux-only. On Windows, install the CUDA \
+             toolkit manually:\n    winget install Nvidia.CUDA\n\
+             then re-run with --backend gpu."
+        );
+        #[cfg(target_os = "macos")]
+        eprintln!(
+            "--cuda-install is not applicable on macOS — NVIDIA CUDA is \
+             not supported by Apple. Use --backend gpu (Metal via wgpu) \
+             or --backend cpu."
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        eprintln!(
+            "--cuda-install is Linux-only (apt-based distros). Install the \
+             CUDA toolkit and NVRTC manually for your platform."
+        );
+    }
     Ok(())
 }
 
@@ -1221,7 +1241,9 @@ enum WebminerCmd {
         #[arg(long, name = "webcash-wallet")]
         webcash_wallet: Option<PathBuf>,
         /// Auto-install the CUDA toolkit if a NVIDIA driver is detected
-        /// but NVRTC is missing. Values: auto (prompt, default), yes
+        /// but NVRTC is missing. Linux (apt-based distros) only — on
+        /// Windows install via `winget install Nvidia.CUDA`, on macOS
+        /// CUDA is unsupported. Values: auto (prompt, default), yes
         /// (install without prompting), no (skip install, fall back to wgpu).
         #[arg(long, value_enum, default_value_t = CudaInstallChoice::Auto)]
         cuda_install: CudaInstallChoice,
