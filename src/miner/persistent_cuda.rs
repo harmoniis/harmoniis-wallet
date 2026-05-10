@@ -65,8 +65,7 @@ impl PersistentCudaMiner {
         let device_name = ctx.name().ok()?;
 
         let (cc_major, cc_minor) = ctx.compute_capability().ok()?;
-        let arch: &'static str =
-            Box::leak(format!("sm_{cc_major}{cc_minor}").into_boxed_str());
+        let arch: &'static str = Box::leak(format!("sm_{cc_major}{cc_minor}").into_boxed_str());
         let opts = CompileOptions {
             arch: Some(arch),
             ..Default::default()
